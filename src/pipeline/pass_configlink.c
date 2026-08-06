@@ -14,7 +14,6 @@
 #include "foundation/hash_table.h"
 #include "foundation/log.h"
 #include "foundation/compat.h"
-#include "foundation/dyn_array.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -61,25 +60,19 @@ static bool is_dep_section(const char *s) {
 
 /* ── Strategy 1: Config Key → Code Symbol ───────────────────────── */
 
-/* Canonical candidate order (determinism). The label indexes both collectors
- * below walk are gbuf insertion order = parallel-extraction merge order,
- * which varies run to run. Sorting by a pure content key first is what keeps
- * candidate and pattern-group iteration order — and therefore the emitted
+/* Canonical candidate order (determinism). Both collectors below fill a
+ * fixed-capacity array and stop at max_out; the label indexes they walk are
+ * gbuf insertion order = parallel-extraction merge order, which varies run to
+ * run. On a repo with more candidates than the cap, sorting by a pure content
+ * key first is what keeps the surviving set — and therefore the emitted
  * CONFIGURES edges — a function of the inputs rather than of worker
  * scheduling. Tie-breaks stay content-only: node ids are handed out in merge
  * order, so an id tie-break belongs in no canonical comparator. */
 enum {
-    CANON_CMP_LESS = -1,  /* qsort: left sorts before right */
-    CANON_CMP_GREATER = 1 /* qsort: left sorts after right */
+    CANON_CMP_LESS = -1,   /* qsort: left sorts before right */
+    CANON_CMP_GREATER = 1, /* qsort: left sorts after right */
+    CANON_CAP_BUF = 32     /* decimal rendering of a cap value */
 };
-
-/* Box a small non-negative integer as a hash-table value (memcpy avoids the
- * strict-aliasing UB of a bare int-to-pointer cast). */
-static inline void *intptr_to_ptr(intptr_t v) {
-    void *p;
-    memcpy(&p, &v, sizeof(p));
-    return p;
-}
 
 static int cmp_node_ptr_canonical(const void *pa, const void *pb) {
     const cbm_gbuf_node_t *a = *(const cbm_gbuf_node_t *const *)pa;
@@ -104,6 +97,14 @@ static int cmp_node_ptr_canonical(const void *pa, const void *pb) {
     return strcmp(na, nb);
 }
 
+/* A filled-to-capacity collector dropped candidates; say so rather than
+ * truncating silently. */
+static void log_candidate_truncation(const char *side, int cap) {
+    char cap_buf[CANON_CAP_BUF];
+    snprintf(cap_buf, sizeof(cap_buf), "%d", cap);
+    cbm_log_info("configlinker.truncated", "side", side, "cap", cap_buf);
+}
+
 /* Heap copy of `nodes` sorted by cmp_node_ptr_canonical. Returns NULL (and
  * leaves the caller on the unsorted borrowed array) only on allocation
  * failure, which degrades determinism but never correctness. */
@@ -126,56 +127,51 @@ typedef struct {
     char name[CBM_SZ_256];
 } config_entry_t;
 
-typedef CBM_DYN_ARRAY(config_entry_t) config_entry_list_t;
-
-/* True when every underscore-separated token in `norm` is at least 3 chars. */
-static bool all_tokens_long_enough(const char *norm) {
-    const char *p = norm;
-    while (*p) {
-        const char *end = strchr(p, '_');
-        size_t tlen = end ? (size_t)(end - p) : strlen(p);
-        if (tlen < CBM_SZ_3) {
-            return false;
-        }
-        p = end ? end + SKIP_ONE : p + tlen;
-    }
-    return true;
-}
-
-/* A config-side candidate: lives in a config file and normalizes to ≥2 tokens
- * of ≥3 chars each. Fills `norm_out` when it qualifies. */
-static bool config_candidate_key(const cbm_gbuf_node_t *node, char *norm_out, size_t norm_sz) {
-    if (!cbm_has_config_extension(node->file_path)) {
-        return false;
-    }
-    if (cbm_normalize_config_key(node->name, norm_out, norm_sz) < PAIR_LEN) {
-        return false;
-    }
-    return all_tokens_long_enough(norm_out);
-}
-
-/* Collect config Variable nodes with ≥2 tokens, each ≥3 chars. Unbounded —
- * grows to fit the repo instead of dropping candidates past a fixed cap. */
-static config_entry_list_t collect_config_entries(const cbm_gbuf_node_t *const *vars,
-                                                  int var_count) {
-    config_entry_list_t out = {0};
+/* Collect config Variable nodes with ≥2 tokens, each ≥3 chars. */
+static int collect_config_entries(const cbm_gbuf_node_t *const *vars, int var_count,
+                                  config_entry_t *out, int max_out) {
+    int n = 0;
     const cbm_gbuf_node_t **sorted = canonical_node_copy(vars, var_count);
     if (sorted) {
         vars = sorted;
     }
-    for (int i = 0; i < var_count; i++) {
-        char norm[CBM_SZ_256];
-        if (!config_candidate_key(vars[i], norm, sizeof(norm))) {
+    for (int i = 0; i < var_count && n < max_out; i++) {
+        if (!cbm_has_config_extension(vars[i]->file_path)) {
             continue;
         }
-        config_entry_t entry;
-        entry.node_id = vars[i]->id;
-        snprintf(entry.normalized, sizeof(entry.normalized), "%s", norm);
-        snprintf(entry.name, sizeof(entry.name), "%s", vars[i]->name);
-        cbm_da_push(&out, entry);
+
+        char norm[CBM_SZ_256];
+        int tokens = cbm_normalize_config_key(vars[i]->name, norm, sizeof(norm));
+        if (tokens < PAIR_LEN) {
+            continue;
+        }
+
+        /* Check all tokens ≥3 chars */
+        bool all_long = true;
+        const char *p = norm;
+        while (*p) {
+            const char *end = strchr(p, '_');
+            size_t tlen = end ? (size_t)(end - p) : strlen(p);
+            if (tlen < CBM_SZ_3) {
+                all_long = false;
+                break;
+            }
+            p = end ? end + SKIP_ONE : p + tlen;
+        }
+        if (!all_long) {
+            continue;
+        }
+
+        out[n].node_id = vars[i]->id;
+        snprintf(out[n].normalized, sizeof(out[n].normalized), "%s", norm);
+        snprintf(out[n].name, sizeof(out[n].name), "%s", vars[i]->name);
+        n++;
+    }
+    if (n == max_out) {
+        log_candidate_truncation("config", max_out);
     }
     free((void *)sorted);
-    return out;
+    return n;
 }
 
 /* Collect code nodes (Function/Variable/Class/Struct) not from config files. */
@@ -184,288 +180,47 @@ typedef struct {
     char normalized[CBM_SZ_256];
 } code_entry_t;
 
-typedef CBM_DYN_ARRAY(code_entry_t) code_entry_list_t;
-
-/* A code-side candidate: lives outside config files and normalizes to a
- * non-empty key. Fills `norm_out` when it qualifies. */
-static bool code_candidate_key(const cbm_gbuf_node_t *node, char *norm_out, size_t norm_sz) {
-    if (cbm_has_config_extension(node->file_path)) {
-        return false;
-    }
-    int tokens = cbm_normalize_config_key(node->name, norm_out, norm_sz);
-    return tokens != 0 && norm_out[0] != '\0';
-}
-
-/* Append every qualifying node of one label, in canonical order. */
-static void collect_code_label(cbm_gbuf_t *gb, const char *label, code_entry_list_t *out) {
-    const cbm_gbuf_node_t **nodes = NULL;
-    int count = 0;
-    if (cbm_gbuf_find_by_label(gb, label, &nodes, &count) != 0) {
-        return;
-    }
-
-    /* Canonical order — see cmp_node_ptr_canonical. Emission order then stays
-     * a pure function of content rather than of gbuf merge order. */
-    const cbm_gbuf_node_t **sorted = canonical_node_copy(nodes, count);
-    const cbm_gbuf_node_t *const *scan = sorted ? sorted : nodes;
-
-    for (int i = 0; i < count; i++) {
-        char norm[CBM_SZ_256];
-        if (!code_candidate_key(scan[i], norm, sizeof(norm))) {
-            continue;
-        }
-        code_entry_t entry;
-        entry.node_id = scan[i]->id;
-        snprintf(entry.normalized, sizeof(entry.normalized), "%s", norm);
-        cbm_da_push(out, entry);
-    }
-    /* gbuf data is borrowed — only the sorted copy is owned */
-    free((void *)sorted);
-}
-
-static code_entry_list_t collect_code_entries(cbm_gbuf_t *gb) {
-    code_entry_list_t out = {0};
+static int collect_code_entries(cbm_gbuf_t *gb, code_entry_t *out, int max_out) {
+    int n = 0;
     /* "Struct" alongside "Class": a config key may name a Go/Rust/Swift/D struct
      * type, which is now labelled "Struct" — keep it linkable. */
     static const char *labels[] = {"Function", "Variable", "Class", "Struct", NULL};
 
-    for (int li = 0; labels[li]; li++) {
-        collect_code_label(gb, labels[li], &out);
-    }
-    return out;
-}
-
-/* ── Strategy 1: multi-pattern scan (Aho-Corasick) ──────────────────
- * Distinct config `normalized` strings are patterns; each code `normalized`
- * string is scanned once. This replaces an O(config × code) nested loop with
- * a linear (sum-of-pattern-lengths + sum-of-text-lengths) scan. */
-
-typedef CBM_DYN_ARRAY(int) int_list_t;
-
-typedef struct {
-    const char *pattern;   /* borrowed: a config_entries[*].normalized buffer */
-    int_list_t config_idx; /* indices into config_entries sharing this pattern */
-} pattern_group_t;
-
-typedef CBM_DYN_ARRAY(pattern_group_t) pattern_group_list_t;
-
-enum { PATTERN_GROUP_NONE = -1 }; /* find_or_create_group: allocation failed, no group index */
-
-/* Look up (or create) the pattern group for `norm` in `pattern_to_group`.
- * Returns the group index, or PATTERN_GROUP_NONE on allocation failure (OOM:
- * caller drops the entry rather than crash). */
-static int find_or_create_group(pattern_group_list_t *groups, CBMHashTable *pattern_to_group,
-                                const char *norm) {
-    void *found = cbm_ht_get(pattern_to_group, norm);
-    if (found) {
-        return (int)((intptr_t)found - SKIP_ONE);
-    }
-
-    pattern_group_t group = {0};
-    group.pattern = norm;
-    int gi = groups->count;
-    cbm_da_push(groups, group);
-    if (groups->count <= gi) {
-        return PATTERN_GROUP_NONE; /* OOM: push dropped silently, group not recorded */
-    }
-    cbm_ht_set(pattern_to_group, norm, intptr_to_ptr(gi + SKIP_ONE));
-    return gi;
-}
-
-/* Group config entries by distinct normalized string, preserving both group
- * discovery order and, within a group, config_entries order — so pattern
- * iteration order stays a pure function of the (already canonical) input. */
-static pattern_group_list_t build_pattern_groups(const config_entry_t *config_entries,
-                                                 int config_count) {
-    pattern_group_list_t groups = {0};
-    CBMHashTable *pattern_to_group = cbm_ht_create((uint32_t)config_count);
-    if (!pattern_to_group) {
-        return groups;
-    }
-
-    for (int ci = 0; ci < config_count; ci++) {
-        int gi = find_or_create_group(&groups, pattern_to_group, config_entries[ci].normalized);
-        if (!groups.items || gi < 0 || gi >= groups.count) {
+    for (int li = 0; labels[li] && n < max_out; li++) {
+        const cbm_gbuf_node_t **nodes = NULL;
+        int count = 0;
+        if (cbm_gbuf_find_by_label(gb, labels[li], &nodes, &count) != 0) {
             continue;
         }
-        cbm_da_push(&groups.items[gi].config_idx, ci);
-    }
 
-    cbm_ht_free(pattern_to_group);
-    return groups;
-}
+        /* Canonical order before the cap — see cmp_node_ptr_canonical. The cap
+         * spans the whole label list, so a later label can be cut mid-group;
+         * sorting per group keeps that cut a pure function of content. */
+        const cbm_gbuf_node_t **sorted = canonical_node_copy(nodes, count);
+        const cbm_gbuf_node_t *const *scan = sorted ? sorted : nodes;
 
-static void free_pattern_groups(pattern_group_list_t *groups) {
-    for (int i = 0; i < groups->count; i++) {
-        cbm_da_free(&groups->items[i].config_idx);
-    }
-    cbm_da_free(groups);
-}
-
-enum {
-    AC_ALPHABET_SIZE = 256, /* index children over the full byte range */
-    AC_ROOT_STATE = 0,
-    AC_NO_STATE = -1,
-};
-
-typedef struct {
-    int32_t *trans;       /* [state * AC_ALPHABET_SIZE + byte] -> next state (goto function) */
-    int32_t *fail;        /* [state] -> fail-link state */
-    int32_t *match_group; /* [state] -> pattern group ending exactly here, or AC_NO_STATE */
-    int32_t *output_link; /* [state] -> nearest ancestor state with a match, or AC_NO_STATE */
-    int32_t state_count;
-} ac_automaton_t;
-
-/* Trie-insert one pattern (goto edges only — fail/output links come later). */
-static void ac_insert(ac_automaton_t *ac, const char *pattern, int group_idx) {
-    int32_t state = AC_ROOT_STATE;
-    for (const unsigned char *p = (const unsigned char *)pattern; *p != '\0'; p++) {
-        int32_t *edge = &ac->trans[((size_t)state * AC_ALPHABET_SIZE) + *p];
-        if (*edge == AC_NO_STATE) {
-            *edge = ac->state_count++;
-        }
-        state = *edge;
-    }
-    ac->match_group[state] = group_idx;
-}
-
-/* Finalize one BFS-frontier state: collapse missing trie edges into the
- * automaton's goto function via the fail link, and compute fail/output links
- * for its real children. Split out of ac_build_links to keep both under the
- * cognitive-complexity ceiling. */
-static void ac_expand_state(ac_automaton_t *ac, int32_t u, int32_t *queue, int *qtail) {
-    for (int c = 0; c < AC_ALPHABET_SIZE; c++) {
-        int32_t *edge = &ac->trans[((size_t)u * AC_ALPHABET_SIZE) + c];
-        int32_t fail_edge = ac->trans[((size_t)ac->fail[u] * AC_ALPHABET_SIZE) + c];
-        if (*edge == AC_NO_STATE) {
-            *edge = fail_edge;
-        } else {
-            ac->fail[*edge] = fail_edge;
-            ac->output_link[*edge] =
-                ac->match_group[fail_edge] != AC_NO_STATE ? fail_edge : ac->output_link[fail_edge];
-            queue[(*qtail)++] = *edge;
-        }
-    }
-}
-
-/* BFS over the trie: converts trie-only goto edges into the full automaton
- * transition function and computes fail/output links for every state. */
-static void ac_build_links(ac_automaton_t *ac, int32_t *queue) {
-    int qhead = 0;
-    int qtail = 0;
-
-    /* Depth-1 states fail to the root; missing root edges self-loop so
-     * goto(root, c) is defined for every byte. */
-    for (int c = 0; c < AC_ALPHABET_SIZE; c++) {
-        int32_t *edge = &ac->trans[((size_t)AC_ROOT_STATE * AC_ALPHABET_SIZE) + c];
-        if (*edge == AC_NO_STATE) {
-            *edge = AC_ROOT_STATE;
-        } else {
-            ac->fail[*edge] = AC_ROOT_STATE;
-            queue[qtail++] = *edge;
-        }
-    }
-
-    while (qhead < qtail) {
-        int32_t u = queue[qhead++];
-        ac_expand_state(ac, u, queue, &qtail);
-    }
-}
-
-/* Builds the automaton over every distinct pattern in `groups`. On any
- * allocation failure, frees everything allocated so far and returns a
- * zeroed automaton (ac.trans == NULL signals "unusable" to the caller). */
-static ac_automaton_t ac_build(const pattern_group_list_t *groups) {
-    ac_automaton_t ac = {0};
-    int64_t max_states = SKIP_ONE; /* root */
-    for (int i = 0; i < groups->count; i++) {
-        max_states += (int64_t)strlen(groups->items[i].pattern);
-    }
-
-    ac.trans = malloc((size_t)max_states * AC_ALPHABET_SIZE * sizeof(*ac.trans));
-    ac.fail = calloc((size_t)max_states, sizeof(*ac.fail));
-    ac.match_group = malloc((size_t)max_states * sizeof(*ac.match_group));
-    ac.output_link = malloc((size_t)max_states * sizeof(*ac.output_link));
-    int32_t *queue = malloc((size_t)max_states * sizeof(*queue));
-
-    if (!ac.trans || !ac.fail || !ac.match_group || !ac.output_link || !queue) {
-        free(ac.trans);
-        free(ac.fail);
-        free(ac.match_group);
-        free(ac.output_link);
-        free(queue);
-        return (ac_automaton_t){0};
-    }
-
-    /* 0xFF bytes give -1 in every int32_t lane: AC_NO_STATE. */
-    memset(ac.trans, 0xFF, (size_t)max_states * AC_ALPHABET_SIZE * sizeof(*ac.trans));
-    memset(ac.match_group, 0xFF, (size_t)max_states * sizeof(*ac.match_group));
-    memset(ac.output_link, 0xFF, (size_t)max_states * sizeof(*ac.output_link));
-    ac.state_count = SKIP_ONE;
-
-    for (int i = 0; i < groups->count; i++) {
-        ac_insert(&ac, groups->items[i].pattern, i);
-    }
-    ac_build_links(&ac, queue);
-    free(queue);
-    return ac;
-}
-
-static void ac_free(ac_automaton_t *ac) {
-    free(ac->trans);
-    free(ac->fail);
-    free(ac->match_group);
-    free(ac->output_link);
-    *ac = (ac_automaton_t){0};
-}
-
-/* Emit one CONFIGURES edge per config entry in `group_idx`, at the confidence
- * dictated by whether the pattern spans the whole code string. */
-static int emit_group_edges(cbm_gbuf_t *gb, const pattern_group_list_t *groups,
-                            const config_entry_t *config_entries, const code_entry_t *code_entry,
-                            int32_t group_idx, size_t code_norm_len) {
-    const pattern_group_t *group = &groups->items[group_idx];
-    double confidence =
-        strlen(group->pattern) == code_norm_len ? CONF_KEY_EXACT : CONF_KEY_SUBSTRING;
-
-    int edges = 0;
-    for (int k = 0; k < group->config_idx.count; k++) {
-        const config_entry_t *ce = &config_entries[group->config_idx.items[k]];
-        char props[CBM_SZ_512];
-        snprintf(props, sizeof(props),
-                 "{\"strategy\":\"key_symbol\",\"confidence\":%.2f,\"config_key\":\"%s\"}",
-                 confidence, ce->name);
-        cbm_gbuf_insert_edge(gb, code_entry->node_id, ce->node_id, "CONFIGURES", props);
-        edges++;
-    }
-    return edges;
-}
-
-/* Scans one code entry's normalized name through the automaton once,
- * emitting edges for each distinct pattern group matched — deduped via
- * last_seen_code_idx so a pattern occurring twice in one name still yields
- * one edge per config entry. */
-static int ac_scan_code_entry(cbm_gbuf_t *gb, const ac_automaton_t *ac,
-                              const pattern_group_list_t *groups,
-                              const config_entry_t *config_entries, const code_entry_t *code_entry,
-                              int32_t *last_seen_code_idx, int co) {
-    int edges = 0;
-    size_t text_len = strlen(code_entry->normalized);
-    int32_t state = AC_ROOT_STATE;
-
-    for (const unsigned char *p = (const unsigned char *)code_entry->normalized; *p != '\0'; p++) {
-        state = ac->trans[((size_t)state * AC_ALPHABET_SIZE) + *p];
-        int32_t out = ac->match_group[state] != AC_NO_STATE ? state : ac->output_link[state];
-        while (out != AC_NO_STATE) {
-            int32_t gi = ac->match_group[out];
-            if (last_seen_code_idx[gi] != co) {
-                last_seen_code_idx[gi] = co;
-                edges += emit_group_edges(gb, groups, config_entries, code_entry, gi, text_len);
+        for (int i = 0; i < count && n < max_out; i++) {
+            if (cbm_has_config_extension(scan[i]->file_path)) {
+                continue;
             }
-            out = ac->output_link[out];
+
+            char norm[CBM_SZ_256];
+            int tokens = cbm_normalize_config_key(scan[i]->name, norm, sizeof(norm));
+            if (tokens == 0 || norm[0] == '\0') {
+                continue;
+            }
+
+            out[n].node_id = scan[i]->id;
+            snprintf(out[n].normalized, sizeof(out[n].normalized), "%s", norm);
+            n++;
         }
+        /* gbuf data is borrowed — only the sorted copy is owned */
+        free((void *)sorted);
     }
-    return edges;
+    if (n == max_out) {
+        log_candidate_truncation("code", max_out);
+    }
+    return n;
 }
 
 static int strategy_key_symbols(cbm_gbuf_t *gb) {
@@ -476,35 +231,43 @@ static int strategy_key_symbols(cbm_gbuf_t *gb) {
         return 0;
     }
 
-    config_entry_list_t config_entries = collect_config_entries(vars, var_count);
-    if (config_entries.count == 0) {
-        cbm_da_free(&config_entries);
+    config_entry_t config_entries[CBM_SZ_4K];
+    int config_count = collect_config_entries(vars, var_count, config_entries, CBM_SZ_4K);
+
+    if (config_count == 0) {
         return 0;
     }
 
-    code_entry_list_t code_entries = collect_code_entries(gb);
-    pattern_group_list_t groups = build_pattern_groups(config_entries.items, config_entries.count);
-    ac_automaton_t ac = ac_build(&groups);
+    code_entry_t code_entries[CBM_SZ_8K];
+    int code_count = collect_code_entries(gb, code_entries, CBM_SZ_8K);
 
     int edge_count = 0;
-    if (ac.trans && groups.count > 0) {
-        int32_t *last_seen_code_idx = malloc((size_t)groups.count * sizeof(*last_seen_code_idx));
-        if (last_seen_code_idx) {
-            for (int i = 0; i < groups.count; i++) {
-                last_seen_code_idx[i] = AC_NO_STATE;
+
+    for (int ci = 0; ci < config_count; ci++) {
+        for (int co = 0; co < code_count; co++) {
+            double confidence = 0.0;
+
+            if (strcmp(config_entries[ci].normalized, code_entries[co].normalized) == 0) {
+                /* Exact match */
+                confidence = CONF_KEY_EXACT;
+            } else if (strstr(code_entries[co].normalized, config_entries[ci].normalized) != NULL) {
+                /* Substring match */
+                confidence = CONF_KEY_SUBSTRING;
             }
-            for (int co = 0; co < code_entries.count; co++) {
-                edge_count += ac_scan_code_entry(gb, &ac, &groups, config_entries.items,
-                                                 &code_entries.items[co], last_seen_code_idx, co);
+
+            if (confidence > 0.0) {
+                char props[CBM_SZ_512];
+                snprintf(props, sizeof(props),
+                         "{\"strategy\":\"key_symbol\",\"confidence\":%.2f,\"config_key\":\"%s\"}",
+                         confidence, config_entries[ci].name);
+
+                cbm_gbuf_insert_edge(gb, code_entries[co].node_id, config_entries[ci].node_id,
+                                     "CONFIGURES", props);
+                edge_count++;
             }
-            free(last_seen_code_idx);
         }
     }
 
-    ac_free(&ac);
-    free_pattern_groups(&groups);
-    cbm_da_free(&code_entries);
-    cbm_da_free(&config_entries);
     return edge_count;
 }
 
