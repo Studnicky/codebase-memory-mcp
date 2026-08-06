@@ -595,7 +595,7 @@ static void create_folder_chain(cbm_pipeline_t *p, const char *dir, CBMHashTable
         const cbm_gbuf_node_t *fn = cbm_gbuf_find_by_qn(p->gbuf, folder_qn);
         const cbm_gbuf_node_t *pn = cbm_gbuf_find_by_qn(p->gbuf, pqn);
         if (fn && pn) {
-            cbm_gbuf_insert_edge(p->gbuf, pn->id, fn->id, "CONTAINS_FOLDER", "{}");
+            cbm_gbuf_insert_edge_props(p->gbuf, pn->id, fn->id, "CONTAINS_FOLDER", NULL, 0);
         }
         free(folder_qn);
         free(pqn_heap);
@@ -608,6 +608,31 @@ static void create_folder_chain(cbm_pipeline_t *p, const char *dir, CBMHashTable
         free(pdir);
     }
     free(walk);
+}
+
+/* Insert the HAS_BRANCH edge with git-context props mirroring
+ * cbm_git_context_props_json's schema and field order exactly. Degrades to no
+ * props when that serialization failed for this git context (props_ok false). */
+static void insert_has_branch_edge(cbm_gbuf_t *gbuf, int64_t project_id, int64_t branch_id,
+                                   const cbm_git_context_t *gc, bool props_ok) {
+    if (!props_ok) {
+        cbm_gbuf_insert_edge_props(gbuf, project_id, branch_id, "HAS_BRANCH", NULL, 0);
+        return;
+    }
+    cbm_gbuf_prop_t branch_edge_props[] = {
+        {.key = "is_git", .kind = CBM_EDGE_PROP_BOOL, .flag = gc->is_git},
+        {.key = "is_worktree", .kind = CBM_EDGE_PROP_BOOL, .flag = gc->is_worktree},
+        {.key = "is_detached", .kind = CBM_EDGE_PROP_BOOL, .flag = gc->is_detached},
+        {.key = "root_exists", .kind = CBM_EDGE_PROP_BOOL, .flag = gc->root_exists},
+        {.key = "canonical_root", .kind = CBM_EDGE_PROP_STRING, .text = gc->canonical_root},
+        {.key = "worktree_root", .kind = CBM_EDGE_PROP_STRING, .text = gc->worktree_root},
+        {.key = "git_common_dir", .kind = CBM_EDGE_PROP_STRING, .text = gc->git_common_dir},
+        {.key = "branch", .kind = CBM_EDGE_PROP_STRING, .text = gc->branch},
+        {.key = "head_sha", .kind = CBM_EDGE_PROP_STRING, .text = gc->head_sha},
+        {.key = "base_sha", .kind = CBM_EDGE_PROP_STRING, .text = gc->base_sha},
+    };
+    cbm_gbuf_insert_edge_props(gbuf, project_id, branch_id, "HAS_BRANCH", branch_edge_props,
+                               (int)(sizeof(branch_edge_props) / sizeof(branch_edge_props[0])));
 }
 
 static int pass_structure(cbm_pipeline_t *p, const cbm_file_info_t *files, int file_count) {
@@ -627,8 +652,8 @@ static int pass_structure(cbm_pipeline_t *p, const cbm_file_info_t *files, int f
                                                  0, branch_props_json);
         const cbm_gbuf_node_t *project_node = cbm_gbuf_find_by_qn(p->gbuf, p->project_name);
         if (project_node && branch_id > 0) {
-            cbm_gbuf_insert_edge(p->gbuf, project_node->id, branch_id, "HAS_BRANCH",
-                                 branch_props_json);
+            insert_has_branch_edge(p->gbuf, project_node->id, branch_id, &p->git_ctx,
+                                   branch_props_json == branch_props);
         }
     }
 
@@ -683,7 +708,7 @@ static int pass_structure(cbm_pipeline_t *p, const cbm_file_info_t *files, int f
         const cbm_gbuf_node_t *fnode = cbm_gbuf_find_by_qn(p->gbuf, file_qn);
         const cbm_gbuf_node_t *pnode = cbm_gbuf_find_by_qn(p->gbuf, parent_qn);
         if (fnode && pnode) {
-            cbm_gbuf_insert_edge(p->gbuf, pnode->id, fnode->id, "CONTAINS_FILE", "{}");
+            cbm_gbuf_insert_edge_props(p->gbuf, pnode->id, fnode->id, "CONTAINS_FILE", NULL, 0);
         }
 
         free(file_qn);
@@ -747,10 +772,13 @@ static int process_one_infra_binding(cbm_gbuf_t *gbuf, const CBMInfraBinding *ib
             return 0;
         }
     }
-    char props[CBM_SZ_512];
-    snprintf(props, sizeof(props), "{\"broker\":\"%s\",\"topic\":\"%s\",\"endpoint\":\"%s\"}",
-             ib->broker ? ib->broker : "async", ib->source_name, ib->target_url);
-    cbm_gbuf_insert_edge(gbuf, topic_route_id, url_route_id, "INFRA_MAPS", props);
+    cbm_gbuf_prop_t infra_map_props[] = {
+        {.key = "broker", .kind = CBM_EDGE_PROP_STRING, .text = ib->broker ? ib->broker : "async"},
+        {.key = "topic", .kind = CBM_EDGE_PROP_STRING, .text = ib->source_name},
+        {.key = "endpoint", .kind = CBM_EDGE_PROP_STRING, .text = ib->target_url},
+    };
+    cbm_gbuf_insert_edge_props(gbuf, topic_route_id, url_route_id, "INFRA_MAPS", infra_map_props,
+                               (int)(sizeof(infra_map_props) / sizeof(infra_map_props[0])));
     return SKIP_ONE;
 }
 

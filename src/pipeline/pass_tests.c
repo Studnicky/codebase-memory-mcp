@@ -242,7 +242,7 @@ static int create_tests_edges(cbm_pipeline_ctx_t *ctx) {
             continue;
         }
 
-        cbm_gbuf_insert_edge(ctx->gbuf, src->id, tgt->id, "TESTS", "{}");
+        cbm_gbuf_insert_edge_props(ctx->gbuf, src->id, tgt->id, "TESTS", NULL, 0);
         count++;
     }
     return count;
@@ -275,7 +275,7 @@ static int create_tests_file_edges(cbm_pipeline_ctx_t *ctx) {
         free(prod_path);
 
         if (prod_node && fnode->id != prod_node->id) {
-            cbm_gbuf_insert_edge(ctx->gbuf, fnode->id, prod_node->id, "TESTS_FILE", "{}");
+            cbm_gbuf_insert_edge_props(ctx->gbuf, fnode->id, prod_node->id, "TESTS_FILE", NULL, 0);
             count++;
         }
     }

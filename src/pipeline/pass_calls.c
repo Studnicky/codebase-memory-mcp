@@ -15,6 +15,9 @@ enum { PC_RING = 4, PC_RING_MASK = 3, PC_SIG_SCAN = 15, PC_REGEX_GRP = 2 };
 /* Confidence for a service-pattern HTTP/ASYNC edge emitted when registry
  * resolution is empty (external, unindexed client library) — see #523. */
 #define PC_SVC_PATTERN_CONF 0.5
+/* Confidence for a CALLS edge inferred from a FastAPI Depends() signature
+ * reference. */
+#define PC_DEPENDS_CONFIDENCE 0.95
 #include "pipeline/pipeline.h"
 #include <stdint.h>
 #include "pipeline/pipeline_internal.h"
@@ -191,27 +194,26 @@ static void handle_route_registration(cbm_pipeline_ctx_t *ctx, const CBMCall *ca
     snprintf(route_props, sizeof(route_props), "{\"method\":\"%s\"}", method ? method : "ANY");
     int64_t route_id = cbm_gbuf_upsert_node(ctx->gbuf, "Route", call->first_string_arg, route_qn,
                                             "", 0, 0, route_props);
-    char esc_cn[CBM_SZ_256]; /* sliced source text: escape quotes/newlines */
-    char esc_fa[CBM_SZ_256];
-    cbm_json_escape(esc_cn, sizeof(esc_cn), call->callee_name);
-    cbm_json_escape(esc_fa, sizeof(esc_fa), call->first_string_arg);
-    char props[CBM_SZ_512];
-    snprintf(props, sizeof(props),
-             "{\"callee\":\"%s\",\"url_path\":\"%s\",\"via\":\"route_registration\"}", esc_cn,
-             esc_fa);
-    cbm_gbuf_insert_edge(ctx->gbuf, source_node->id, route_id, "CALLS", props);
+    enum { ROUTE_CALLS_PROP_COUNT = 3 };
+    cbm_gbuf_prop_t call_props[ROUTE_CALLS_PROP_COUNT] = {
+        {.key = "callee", .kind = CBM_EDGE_PROP_STRING, .text = call->callee_name},
+        {.key = "url_path", .kind = CBM_EDGE_PROP_STRING, .text = call->first_string_arg},
+        {.key = "via", .kind = CBM_EDGE_PROP_STRING, .text = "route_registration"},
+    };
+    cbm_gbuf_insert_edge_props(ctx->gbuf, source_node->id, route_id, "CALLS", call_props,
+                               ROUTE_CALLS_PROP_COUNT);
     if (call->second_arg_name != NULL && call->second_arg_name[0] != '\0') {
         cbm_resolution_t hres = cbm_registry_resolve(ctx->registry, call->second_arg_name,
                                                      module_qn, imp_keys, imp_vals, imp_count);
         if (hres.qualified_name != NULL && hres.qualified_name[0] != '\0') {
             const cbm_gbuf_node_t *handler = cbm_gbuf_find_by_qn(ctx->gbuf, hres.qualified_name);
             if (handler != NULL) {
-                char hprops[CBM_SZ_1K]; /* must exceed escaped value + wrapper or snprintf cuts the
-                                           closing brace */
-                char esc_h[CBM_SZ_512];
-                cbm_json_escape(esc_h, sizeof(esc_h), hres.qualified_name);
-                snprintf(hprops, sizeof(hprops), "{\"handler\":\"%s\"}", esc_h);
-                cbm_gbuf_insert_edge(ctx->gbuf, handler->id, route_id, "HANDLES", hprops);
+                enum { HANDLES_PROP_COUNT = 1 };
+                cbm_gbuf_prop_t handles_props[HANDLES_PROP_COUNT] = {
+                    {.key = "handler", .kind = CBM_EDGE_PROP_STRING, .text = hres.qualified_name},
+                };
+                cbm_gbuf_insert_edge_props(ctx->gbuf, handler->id, route_id, "HANDLES",
+                                           handles_props, HANDLES_PROP_COUNT);
             }
         }
     }
@@ -253,31 +255,29 @@ static int64_t create_svc_route_node(cbm_pipeline_ctx_t *ctx, const char *url, c
  * to CALLS: route/config edge props feed full-only predump passes
  * (create_route_nodes/create_data_flows), so altering them desyncs full vs
  * incremental indexing. */
-/* Append a ,"args":[{"i":0,"e":"<expr>","v":"<value>"},...] field onto a CALLS
- * edge's JSON props (the props buffer ends in '}'). The sequential pass omitted
- * this, so data_flow mode had no argument expressions to surface for small
- * (< 50 file) repos that take the sequential path (#514). Mirrors the parallel
- * path's append_args_json shape so both pipelines agree. */
-static void calls_append_args(char *props, size_t cap, const CBMCall *call) {
-    if (!call || call->arg_count <= 0) {
-        return;
+/* Number of edge props calls_emit_edge may append on top of the caller-
+ * supplied base props for a CALLS edge: "line" and "args". Callers must size
+ * their prop array to their base field count plus this. */
+enum { CALLS_EMIT_EXTRA_PROPS = 2 };
+
+/* Build a "[{"i":0,"e":"<expr>","v":"<value>"},...]" literal into buf for a
+ * CALLS edge's "args" prop. The sequential pass omitted this, so data_flow
+ * mode had no argument expressions to surface for small (< 50 file) repos
+ * that take the sequential path (#514). Mirrors the parallel path's
+ * append_args_json shape so both pipelines agree. Returns false (buf
+ * untouched) when the call captured no argument expressions. */
+static bool calls_build_args_json(char *buf, size_t cap, const CBMCall *call) {
+    if (!call || call->arg_count <= 0 || cap < PAIR_LEN) {
+        return false;
     }
-    size_t len = strlen(props);
-    if (len < SKIP_ONE || props[len - SKIP_ONE] != '}') {
-        return;
-    }
-    /* Overwrite the trailing '}' and rebuild it after the args array. */
-    size_t pos = len - SKIP_ONE;
-    int n = snprintf(props + pos, cap - pos, ",\"args\":[");
-    if (n <= 0 || (size_t)n >= cap - pos) {
-        return;
-    }
-    pos += (size_t)n;
+    size_t pos = 0;
+    buf[pos++] = '[';
     for (int i = 0; i < call->arg_count; i++) {
         const CBMCallArg *a = &call->args[i];
         char esc_e[CBM_SZ_256];
         cbm_json_escape(esc_e, sizeof(esc_e), a->expr ? a->expr : "");
         char one[CBM_SZ_512];
+        int n;
         if (a->value) {
             char esc_v[CBM_SZ_256];
             cbm_json_escape(esc_v, sizeof(esc_v), a->value);
@@ -290,29 +290,61 @@ static void calls_append_args(char *props, size_t cap, const CBMCall *call) {
         if (n <= 0 || (size_t)n >= cap - pos - PAIR_LEN) {
             break; /* not enough room — close the array with what fits */
         }
-        memcpy(props + pos, one, (size_t)n);
+        memcpy(buf + pos, one, (size_t)n);
         pos += (size_t)n;
     }
-    if (pos + PAIR_LEN < cap) {
-        props[pos++] = ']';
-        props[pos++] = '}';
-        props[pos] = '\0';
+    if (pos + SKIP_ONE < cap) {
+        buf[pos++] = ']';
+        buf[pos] = '\0';
     }
+    return true;
 }
 
+/* Insert an edge from a caller-built base prop array, appending "line" and
+ * "args" typed props for a CALLS edge when the call site provides them.
+ * props must have room for prop_count + CALLS_EMIT_EXTRA_PROPS entries. */
 static void calls_emit_edge(cbm_gbuf_t *gbuf, int64_t src, int64_t tgt, const char *type,
-                            char *props, size_t cap, const CBMCall *call) {
-    if (call && call->start_line > 0 && strcmp(type, "CALLS") == 0) {
-        size_t len = strlen(props);
-        if (len >= SKIP_ONE && props[len - SKIP_ONE] == '}' && len + CBM_SZ_32 < cap) {
-            snprintf(props + len - SKIP_ONE, cap - (len - SKIP_ONE), ",\"line\":%d}",
-                     call->start_line);
-        }
+                            cbm_gbuf_prop_t *props, int prop_count, const CBMCall *call) {
+    char args_buf[CBM_SZ_1K];
+    bool is_calls = call && strcmp(type, "CALLS") == 0;
+    if (is_calls && call->start_line > 0) {
+        props[prop_count++] = (cbm_gbuf_prop_t){
+            .key = "line",
+            .kind = CBM_EDGE_PROP_NUMBER,
+            .number = (double)call->start_line,
+            .decimals = 0,
+        };
     }
-    if (call && strcmp(type, "CALLS") == 0) {
-        calls_append_args(props, cap, call);
+    if (is_calls && calls_build_args_json(args_buf, sizeof(args_buf), call)) {
+        props[prop_count++] =
+            (cbm_gbuf_prop_t){.key = "args", .kind = CBM_EDGE_PROP_STRING, .text = args_buf};
     }
-    cbm_gbuf_insert_edge(gbuf, src, tgt, type, props);
+    cbm_gbuf_insert_edge_props(gbuf, src, tgt, type, props, prop_count);
+}
+
+/* Number of base props built by calls_build_resolution_props: callee,
+ * confidence, strategy, candidates. */
+enum { CALLS_RESOLUTION_PROP_COUNT = 4 };
+
+/* Build the "callee"/"confidence"/"strategy"/"candidates" props shared by
+ * emit_http_async_edge's plain-CALLS fallback and emit_classified_edge's
+ * default CALLS edge. props must have room for CALLS_RESOLUTION_PROP_COUNT
+ * entries. */
+static void calls_build_resolution_props(cbm_gbuf_prop_t *props, const char *callee,
+                                         const cbm_resolution_t *res) {
+    int n = 0;
+    props[n++] = (cbm_gbuf_prop_t){.key = "callee", .kind = CBM_EDGE_PROP_STRING, .text = callee};
+    props[n++] = (cbm_gbuf_prop_t){.key = "confidence",
+                                   .kind = CBM_EDGE_PROP_NUMBER,
+                                   .number = res->confidence,
+                                   .decimals = 2};
+    props[n++] = (cbm_gbuf_prop_t){.key = "strategy",
+                                   .kind = CBM_EDGE_PROP_STRING,
+                                   .text = res->strategy ? res->strategy : "unknown"};
+    props[n++] = (cbm_gbuf_prop_t){.key = "candidates",
+                                   .kind = CBM_EDGE_PROP_NUMBER,
+                                   .number = (double)res->candidate_count,
+                                   .decimals = 0};
 }
 
 static void emit_http_async_edge(cbm_pipeline_ctx_t *ctx, const CBMCall *call,
@@ -338,14 +370,11 @@ static void emit_http_async_edge(cbm_pipeline_ctx_t *ctx, const CBMCall *call,
         if (suppress_plain_calls || !target) {
             return;
         }
-        char esc_callee[CBM_SZ_256];
-        cbm_json_escape(esc_callee, sizeof(esc_callee), call->callee_name);
-        char props[CBM_SZ_512];
-        snprintf(props, sizeof(props),
-                 "{\"callee\":\"%s\",\"confidence\":%.2f,\"strategy\":\"%s\",\"candidates\":%d}",
-                 esc_callee, res->confidence, res->strategy ? res->strategy : "unknown",
-                 res->candidate_count);
-        calls_emit_edge(ctx->gbuf, source->id, target->id, "CALLS", props, sizeof(props), call);
+        enum { PLAIN_CALLS_PROP_CAP = CALLS_RESOLUTION_PROP_COUNT + CALLS_EMIT_EXTRA_PROPS };
+        cbm_gbuf_prop_t props[PLAIN_CALLS_PROP_CAP];
+        calls_build_resolution_props(props, call->callee_name, res);
+        calls_emit_edge(ctx->gbuf, source->id, target->id, "CALLS", props,
+                        CALLS_RESOLUTION_PROP_COUNT, call);
         return;
     }
     const char *edge_type = (svc == CBM_SVC_HTTP) ? "HTTP_CALLS" : "ASYNC_CALLS";
@@ -354,29 +383,25 @@ static void emit_http_async_edge(cbm_pipeline_ctx_t *ctx, const CBMCall *call,
     const char *broker =
         (svc == CBM_SVC_ASYNC) ? cbm_service_pattern_broker(res->qualified_name) : NULL;
     int64_t route_id = create_svc_route_node(ctx, url_or_topic, svc, method, broker);
-    char esc_callee[CBM_SZ_256];
-    char esc_url[CBM_SZ_256];
-    cbm_json_escape(esc_callee, sizeof(esc_callee), call->callee_name);
-    cbm_json_escape(esc_url, sizeof(esc_url), url_or_topic);
-    /* Incremental build mirroring the parallel path's
-     * emit_http_async_service_edge: the old single format string closed the
-     * method value's quote but not the broker's, emitting
-     * "broker":"bullmq} on EVERY brokered ASYNC_CALLS edge — and its fixup
-     * only handled truncation, which never fires in the normal case (#898). */
-    char props[CBM_SZ_512];
-    int n = snprintf(props, sizeof(props), "{\"callee\":\"%s\",\"url_path\":\"%s\"", esc_callee,
-                     esc_url);
-    if (method && n > 0 && (size_t)n < sizeof(props)) {
-        n += snprintf(props + n, sizeof(props) - (size_t)n, ",\"method\":\"%s\"", method);
+    /* Mirrors the parallel path's emit_http_async_service_edge field set:
+     * callee + url_path always present, method/broker only for their
+     * respective svc kind (#898). */
+    enum { HTTP_ASYNC_PROP_CAP = CBM_SZ_4 + CALLS_EMIT_EXTRA_PROPS };
+    cbm_gbuf_prop_t props[HTTP_ASYNC_PROP_CAP];
+    int prop_count = 0;
+    props[prop_count++] =
+        (cbm_gbuf_prop_t){.key = "callee", .kind = CBM_EDGE_PROP_STRING, .text = call->callee_name};
+    props[prop_count++] =
+        (cbm_gbuf_prop_t){.key = "url_path", .kind = CBM_EDGE_PROP_STRING, .text = url_or_topic};
+    if (method) {
+        props[prop_count++] =
+            (cbm_gbuf_prop_t){.key = "method", .kind = CBM_EDGE_PROP_STRING, .text = method};
     }
-    if (broker && n > 0 && (size_t)n < sizeof(props)) {
-        n += snprintf(props + n, sizeof(props) - (size_t)n, ",\"broker\":\"%s\"", broker);
+    if (broker) {
+        props[prop_count++] =
+            (cbm_gbuf_prop_t){.key = "broker", .kind = CBM_EDGE_PROP_STRING, .text = broker};
     }
-    if (n > 0 && (size_t)n < sizeof(props) - 1) {
-        props[n] = '}';
-        props[n + 1] = '\0';
-    }
-    calls_emit_edge(ctx->gbuf, source->id, route_id, edge_type, props, sizeof(props), call);
+    calls_emit_edge(ctx->gbuf, source->id, route_id, edge_type, props, prop_count, call);
 }
 
 /* Classify a resolved call and emit the appropriate edge. */
@@ -399,28 +424,29 @@ static void emit_classified_edge(cbm_pipeline_ctx_t *ctx, const CBMCall *call,
         return;
     }
     if (svc == CBM_SVC_CONFIG) {
-        char esc_c[CBM_SZ_256];
-        char esc_k[CBM_SZ_256];
-        cbm_json_escape(esc_c, sizeof(esc_c), call->callee_name);
-        cbm_json_escape(esc_k, sizeof(esc_k), call->first_string_arg ? call->first_string_arg : "");
-        char props[CBM_SZ_512];
-        snprintf(props, sizeof(props), "{\"callee\":\"%s\",\"key\":\"%s\",\"confidence\":%.2f}",
-                 esc_c, esc_k, res->confidence);
-        calls_emit_edge(ctx->gbuf, source->id, target->id, "CONFIGURES", props, sizeof(props),
-                        call);
+        enum { CONFIGURES_PROP_COUNT = 3 };
+        cbm_gbuf_prop_t props[CONFIGURES_PROP_COUNT] = {
+            {.key = "callee", .kind = CBM_EDGE_PROP_STRING, .text = call->callee_name},
+            {.key = "key",
+             .kind = CBM_EDGE_PROP_STRING,
+             .text = call->first_string_arg ? call->first_string_arg : ""},
+            {.key = "confidence",
+             .kind = CBM_EDGE_PROP_NUMBER,
+             .number = res->confidence,
+             .decimals = 2},
+        };
+        calls_emit_edge(ctx->gbuf, source->id, target->id, "CONFIGURES", props,
+                        CONFIGURES_PROP_COUNT, call);
         return;
     }
     if (suppress_plain_calls) {
         return; /* weak TS/JS member-call match with an unresolved receiver (#606) */
     }
-    char esc_c2[CBM_SZ_256];
-    cbm_json_escape(esc_c2, sizeof(esc_c2), call->callee_name);
-    char props[CBM_SZ_512];
-    snprintf(props, sizeof(props),
-             "{\"callee\":\"%s\",\"confidence\":%.2f,\"strategy\":\"%s\",\"candidates\":%d}",
-             esc_c2, res->confidence, res->strategy ? res->strategy : "unknown",
-             res->candidate_count);
-    calls_emit_edge(ctx->gbuf, source->id, target->id, "CALLS", props, sizeof(props), call);
+    enum { DEFAULT_CALLS_PROP_CAP = CALLS_RESOLUTION_PROP_COUNT + CALLS_EMIT_EXTRA_PROPS };
+    cbm_gbuf_prop_t props[DEFAULT_CALLS_PROP_CAP];
+    calls_build_resolution_props(props, call->callee_name, res);
+    calls_emit_edge(ctx->gbuf, source->id, target->id, "CALLS", props, CALLS_RESOLUTION_PROP_COUNT,
+                    call);
 }
 
 /* Find source node for a call: enclosing function or file node. */
@@ -858,8 +884,16 @@ static int scan_depends_in_sig(cbm_pipeline_ctx_t *ctx, const cbm_regex_t *re, c
             const cbm_gbuf_node_t *sn = cbm_gbuf_find_by_qn(ctx->gbuf, def->qualified_name);
             const cbm_gbuf_node_t *tn = cbm_gbuf_find_by_qn(ctx->gbuf, res.qualified_name);
             if (sn && tn && sn->id != tn->id) {
-                cbm_gbuf_insert_edge(ctx->gbuf, sn->id, tn->id, "CALLS",
-                                     "{\"confidence\":0.95,\"strategy\":\"fastapi_depends\"}");
+                enum { DEPENDS_PROP_COUNT = 2 };
+                cbm_gbuf_prop_t depends_props[DEPENDS_PROP_COUNT] = {
+                    {.key = "confidence",
+                     .kind = CBM_EDGE_PROP_NUMBER,
+                     .number = PC_DEPENDS_CONFIDENCE,
+                     .decimals = 2},
+                    {.key = "strategy", .kind = CBM_EDGE_PROP_STRING, .text = "fastapi_depends"},
+                };
+                cbm_gbuf_insert_edge_props(ctx->gbuf, sn->id, tn->id, "CALLS", depends_props,
+                                           DEPENDS_PROP_COUNT);
                 count++;
             }
         }

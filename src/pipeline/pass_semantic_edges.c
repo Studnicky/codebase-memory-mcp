@@ -36,7 +36,6 @@
 /* ── Helpers ─────────────────────────────────────────────────────── */
 
 enum {
-    PROPS_BUF = 512,
     MAX_FUNCS_INIT = 4096,
     GROW = 2,
     MAX_CALLEES = 64,
@@ -52,6 +51,8 @@ enum {
     PSE_FP_PREFIX_LEN = 6, /* strlen("\"fp\":\"") */
     PSE_LSH_ROWS_PER_BAND = 2,
     PSE_MIN_FUNCS_FOR_PAIR = 2,
+    /* Serialized decimal precision for a SEMANTICALLY_RELATED edge's "score" prop. */
+    PSE_SCORE_DECIMALS = 3,
 };
 
 /* Scalar weight constants used in score_worker and related helpers. */
@@ -1084,10 +1085,15 @@ static int phase6b_merge_edges(cbm_gbuf_t *gbuf, deferred_edge_buf_t *worker_buf
         if (edge_counts[de->i] >= max_edges || edge_counts[de->j] >= max_edges) {
             continue;
         }
-        char props[PROPS_BUF];
-        snprintf(props, sizeof(props), "{\"score\":%.3f,\"same_file\":%s}", de->score,
-                 de->same_file ? "true" : "false");
-        cbm_gbuf_insert_edge(gbuf, de->source_id, de->target_id, "SEMANTICALLY_RELATED", props);
+        cbm_gbuf_prop_t props[] = {
+            {.key = "score",
+             .kind = CBM_EDGE_PROP_NUMBER,
+             .number = (double)de->score,
+             .decimals = PSE_SCORE_DECIMALS},
+            {.key = "same_file", .kind = CBM_EDGE_PROP_BOOL, .flag = de->same_file},
+        };
+        cbm_gbuf_insert_edge_props(gbuf, de->source_id, de->target_id, "SEMANTICALLY_RELATED",
+                                   props, (int)(sizeof(props) / sizeof(props[0])));
         edge_counts[de->i]++;
         edge_counts[de->j]++;
         total_edges++;

@@ -22,6 +22,8 @@
 enum {
     SIM_EDGE_INIT_CAP = 256,
     SIM_EDGE_GROW = 2,
+    /* Serialized decimal precision for a SIMILAR_TO edge's "jaccard" prop. */
+    SIM_JACCARD_DECIMALS = 3,
 };
 #include "pipeline/worker_pool.h"
 
@@ -82,7 +84,7 @@ static const char *itoa_log(int val) {
 
 /* ── Internal types ──────────────────────────────────────────────── */
 
-enum { FP_ENTRY_INIT_CAP = 256, FP_ENTRY_GROW = 2, PROPS_BUF_LEN = 256 };
+enum { FP_ENTRY_INIT_CAP = 256, FP_ENTRY_GROW = 2 };
 
 typedef struct {
     int64_t node_id;
@@ -265,10 +267,15 @@ static int merge_sim_edges(cbm_gbuf_t *gbuf, sim_edge_buf_t *worker_bufs, int wo
     for (int w = 0; w < worker_count; w++) {
         for (int e = 0; e < worker_bufs[w].count; e++) {
             sim_deferred_edge_t *de = &worker_bufs[w].edges[e];
-            char props[PROPS_BUF_LEN];
-            snprintf(props, sizeof(props), "{\"jaccard\":%.3f,\"same_file\":%s}", de->jaccard,
-                     de->same_file ? "true" : "false");
-            cbm_gbuf_insert_edge(gbuf, de->source_id, de->target_id, "SIMILAR_TO", props);
+            cbm_gbuf_prop_t props[] = {
+                {.key = "jaccard",
+                 .kind = CBM_EDGE_PROP_NUMBER,
+                 .number = de->jaccard,
+                 .decimals = SIM_JACCARD_DECIMALS},
+                {.key = "same_file", .kind = CBM_EDGE_PROP_BOOL, .flag = de->same_file},
+            };
+            cbm_gbuf_insert_edge_props(gbuf, de->source_id, de->target_id, "SIMILAR_TO", props,
+                                       (int)(sizeof(props) / sizeof(props[0])));
             total++;
         }
         free(worker_bufs[w].edges);

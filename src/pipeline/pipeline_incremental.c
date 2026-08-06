@@ -911,7 +911,8 @@ typedef struct {
     char *source_qn;
     char *target_qn;
     char *type;
-    char *props;
+    cbm_gbuf_prop_t *props; /* heap-owned array; each key/text (STRING) heap-owned */
+    int prop_count;
 } cbm_saved_edge_t;
 
 typedef struct {
@@ -941,6 +942,62 @@ typedef struct {
 static bool incr_edge_type_is_recomputed(const char *type) {
     return type && (strcmp(type, "SIMILAR_TO") == 0 || strcmp(type, "SEMANTICALLY_RELATED") == 0 ||
                     strcmp(type, "FILE_CHANGES_WITH") == 0 || strcmp(type, "DATA_FLOWS") == 0);
+}
+
+/* Frees a deep-copied prop array as produced by incr_dup_edge_props, for
+ * `n` populated entries (used both on full success-then-later-failure paths
+ * and on final teardown). */
+/* Releases a heap buffer reached through a const pointer. The prop fields are
+ * const because readers must not mutate them; the snapshot owns these copies
+ * and is responsible for freeing them. memcpy moves the value without a
+ * qualifier-dropping cast. */
+static void incr_free_const(const void *owned) {
+    void *raw = NULL;
+    memcpy(&raw, &owned, sizeof(raw));
+    free(raw);
+}
+
+static void incr_free_dup_props(cbm_gbuf_prop_t *props, int n) {
+    for (int i = 0; i < n; i++) {
+        incr_free_const(props[i].key);
+        if (props[i].kind == CBM_EDGE_PROP_STRING) {
+            incr_free_const(props[i].text);
+        }
+    }
+    free(props);
+}
+
+/* Deep-copies an edge's typed property array so the snapshot survives the
+ * node purge that follows capture (the source edge and its nodes are freed
+ * before restore runs). Every entry's key is heap-owned by the copy; STRING
+ * entries also heap-own their text. A zero-prop edge is a valid capture
+ * (*out_props = NULL, *out_count = 0), not a failure. Returns false only on
+ * allocation failure, leaving *out_props untouched. */
+static bool incr_dup_edge_props(const cbm_gbuf_edge_t *edge, cbm_gbuf_prop_t **out_props,
+                                int *out_count) {
+    if (edge->prop_count <= 0) {
+        *out_props = NULL;
+        *out_count = 0;
+        return true;
+    }
+    cbm_gbuf_prop_t *copy = calloc((size_t)edge->prop_count, sizeof(*copy));
+    if (!copy) {
+        return false;
+    }
+    for (int i = 0; i < edge->prop_count; i++) {
+        const cbm_gbuf_prop_t *src = &edge->props[i];
+        copy[i] = *src;
+        copy[i].key = strdup(src->key);
+        copy[i].text = (src->kind == CBM_EDGE_PROP_STRING && src->text) ? strdup(src->text) : NULL;
+        bool text_ok = !(src->kind == CBM_EDGE_PROP_STRING && src->text) || copy[i].text;
+        if (!copy[i].key || !text_ok) {
+            incr_free_dup_props(copy, i + SKIP_ONE);
+            return false;
+        }
+    }
+    *out_props = copy;
+    *out_count = edge->prop_count;
+    return true;
 }
 
 /* cbm_gbuf_foreach_edge visitor: snapshot inbound cross-file edges into
@@ -977,12 +1034,16 @@ static void incr_capture_inbound_edge(const cbm_gbuf_edge_t *edge, void *userdat
     s->source_qn = strdup(src->qualified_name);
     s->target_qn = strdup(tgt->qualified_name);
     s->type = strdup(edge->type);
-    s->props = cbm_gbuf_edge_props_json_alloc(edge);
-    if (!s->source_qn || !s->target_qn || !s->type || !s->props) {
+    if (!s->source_qn || !s->target_qn || !s->type) {
         free(s->source_qn);
         free(s->target_qn);
         free(s->type);
-        free(s->props);
+        return;
+    }
+    if (!incr_dup_edge_props(edge, &s->props, &s->prop_count)) {
+        free(s->source_qn);
+        free(s->target_qn);
+        free(s->type);
         return;
     }
     cap->count++;
@@ -997,7 +1058,7 @@ static int incr_restore_inbound_edges(cbm_gbuf_t *gbuf, cbm_edge_capture_t *cap)
         const cbm_gbuf_node_t *src = cbm_gbuf_find_by_qn(gbuf, s->source_qn);
         const cbm_gbuf_node_t *tgt = cbm_gbuf_find_by_qn(gbuf, s->target_qn);
         if (src && tgt) {
-            cbm_gbuf_insert_edge(gbuf, src->id, tgt->id, s->type, s->props);
+            cbm_gbuf_insert_edge_props(gbuf, src->id, tgt->id, s->type, s->props, s->prop_count);
             restored++;
         }
     }
@@ -1009,7 +1070,7 @@ static void incr_free_edge_capture(cbm_edge_capture_t *cap) {
         free(cap->items[i].source_qn);
         free(cap->items[i].target_qn);
         free(cap->items[i].type);
-        free(cap->items[i].props);
+        incr_free_dup_props(cap->items[i].props, cap->items[i].prop_count);
     }
     free(cap->items);
     cap->items = NULL;

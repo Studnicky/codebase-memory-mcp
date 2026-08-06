@@ -13,6 +13,8 @@
 #include "foundation/constants.h"
 
 enum { GH_RING = 4, GH_RING_MASK = 3, GH_INIT_CAP = 16, GH_MIN_COMMITS = 3, GH_MAX_FILES = 20 };
+/* Serialized decimal precision for a FILE_CHANGES_WITH edge's "coupling_score" prop. */
+enum { GH_COUPLING_SCORE_DECIMALS = 2 };
 
 #define SLEN(s) (sizeof(s) - 1)
 #include "pipeline/pipeline.h"
@@ -463,12 +465,22 @@ int cbm_pipeline_githistory_apply(cbm_pipeline_ctx_t *ctx, const cbm_githistory_
             continue;
         }
 
-        char props[CBM_SZ_128];
-        snprintf(props, sizeof(props),
-                 "{\"co_changes\":%d,\"coupling_score\":%.2f,\"last_co_change\":%lld}",
-                 cc->co_change_count, cc->coupling_score, cc->last_co_change);
-
-        cbm_gbuf_insert_edge(ctx->gbuf, node_a->id, node_b->id, "FILE_CHANGES_WITH", props);
+        cbm_gbuf_prop_t props[] = {
+            {.key = "co_changes",
+             .kind = CBM_EDGE_PROP_NUMBER,
+             .number = (double)cc->co_change_count,
+             .decimals = 0},
+            {.key = "coupling_score",
+             .kind = CBM_EDGE_PROP_NUMBER,
+             .number = cc->coupling_score,
+             .decimals = GH_COUPLING_SCORE_DECIMALS},
+            {.key = "last_co_change",
+             .kind = CBM_EDGE_PROP_NUMBER,
+             .number = (double)cc->last_co_change,
+             .decimals = 0},
+        };
+        cbm_gbuf_insert_edge_props(ctx->gbuf, node_a->id, node_b->id, "FILE_CHANGES_WITH", props,
+                                   (int)(sizeof(props) / sizeof(props[0])));
         edge_count++;
     }
 

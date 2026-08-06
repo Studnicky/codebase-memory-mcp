@@ -26,6 +26,7 @@ enum {
     RN_ARGS_SKIP = 7,
     RN_PROPS_MARGIN = 100,
     RN_CALLEE_SKIP = 14, /* strlen('"callee_args":[') - 1 */
+    DF_MAX_PROPS = 6,    /* via, route, edge_type, via_infra, handler_params, caller_args */
 };
 
 #define SLEN(s) (sizeof(s) - 1)
@@ -324,9 +325,13 @@ static int match_one_infra_route(cbm_gbuf_t *gb, const cbm_gbuf_node_t *infra,
             int fn_hcount = 0;
             cbm_gbuf_find_edges_by_target_type(gb, handler_route->id, "HANDLES", &fn_handles,
                                                &fn_hcount);
+            const cbm_gbuf_prop_t infra_match_props[] = {
+                {.key = "source", .kind = CBM_EDGE_PROP_STRING, .text = "infra_match"},
+            };
             for (int fh = 0; fh < fn_hcount; fh++) {
-                cbm_gbuf_insert_edge(gb, fn_handles[fh]->source_id, infra->id, "HANDLES",
-                                     "{\"source\":\"infra_match\"}");
+                cbm_gbuf_insert_edge_props(
+                    gb, fn_handles[fh]->source_id, infra->id, "HANDLES", infra_match_props,
+                    (int)(sizeof(infra_match_props) / sizeof(infra_match_props[0])));
             }
             return SKIP_ONE;
         }
@@ -439,10 +444,13 @@ static int ensure_one_decorator_route(cbm_gbuf_t *gb, const cbm_gbuf_node_t *fun
         }
     }
 
-    char hprops[CBM_SZ_512];
-    snprintf(hprops, sizeof(hprops), "{\"handler\":\"%s\"}",
-             func->qualified_name ? func->qualified_name : "");
-    cbm_gbuf_insert_edge(gb, func->id, route_id, "HANDLES", hprops);
+    const cbm_gbuf_prop_t hprops[] = {
+        {.key = "handler",
+         .kind = CBM_EDGE_PROP_STRING,
+         .text = func->qualified_name ? func->qualified_name : ""},
+    };
+    cbm_gbuf_insert_edge_props(gb, func->id, route_id, "HANDLES", hprops,
+                               (int)(sizeof(hprops) / sizeof(hprops[0])));
     return SKIP_ONE;
 }
 
@@ -497,8 +505,11 @@ static int bridge_funcs_to_prefix(cbm_gbuf_t *gb, const cbm_gbuf_node_t *prefix_
         if (prefix_segs && prefix_segs[0] && !strstr(func->file_path, prefix_segs)) {
             continue;
         }
-        cbm_gbuf_insert_edge(gb, func->id, prefix_route->id, "HANDLES",
-                             "{\"source\":\"prefix_decorator_bridge\"}");
+        const cbm_gbuf_prop_t bridge_props[] = {
+            {.key = "source", .kind = CBM_EDGE_PROP_STRING, .text = "prefix_decorator_bridge"},
+        };
+        cbm_gbuf_insert_edge_props(gb, func->id, prefix_route->id, "HANDLES", bridge_props,
+                                   (int)(sizeof(bridge_props) / sizeof(bridge_props[0])));
         connected++;
     }
     return connected;
@@ -648,8 +659,52 @@ static bool http_call_edge_has_valid_route(const cbm_gbuf_edge_t *edge) {
     return cbm_service_pattern_is_http_route_literal(url, callee);
 }
 
+/* Locate the bracket-balanced array literal for `"key":[...]` inside a
+ * validated JSON object. Sets *start to the opening '[' and *end to the
+ * matching closing ']'. Returns false if the key or its closing bracket
+ * isn't found. Used to slice a raw array fragment back out of an assembled
+ * JSON string for re-embedding as a typed edge property's verbatim text. */
+static bool find_json_array_span(const char *json, const char *key, const char **start,
+                                 const char **end) {
+    char pattern[CBM_SZ_64];
+    snprintf(pattern, sizeof(pattern), "\"%s\":[", key);
+    const char *p = strstr(json, pattern);
+    if (!p) {
+        return false;
+    }
+    const char *arr_start = p + strlen(pattern) - SKIP_ONE; /* points at '[' */
+    int depth = 0;
+    for (const char *q = arr_start; *q != '\0'; q++) {
+        if (*q == '[') {
+            depth++;
+        } else if (*q == ']') {
+            depth--;
+            if (depth == 0) {
+                *start = arr_start;
+                *end = q;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 /* Try to create a DATA_FLOWS edge between caller and handler via a route.
  * Returns: 1=created, 0=skipped (self/duplicate), -1=skipped (has direct call). */
+/* Opens the DATA_FLOWS property object, leaving it unterminated so the caller
+ * can append the handler-parameter and argument members. Returns the written
+ * length, or a negative value on encoding failure. */
+static int data_flow_props_open(char *out, size_t out_size, const char *route_name,
+                                const char *route_qn, const char *edge_type, bool via_infra) {
+    if (via_infra) {
+        return snprintf(out, out_size,
+                        "{\"via\":\"%s\",\"route\":\"%s\",\"edge_type\":\"%s\",\"via_infra\":true",
+                        route_name, route_qn, edge_type);
+    }
+    return snprintf(out, out_size, "{\"via\":\"%s\",\"route\":\"%s\",\"edge_type\":\"%s\"",
+                    route_name, route_qn, edge_type);
+}
+
 static int try_create_data_flow(cbm_gbuf_t *gb, int64_t caller_id, int64_t handler_id,
                                 const cbm_gbuf_node_t *route, const char *edge_type,
                                 const char *caller_props, bool via_infra) {
@@ -673,33 +728,60 @@ static int try_create_data_flow(cbm_gbuf_t *gb, int64_t caller_id, int64_t handl
     cbm_json_escape(esc_rname, sizeof(esc_rname), route->name ? route->name : "");
     cbm_json_escape(esc_rqn, sizeof(esc_rqn), route->qualified_name ? route->qualified_name : "");
     char props[CBM_SZ_2K];
-    int n;
-    if (via_infra) {
-        n = snprintf(props, sizeof(props),
-                     "{\"via\":\"%s\",\"route\":\"%s\",\"edge_type\":\"%s\",\"via_infra\":true",
-                     esc_rname, esc_rqn, edge_type);
-    } else {
-        n = snprintf(props, sizeof(props), "{\"via\":\"%s\",\"route\":\"%s\",\"edge_type\":\"%s\"",
-                     esc_rname, esc_rqn, edge_type);
-    }
+    int n = data_flow_props_open(props, sizeof(props), esc_rname, esc_rqn, edge_type, via_infra);
 
     if (n > 0 && (size_t)n < sizeof(props) - RN_PROPS_MARGIN) {
         finish_data_flow_props(props, sizeof(props), (size_t)n, handler_params, args_json);
     }
     /* handler_params/args_json are sliced text fragments; truncation or stray
      * quotes can leave the assembled JSON malformed, which aborts every
-     * json_extract consumer downstream. Validate and fall back to the minimal
-     * envelope rather than persisting invalid properties. */
+     * json_extract consumer downstream. `props` is kept purely to run this
+     * validation and, on success, to slice the array fragments back out
+     * verbatim below — it is never itself passed to the store. */
+    bool full_valid;
     {
         yyjson_doc *vdoc = yyjson_read(props, strlen(props), 0);
-        if (!vdoc) {
-            snprintf(props, sizeof(props), "{\"via\":\"%s\",\"edge_type\":\"%s\"}", esc_rname,
-                     edge_type);
-        } else {
+        full_valid = vdoc != NULL;
+        if (vdoc) {
             yyjson_doc_free(vdoc);
         }
     }
-    cbm_gbuf_insert_edge(gb, caller_id, handler_id, "DATA_FLOWS", props);
+
+    char handler_params_lit[CBM_SZ_512 + PAIR_LEN]; /* "[" + handler_params + "]" */
+    char caller_args_lit[CBM_SZ_2K];
+    cbm_gbuf_prop_t dfprops[DF_MAX_PROPS];
+    int dfcount = 0;
+    dfprops[dfcount++] =
+        (cbm_gbuf_prop_t){.key = "via", .kind = CBM_EDGE_PROP_STRING, .text = esc_rname};
+    if (full_valid) {
+        dfprops[dfcount++] =
+            (cbm_gbuf_prop_t){.key = "route", .kind = CBM_EDGE_PROP_STRING, .text = esc_rqn};
+    }
+    dfprops[dfcount++] =
+        (cbm_gbuf_prop_t){.key = "edge_type", .kind = CBM_EDGE_PROP_STRING, .text = edge_type};
+    if (full_valid) {
+        if (via_infra) {
+            dfprops[dfcount++] =
+                (cbm_gbuf_prop_t){.key = "via_infra", .kind = CBM_EDGE_PROP_BOOL, .flag = true};
+        }
+        if (handler_params[0]) {
+            snprintf(handler_params_lit, sizeof(handler_params_lit), "[%s]", handler_params);
+            dfprops[dfcount++] = (cbm_gbuf_prop_t){
+                .key = "handler_params", .kind = CBM_EDGE_PROP_STRING, .text = handler_params_lit};
+        }
+        const char *arr_start = NULL;
+        const char *arr_end = NULL;
+        if (args_json && find_json_array_span(props, "caller_args", &arr_start, &arr_end)) {
+            size_t lit_len = (size_t)(arr_end - arr_start) + SKIP_ONE;
+            if (lit_len < sizeof(caller_args_lit)) {
+                memcpy(caller_args_lit, arr_start, lit_len);
+                caller_args_lit[lit_len] = '\0';
+                dfprops[dfcount++] = (cbm_gbuf_prop_t){
+                    .key = "caller_args", .kind = CBM_EDGE_PROP_STRING, .text = caller_args_lit};
+            }
+        }
+    }
+    cbm_gbuf_insert_edge_props(gb, caller_id, handler_id, "DATA_FLOWS", dfprops, dfcount);
     return SKIP_ONE;
 }
 
@@ -853,7 +935,12 @@ static void create_grpc_routes(cbm_gbuf_t *gb) {
 
         int64_t route_id = cbm_gbuf_upsert_node(gb, "Route", fn->name, route_qn, fn->file_path,
                                                 fn->start_line, fn->end_line, props);
-        cbm_gbuf_insert_edge(gb, fn->id, route_id, "HANDLES", "{\"via\":\"proto_rpc\"}");
+        const cbm_gbuf_prop_t grpc_handles_props[] = {
+            {.key = "via", .kind = CBM_EDGE_PROP_STRING, .text = "proto_rpc"},
+        };
+        cbm_gbuf_insert_edge_props(
+            gb, fn->id, route_id, "HANDLES", grpc_handles_props,
+            (int)(sizeof(grpc_handles_props) / sizeof(grpc_handles_props[0])));
         grpc_routes++;
     }
     if (grpc_routes > 0) {
@@ -917,6 +1004,7 @@ static void create_data_flows(cbm_gbuf_t *gb) {
 enum {
     SKR_PATH_BUF = 1024,
     SKR_NAME_BUF = 64,
+    SVK_MAX_HANDLES_PROPS = 3, /* handler, framework, optional via */
 };
 
 /* Detect the SvelteKit kind of a file path. Returns 1 for +server,
@@ -1141,11 +1229,19 @@ static void sveltekit_file_visitor(const cbm_gbuf_node_t *node, void *userdata) 
         }
         ctx->routes_created++;
 
-        char hprops[CBM_SZ_256];
-        snprintf(hprops, sizeof(hprops), "{\"handler\":\"%s\",\"framework\":\"sveltekit\"%s}",
-                 child->qualified_name ? child->qualified_name : child->name,
-                 is_actions ? ",\"via\":\"actions_object\"" : "");
-        cbm_gbuf_insert_edge(ctx->gb, child->id, route_id, "HANDLES", hprops);
+        cbm_gbuf_prop_t hprops[SVK_MAX_HANDLES_PROPS];
+        int hprop_count = 0;
+        hprops[hprop_count++] =
+            (cbm_gbuf_prop_t){.key = "handler",
+                              .kind = CBM_EDGE_PROP_STRING,
+                              .text = child->qualified_name ? child->qualified_name : child->name};
+        hprops[hprop_count++] = (cbm_gbuf_prop_t){
+            .key = "framework", .kind = CBM_EDGE_PROP_STRING, .text = "sveltekit"};
+        if (is_actions) {
+            hprops[hprop_count++] = (cbm_gbuf_prop_t){
+                .key = "via", .kind = CBM_EDGE_PROP_STRING, .text = "actions_object"};
+        }
+        cbm_gbuf_insert_edge_props(ctx->gb, child->id, route_id, "HANDLES", hprops, hprop_count);
         ctx->handles_created++;
     }
 }

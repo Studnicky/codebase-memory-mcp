@@ -22,8 +22,12 @@ enum {
      * -> comma + 2 key quotes + colon + 2 value quotes (resp. brackets). */
     PP_JSON_FIELD_OVERHEAD = 6,
     PP_ARGS_MARGIN = 20,
-    /* ,"line":<int> -> comma + key (7) + colon + up to 10 digits + NUL. */
-    PP_LINE_MARGIN = 24,
+    /* Max typed edge props a single call site builds before finalize_and_emit
+     * appends "args" and "line" — widest caller (emit_normal_calls_edge) uses
+     * 4, leaving headroom for both. */
+    PP_EDGE_PROPS_CAP = CBM_SZ_8,
+    /* Fixed decimal places for a "confidence" edge prop serialized to JSON. */
+    PP_CONFIDENCE_DECIMALS = 2,
     PP_LOG_THRESH = 24,
     PP_LOG_INTERVAL = 10,
     PP_TIMER_THRESH = 1000,
@@ -690,11 +694,11 @@ static void insert_def_into_gbuf(extract_worker_state_t *ws, const cbm_file_info
         int64_t route_id =
             cbm_gbuf_upsert_node(ws->local_gbuf, "Route", def->route_path, route_qn,
                                  def->file_path ? def->file_path : fi->rel_path, 0, 0, rprops);
-        char hprops[CBM_SZ_512];
-        char esc_h[CBM_SZ_512];
-        cbm_json_escape(esc_h, sizeof(esc_h), def->qualified_name);
-        snprintf(hprops, sizeof(hprops), "{\"handler\":\"%s\"}", esc_h);
-        cbm_gbuf_insert_edge(ws->local_gbuf, func_id, route_id, "HANDLES", hprops);
+        cbm_gbuf_prop_t hprops[] = {
+            {.key = "handler", .kind = CBM_EDGE_PROP_STRING, .text = def->qualified_name},
+        };
+        cbm_gbuf_insert_edge_props(ws->local_gbuf, func_id, route_id, "HANDLES", hprops,
+                                   (int)(sizeof(hprops) / sizeof(hprops[0])));
     }
 }
 
@@ -1195,14 +1199,15 @@ static int register_and_link_def(cbm_pipeline_ctx_t *ctx, const CBMDefinition *d
     const cbm_gbuf_node_t *file_node = cbm_gbuf_find_by_qn(ctx->gbuf, file_qn);
     const cbm_gbuf_node_t *def_node = cbm_gbuf_find_by_qn(ctx->gbuf, def->qualified_name);
     if (file_node && def_node) {
-        cbm_gbuf_insert_edge(ctx->gbuf, file_node->id, def_node->id, "DEFINES", "{}");
+        cbm_gbuf_insert_edge_props(ctx->gbuf, file_node->id, def_node->id, "DEFINES", NULL, 0);
         edges++;
     }
     free(file_qn);
     if (def->parent_class && strcmp(def->label, "Method") == 0) {
         const cbm_gbuf_node_t *parent = cbm_gbuf_find_by_qn(ctx->gbuf, def->parent_class);
         if (parent && def_node) {
-            cbm_gbuf_insert_edge(ctx->gbuf, parent->id, def_node->id, "DEFINES_METHOD", "{}");
+            cbm_gbuf_insert_edge_props(ctx->gbuf, parent->id, def_node->id, "DEFINES_METHOD", NULL,
+                                       0);
         }
     }
     return edges;
@@ -1226,11 +1231,13 @@ static int create_imports_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *re
         const cbm_gbuf_node_t *target =
             cbm_pipeline_resolve_import_node(ctx, rel, file_qn, imp, namespace_map);
         if (target && target->id != source_node->id) {
-            char esc_ln[CBM_SZ_128];
-            cbm_json_escape(esc_ln, sizeof(esc_ln), imp->local_name ? imp->local_name : "");
-            char imp_props[CBM_SZ_256];
-            snprintf(imp_props, sizeof(imp_props), "{\"local_name\":\"%s\"}", esc_ln);
-            cbm_gbuf_insert_edge(ctx->gbuf, source_node->id, target->id, "IMPORTS", imp_props);
+            cbm_gbuf_prop_t imp_props[] = {
+                {.key = "local_name",
+                 .kind = CBM_EDGE_PROP_STRING,
+                 .text = imp->local_name ? imp->local_name : ""},
+            };
+            cbm_gbuf_insert_edge_props(ctx->gbuf, source_node->id, target->id, "IMPORTS", imp_props,
+                                       (int)(sizeof(imp_props) / sizeof(imp_props[0])));
             count++;
         }
     }
@@ -1274,10 +1281,13 @@ static void create_channel_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *r
         const cbm_gbuf_node_t *src_node = find_channel_src(ctx, ch, rel);
         if (src_node && channel_id > 0) {
             const char *edge_type = ch->direction == CBM_CHANNEL_EMIT ? "EMITS" : "LISTENS_ON";
-            char edge_props[CBM_SZ_128];
-            snprintf(edge_props, sizeof(edge_props), "{\"transport\":\"%s\"}",
-                     ch->transport ? ch->transport : "unknown");
-            cbm_gbuf_insert_edge(ctx->gbuf, src_node->id, channel_id, edge_type, edge_props);
+            cbm_gbuf_prop_t edge_props[] = {
+                {.key = "transport",
+                 .kind = CBM_EDGE_PROP_STRING,
+                 .text = ch->transport ? ch->transport : "unknown"},
+            };
+            cbm_gbuf_insert_edge_props(ctx->gbuf, src_node->id, channel_id, edge_type, edge_props,
+                                       (int)(sizeof(edge_props) / sizeof(edge_props[0])));
         }
     }
 }
@@ -1473,15 +1483,17 @@ static int format_call_arg(char *buf, size_t bufsize, const CBMCallArg *a, const
     return snprintf(buf, bufsize, "{\"i\":%d,\"e\":\"%s\"}", a->index, esc_e);
 }
 
-static size_t append_args_json(char *buf, size_t bufsize, size_t pos, const CBMCall *call) {
-    if (call->arg_count == 0 || pos >= bufsize - PP_ARGS_MARGIN) {
-        return pos;
+/* Build the call args as a standalone JSON array literal (e.g.
+ * [{"i":0,"e":"x","v":"val"},...]) into buf. The literal is carried as a
+ * CBM_EDGE_PROP_STRING whose leading '[' tells the serializer to emit it
+ * verbatim instead of JSON-string-escaping it. Returns the literal's length,
+ * or 0 when the call has no args (no "args" prop should be emitted). */
+static size_t build_args_json(char *buf, size_t bufsize, const CBMCall *call) {
+    if (call->arg_count == 0 || bufsize < PP_ARGS_MARGIN) {
+        return 0;
     }
-    int n = snprintf(buf + pos, bufsize - pos, ",\"args\":[");
-    if (n <= 0) {
-        return pos;
-    }
-    pos += (size_t)n;
+    size_t pos = 0;
+    buf[pos++] = '[';
     for (int i = 0; i < call->arg_count && pos < bufsize - CBM_ARG_JSON_GUARD; i++) {
         const CBMCallArg *a = &call->args[i];
         size_t mark = pos; /* rollback point (before the separator) */
@@ -1490,7 +1502,7 @@ static size_t append_args_json(char *buf, size_t bufsize, size_t pos, const CBMC
         }
         char expr_buf[CBM_SZ_128];
         sanitize_expr(expr_buf, a->expr);
-        n = format_call_arg(buf + pos, bufsize - pos, a, expr_buf);
+        int n = format_call_arg(buf + pos, bufsize - pos, a, expr_buf);
         /* snprintf returns the UNtruncated length: if the arg did not fully
          * fit, advancing pos by n would push it past buf and the buf[pos]
          * writes below would overflow. Drop the arg whole (atomic field —
@@ -1559,24 +1571,23 @@ static const char *find_route_path_in_args(const CBMCall *call, const char **out
     return found;
 }
 
-/* Build props JSON, append args, close brace, emit edge. */
+/* Append the "args" and (CALLS-only) "line" props to a caller-built typed
+ * prop array, then emit the edge. props must have room for prop_count + 2
+ * (callers size their arrays to PP_EDGE_PROPS_CAP). */
 static void finalize_and_emit(cbm_gbuf_t *gbuf, int64_t src_id, int64_t tgt_id,
-                              const char *edge_type, char *props, int n, const CBMCall *call) {
-    if (n > 0 && (size_t)n < CBM_SZ_2K - PP_ESC_SPACE) {
-        size_t pos = append_args_json(props, CBM_SZ_2K, (size_t)n, call);
-        if (call->start_line > 0 && strcmp(edge_type, "CALLS") == 0 &&
-            pos < CBM_SZ_2K - PP_LINE_MARGIN) {
-            int ln = snprintf(props + pos, CBM_SZ_2K - pos, ",\"line\":%d", call->start_line);
-            if (ln > 0) {
-                pos += (size_t)ln;
-            }
-        }
-        if (pos < CBM_SZ_2K - SKIP_ONE) {
-            props[pos] = '}';
-            props[pos + SKIP_ONE] = '\0';
-        }
+                              const char *edge_type, cbm_gbuf_prop_t *props, int prop_count,
+                              const CBMCall *call) {
+    char args_buf[CBM_SZ_2K];
+    size_t args_len = build_args_json(args_buf, sizeof(args_buf), call);
+    if (args_len > 0) {
+        props[prop_count++] =
+            (cbm_gbuf_prop_t){.key = "args", .kind = CBM_EDGE_PROP_STRING, .text = args_buf};
     }
-    cbm_gbuf_insert_edge(gbuf, src_id, tgt_id, edge_type, props);
+    if (call->start_line > 0 && strcmp(edge_type, "CALLS") == 0) {
+        props[prop_count++] = (cbm_gbuf_prop_t){
+            .key = "line", .kind = CBM_EDGE_PROP_NUMBER, .number = call->start_line, .decimals = 0};
+    }
+    cbm_gbuf_insert_edge_props(gbuf, src_id, tgt_id, edge_type, props, prop_count);
 }
 
 /* Build Route node QN and properties for HTTP/async service edges. */
@@ -1616,19 +1627,20 @@ static void emit_http_async_service_edge(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t
 
     int64_t route_id = build_service_route(gbuf, arg, method, broker, svc);
 
-    char esc_c[CBM_SZ_256];
-    char esc_a[CBM_SZ_256];
-    cbm_json_escape(esc_c, sizeof(esc_c), call->callee_name);
-    cbm_json_escape(esc_a, sizeof(esc_a), arg);
-    char props[CBM_SZ_2K];
-    int n = snprintf(props, sizeof(props), "{\"callee\":\"%s\",\"url_path\":\"%s\"", esc_c, esc_a);
+    cbm_gbuf_prop_t props[PP_EDGE_PROPS_CAP];
+    int pc = 0;
+    props[pc++] =
+        (cbm_gbuf_prop_t){.key = "callee", .kind = CBM_EDGE_PROP_STRING, .text = call->callee_name};
+    props[pc++] = (cbm_gbuf_prop_t){.key = "url_path", .kind = CBM_EDGE_PROP_STRING, .text = arg};
     if (method) {
-        n += snprintf(props + n, sizeof(props) - (size_t)n, ",\"method\":\"%s\"", method);
+        props[pc++] =
+            (cbm_gbuf_prop_t){.key = "method", .kind = CBM_EDGE_PROP_STRING, .text = method};
     }
     if (broker) {
-        n += snprintf(props + n, sizeof(props) - (size_t)n, ",\"broker\":\"%s\"", broker);
+        props[pc++] =
+            (cbm_gbuf_prop_t){.key = "broker", .kind = CBM_EDGE_PROP_STRING, .text = broker};
     }
-    finalize_and_emit(gbuf, source->id, route_id, edge_type, props, n, call);
+    finalize_and_emit(gbuf, source->id, route_id, edge_type, props, pc, call);
 }
 
 /* Emit CONFIGURES edge. */
@@ -1641,14 +1653,17 @@ static void emit_config_edge(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *source,
     if (!target) {
         return;
     }
-    char esc_c[CBM_SZ_256];
-    char esc_k[CBM_SZ_256];
-    cbm_json_escape(esc_c, sizeof(esc_c), call->callee_name);
-    cbm_json_escape(esc_k, sizeof(esc_k), arg ? arg : "");
-    char props[CBM_SZ_2K];
-    int n = snprintf(props, sizeof(props), "{\"callee\":\"%s\",\"key\":\"%s\",\"confidence\":%.2f",
-                     esc_c, esc_k, res->confidence);
-    finalize_and_emit(gbuf, source->id, target->id, "CONFIGURES", props, n, call);
+    cbm_gbuf_prop_t props[PP_EDGE_PROPS_CAP];
+    int pc = 0;
+    props[pc++] =
+        (cbm_gbuf_prop_t){.key = "callee", .kind = CBM_EDGE_PROP_STRING, .text = call->callee_name};
+    props[pc++] =
+        (cbm_gbuf_prop_t){.key = "key", .kind = CBM_EDGE_PROP_STRING, .text = arg ? arg : ""};
+    props[pc++] = (cbm_gbuf_prop_t){.key = "confidence",
+                                    .kind = CBM_EDGE_PROP_NUMBER,
+                                    .number = res->confidence,
+                                    .decimals = PP_CONFIDENCE_DECIMALS};
+    finalize_and_emit(gbuf, source->id, target->id, "CONFIGURES", props, pc, call);
 }
 
 /* Emit normal CALLS edge. */
@@ -1660,14 +1675,22 @@ static void emit_normal_calls_edge(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *sour
     if (!target) {
         return;
     }
-    char esc_c[CBM_SZ_256];
-    cbm_json_escape(esc_c, sizeof(esc_c), call->callee_name);
-    char props[CBM_SZ_2K];
-    int n = snprintf(props, sizeof(props),
-                     "{\"callee\":\"%s\",\"confidence\":%.2f,\"strategy\":\"%s\",\"candidates\":%d",
-                     esc_c, res->confidence, res->strategy ? res->strategy : "unknown",
-                     res->candidate_count);
-    finalize_and_emit(gbuf, source->id, target->id, "CALLS", props, n, call);
+    cbm_gbuf_prop_t props[PP_EDGE_PROPS_CAP];
+    int pc = 0;
+    props[pc++] =
+        (cbm_gbuf_prop_t){.key = "callee", .kind = CBM_EDGE_PROP_STRING, .text = call->callee_name};
+    props[pc++] = (cbm_gbuf_prop_t){.key = "confidence",
+                                    .kind = CBM_EDGE_PROP_NUMBER,
+                                    .number = res->confidence,
+                                    .decimals = PP_CONFIDENCE_DECIMALS};
+    props[pc++] = (cbm_gbuf_prop_t){.key = "strategy",
+                                    .kind = CBM_EDGE_PROP_STRING,
+                                    .text = res->strategy ? res->strategy : "unknown"};
+    props[pc++] = (cbm_gbuf_prop_t){.key = "candidates",
+                                    .kind = CBM_EDGE_PROP_NUMBER,
+                                    .number = res->candidate_count,
+                                    .decimals = 0};
+    finalize_and_emit(gbuf, source->id, target->id, "CALLS", props, pc, call);
 }
 
 /* Classify a resolved call by library identity and emit the appropriate edge. */
@@ -1685,26 +1708,23 @@ static void emit_route_registration(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *sou
     char rp[CBM_SZ_256];
     snprintf(rp, sizeof(rp), "{\"method\":\"%s\"}", method ? method : "ANY");
     int64_t rid = cbm_gbuf_upsert_node(gbuf, "Route", route_path, rqn, "", 0, 0, rp);
-    char esc_cn[CBM_SZ_256]; /* sliced source text: escape quotes/newlines */
-    char esc_rp[CBM_SZ_512];
-    cbm_json_escape(esc_cn, sizeof(esc_cn), call->callee_name);
-    cbm_json_escape(esc_rp, sizeof(esc_rp), route_path);
-    char props[CBM_SZ_1K];
-    snprintf(props, sizeof(props),
-             "{\"callee\":\"%s\",\"url_path\":\"%s\",\"via\":\"route_registration\"}", esc_cn,
-             esc_rp);
-    cbm_gbuf_insert_edge(gbuf, source->id, rid, "CALLS", props);
+    cbm_gbuf_prop_t props[] = {
+        {.key = "callee", .kind = CBM_EDGE_PROP_STRING, .text = call->callee_name},
+        {.key = "url_path", .kind = CBM_EDGE_PROP_STRING, .text = route_path},
+        {.key = "via", .kind = CBM_EDGE_PROP_STRING, .text = "route_registration"},
+    };
+    cbm_gbuf_insert_edge_props(gbuf, source->id, rid, "CALLS", props,
+                               (int)(sizeof(props) / sizeof(props[0])));
     if (handler_ref && handler_ref[0] != '\0') {
         cbm_resolution_t hres = cbm_registry_resolve(registry, handler_ref, module_qn, ik, iv, ic);
         if (hres.qualified_name && hres.qualified_name[0] != '\0') {
             const cbm_gbuf_node_t *h = cbm_gbuf_find_by_qn(main_gbuf, hres.qualified_name);
             if (h) {
-                char hp[CBM_SZ_1K]; /* must exceed escaped value + wrapper or snprintf cuts the
-                                       closing brace */
-                char esc_h2[CBM_SZ_512];
-                cbm_json_escape(esc_h2, sizeof(esc_h2), hres.qualified_name);
-                snprintf(hp, sizeof(hp), "{\"handler\":\"%s\"}", esc_h2);
-                cbm_gbuf_insert_edge(gbuf, h->id, rid, "HANDLES", hp);
+                cbm_gbuf_prop_t hp[] = {
+                    {.key = "handler", .kind = CBM_EDGE_PROP_STRING, .text = hres.qualified_name},
+                };
+                cbm_gbuf_insert_edge_props(gbuf, h->id, rid, "HANDLES", hp,
+                                           (int)(sizeof(hp) / sizeof(hp[0])));
             }
         }
     }
@@ -1779,14 +1799,13 @@ static void detect_url_in_args(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *source,
                  cbm_route_canon_path(norm, cpath, sizeof(cpath)));
         int64_t route_id = cbm_gbuf_upsert_node(gbuf, "Route", norm, route_qn, "", 0, 0,
                                                 "{\"source\":\"arg_url\"}");
-        char esc_c[CBM_SZ_256];
-        char esc_n[CBM_SZ_256];
-        cbm_json_escape(esc_c, sizeof(esc_c), call->callee_name);
-        cbm_json_escape(esc_n, sizeof(esc_n), norm);
-        char eprops[CBM_SZ_512];
-        snprintf(eprops, sizeof(eprops),
-                 "{\"callee\":\"%s\",\"url_path\":\"%s\",\"via\":\"arg_url\"}", esc_c, esc_n);
-        cbm_gbuf_insert_edge(gbuf, source->id, route_id, "HTTP_CALLS", eprops);
+        cbm_gbuf_prop_t eprops[] = {
+            {.key = "callee", .kind = CBM_EDGE_PROP_STRING, .text = call->callee_name},
+            {.key = "url_path", .kind = CBM_EDGE_PROP_STRING, .text = norm},
+            {.key = "via", .kind = CBM_EDGE_PROP_STRING, .text = "arg_url"},
+        };
+        cbm_gbuf_insert_edge_props(gbuf, source->id, route_id, "HTTP_CALLS", eprops,
+                                   (int)(sizeof(eprops) / sizeof(eprops[0])));
         break;
     }
 }
@@ -1884,13 +1903,17 @@ static void emit_grpc_edge(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *source, cons
     int64_t route_id = cbm_gbuf_upsert_node(gbuf, "Route", route_name, route_qn, "", 0, 0,
                                             "{\"source\":\"grpc\"}");
 
-    char esc_c[CBM_SZ_256];
-    cbm_json_escape(esc_c, sizeof(esc_c), call->callee_name);
-    char props[CBM_SZ_1K];
-    snprintf(props, sizeof(props),
-             "{\"callee\":\"%s\",\"service\":\"%s\",\"method\":\"%s\",\"confidence\":%.2f}", esc_c,
-             service, method, res->confidence);
-    cbm_gbuf_insert_edge(gbuf, source->id, route_id, "GRPC_CALLS", props);
+    cbm_gbuf_prop_t props[] = {
+        {.key = "callee", .kind = CBM_EDGE_PROP_STRING, .text = call->callee_name},
+        {.key = "service", .kind = CBM_EDGE_PROP_STRING, .text = service},
+        {.key = "method", .kind = CBM_EDGE_PROP_STRING, .text = method},
+        {.key = "confidence",
+         .kind = CBM_EDGE_PROP_NUMBER,
+         .number = res->confidence,
+         .decimals = PP_CONFIDENCE_DECIMALS},
+    };
+    cbm_gbuf_insert_edge_props(gbuf, source->id, route_id, "GRPC_CALLS", props,
+                               (int)(sizeof(props) / sizeof(props[0])));
 }
 
 /* Emit GRAPHQL_CALLS edge. Extract operation from first string arg if available. */
@@ -1920,12 +1943,16 @@ static void emit_graphql_edge(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *source, c
     int64_t route_id =
         cbm_gbuf_upsert_node(gbuf, "Route", p, route_qn, "", 0, 0, "{\"source\":\"graphql\"}");
 
-    char esc_c[CBM_SZ_256];
-    cbm_json_escape(esc_c, sizeof(esc_c), call->callee_name);
-    char props[CBM_SZ_1K];
-    snprintf(props, sizeof(props), "{\"callee\":\"%s\",\"operation\":\"%s\",\"confidence\":%.2f}",
-             esc_c, p, res->confidence);
-    cbm_gbuf_insert_edge(gbuf, source->id, route_id, "GRAPHQL_CALLS", props);
+    cbm_gbuf_prop_t props[] = {
+        {.key = "callee", .kind = CBM_EDGE_PROP_STRING, .text = call->callee_name},
+        {.key = "operation", .kind = CBM_EDGE_PROP_STRING, .text = p},
+        {.key = "confidence",
+         .kind = CBM_EDGE_PROP_NUMBER,
+         .number = res->confidence,
+         .decimals = PP_CONFIDENCE_DECIMALS},
+    };
+    cbm_gbuf_insert_edge_props(gbuf, source->id, route_id, "GRAPHQL_CALLS", props,
+                               (int)(sizeof(props) / sizeof(props[0])));
 }
 
 /* Emit TRPC_CALLS edge. Extract procedure path from callee chain. */
@@ -1957,12 +1984,16 @@ static void emit_trpc_edge(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *source, cons
     int64_t route_id =
         cbm_gbuf_upsert_node(gbuf, "Route", p, route_qn, "", 0, 0, "{\"source\":\"trpc\"}");
 
-    char esc_c[CBM_SZ_256];
-    cbm_json_escape(esc_c, sizeof(esc_c), call->callee_name);
-    char props[CBM_SZ_1K];
-    snprintf(props, sizeof(props), "{\"callee\":\"%s\",\"procedure\":\"%s\",\"confidence\":%.2f}",
-             esc_c, p, res->confidence);
-    cbm_gbuf_insert_edge(gbuf, source->id, route_id, "TRPC_CALLS", props);
+    cbm_gbuf_prop_t props[] = {
+        {.key = "callee", .kind = CBM_EDGE_PROP_STRING, .text = call->callee_name},
+        {.key = "procedure", .kind = CBM_EDGE_PROP_STRING, .text = p},
+        {.key = "confidence",
+         .kind = CBM_EDGE_PROP_NUMBER,
+         .number = res->confidence,
+         .decimals = PP_CONFIDENCE_DECIMALS},
+    };
+    cbm_gbuf_insert_edge_props(gbuf, source->id, route_id, "TRPC_CALLS", props,
+                               (int)(sizeof(props) / sizeof(props[0])));
 }
 
 /* When suppress_plain_calls is true (a TS/JS/TSX weak short-name member-call
@@ -2613,18 +2644,15 @@ static void resolve_file_usages(resolve_ctx_t *rc, resolve_worker_state_t *ws,
         if (!tgt || src->id == tgt->id) {
             continue;
         }
-        /* 512, matching the sequential twin in pass_usages.c. esc_ref holds up
-         * to 255 bytes and the {"callee":"..."} wrapper adds 13, so a 256-byte
-         * uprops truncates a long callable identifier mid-string -- cutting the
-         * closing quote-brace and persisting MALFORMED JSON. The two paths must
-         * also agree: the same repo indexed in parallel and sequentially has to
-         * produce byte-identical edge properties. */
-        char uprops[CBM_SZ_512];
-        char esc_ref[CBM_SZ_256]; /* sliced source text: escape quotes/newlines */
-        cbm_json_escape(esc_ref, sizeof(esc_ref), usage->ref_name);
-        snprintf(uprops, sizeof(uprops), "{\"callee\":\"%s\"}", esc_ref);
+        /* Matches the sequential twin in pass_usages.c: the same repo indexed
+         * in parallel and sequentially has to produce byte-identical edge
+         * properties. */
+        cbm_gbuf_prop_t uprops[] = {
+            {.key = "callee", .kind = CBM_EDGE_PROP_STRING, .text = usage->ref_name},
+        };
         const char *edge_type = precise_call_reference ? "CALL_REFERENCE" : "USAGE";
-        cbm_gbuf_insert_edge(ws->local_edge_buf, src->id, tgt->id, edge_type, uprops);
+        cbm_gbuf_insert_edge_props(ws->local_edge_buf, src->id, tgt->id, edge_type, uprops,
+                                   (int)(sizeof(uprops) / sizeof(uprops[0])));
         ws->usages_resolved++;
     }
     cbm_pipeline_lsp_reference_index_free(&reference_index);
@@ -2657,7 +2685,7 @@ static void resolve_file_throws(resolve_ctx_t *rc, resolve_worker_state_t *ws,
         if (!tgt || src->id == tgt->id) {
             continue;
         }
-        cbm_gbuf_insert_edge(ws->local_edge_buf, src->id, tgt->id, edge_type, "{}");
+        cbm_gbuf_insert_edge_props(ws->local_edge_buf, src->id, tgt->id, edge_type, NULL, 0);
     }
 }
 
@@ -2685,7 +2713,7 @@ static void resolve_file_rw(resolve_ctx_t *rc, resolve_worker_state_t *ws, CBMFi
             continue;
         }
         const char *etype = rw->is_write ? "WRITES" : "READS";
-        cbm_gbuf_insert_edge(ws->local_edge_buf, src->id, tgt->id, etype, "{}");
+        cbm_gbuf_insert_edge_props(ws->local_edge_buf, src->id, tgt->id, etype, NULL, 0);
     }
 }
 
@@ -2706,8 +2734,8 @@ static void resolve_def_inherits(resolve_ctx_t *rc, resolve_worker_state_t *ws,
             /* Same Interface-label split as the sequential semantic pass —
              * hardcoding INHERITS here demoted every explicit `implements`
              * on large (parallel-path) corpora. */
-            cbm_gbuf_insert_edge(ws->local_edge_buf, node->id, bn->id,
-                                 cbm_semantic_base_edge_type(bn), "{}");
+            cbm_gbuf_insert_edge_props(ws->local_edge_buf, node->id, bn->id,
+                                       cbm_semantic_base_edge_type(bn), NULL, 0);
             ws->semantic_resolved++;
         }
     }
@@ -2767,17 +2795,17 @@ static void resolve_def_decorators(resolve_ctx_t *rc, resolve_worker_state_t *ws
         }
         if (dn_id != 0 && node->id != dn_id) {
             /* Decorator SOURCE TEXT can contain quotes and raw newlines
-             * (e.g. @register.tag("block"), multi-line @override_settings) —
-             * interpolating it raw produced malformed properties JSON that
-             * aborts every json_extract consumer (django: 3826 such edges). */
-            char esc_dec[CBM_SZ_256];
-            cbm_json_escape(esc_dec, sizeof(esc_dec), def->decorators[dc]);
-            char dp[CBM_SZ_512];
-            snprintf(dp, sizeof(dp), "{\"decorator\":\"%s\"}", esc_dec);
-            cbm_gbuf_insert_edge(ws->local_edge_buf, node->id, dn_id, "DECORATES", dp);
+             * (e.g. @register.tag("block"), multi-line @override_settings);
+             * the typed STRING prop is JSON-escaped by the graph buffer on
+             * serialization, so the raw text is safe to pass through here. */
+            cbm_gbuf_prop_t dp[] = {
+                {.key = "decorator", .kind = CBM_EDGE_PROP_STRING, .text = def->decorators[dc]},
+            };
+            cbm_gbuf_insert_edge_props(ws->local_edge_buf, node->id, dn_id, "DECORATES", dp,
+                                       (int)(sizeof(dp) / sizeof(dp[0])));
             /* Ensure a reference-style edge exists so the decorator appears in queries
              * without being misclassified as a real call by downstream passes. */
-            cbm_gbuf_insert_edge(ws->local_edge_buf, node->id, dn_id, "USAGE", "{}");
+            cbm_gbuf_insert_edge_props(ws->local_edge_buf, node->id, dn_id, "USAGE", NULL, 0);
             ws->semantic_resolved++;
         }
     }
@@ -2814,7 +2842,7 @@ static void resolve_file_semantic(resolve_ctx_t *rc, resolve_worker_state_t *ws,
         const cbm_gbuf_node_t *tn = cbm_gbuf_find_by_qn(rc->main_gbuf, tqn);
         const cbm_gbuf_node_t *sn = cbm_gbuf_find_by_qn(rc->main_gbuf, sqn);
         if (tn && sn && tn->id != sn->id) {
-            cbm_gbuf_insert_edge(ws->local_edge_buf, sn->id, tn->id, "IMPLEMENTS", "{}");
+            cbm_gbuf_insert_edge_props(ws->local_edge_buf, sn->id, tn->id, "IMPLEMENTS", NULL, 0);
             ws->semantic_resolved++;
         }
     }

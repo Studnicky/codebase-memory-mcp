@@ -24,6 +24,8 @@
 #include "foundation/compat_regex.h"
 
 /* ── Config link confidence scores ───────────────────────────────── */
+/* Serialized decimal precision for a CONFIGURES edge's "confidence" prop. */
+enum { CONFIGLINK_CONFIDENCE_DECIMALS = 2 };
 /* Strategy 1: Key→Symbol matching */
 #define CONF_KEY_EXACT 0.85
 #define CONF_KEY_SUBSTRING 0.75
@@ -431,11 +433,16 @@ static int emit_group_edges(cbm_gbuf_t *gb, const pattern_group_list_t *groups,
     int edges = 0;
     for (int k = 0; k < group->config_idx.count; k++) {
         const config_entry_t *ce = &config_entries[group->config_idx.items[k]];
-        char props[CBM_SZ_512];
-        snprintf(props, sizeof(props),
-                 "{\"strategy\":\"key_symbol\",\"confidence\":%.2f,\"config_key\":\"%s\"}",
-                 confidence, ce->name);
-        cbm_gbuf_insert_edge(gb, code_entry->node_id, ce->node_id, "CONFIGURES", props);
+        cbm_gbuf_prop_t props[] = {
+            {.key = "strategy", .kind = CBM_EDGE_PROP_STRING, .text = "key_symbol"},
+            {.key = "confidence",
+             .kind = CBM_EDGE_PROP_NUMBER,
+             .number = confidence,
+             .decimals = CONFIGLINK_CONFIDENCE_DECIMALS},
+            {.key = "config_key", .kind = CBM_EDGE_PROP_STRING, .text = ce->name},
+        };
+        cbm_gbuf_insert_edge_props(gb, code_entry->node_id, ce->node_id, "CONFIGURES", props,
+                                   (int)(sizeof(props) / sizeof(props[0])));
         edges++;
     }
     return edges;
@@ -646,13 +653,16 @@ static int strategy_dep_imports(cbm_gbuf_t *gb) {
 
             double confidence = match_dep_to_import(target, dep_lower);
             if (confidence > 0.0) {
-                char props[CBM_SZ_512];
-                snprintf(
-                    props, sizeof(props),
-                    "{\"strategy\":\"dependency_import\",\"confidence\":%.2f,\"dep_name\":\"%s\"}",
-                    confidence, deps[di].name);
-
-                cbm_gbuf_insert_edge(gb, source->id, deps[di].node_id, "CONFIGURES", props);
+                cbm_gbuf_prop_t props[] = {
+                    {.key = "strategy", .kind = CBM_EDGE_PROP_STRING, .text = "dependency_import"},
+                    {.key = "confidence",
+                     .kind = CBM_EDGE_PROP_NUMBER,
+                     .number = confidence,
+                     .decimals = CONFIGLINK_CONFIDENCE_DECIMALS},
+                    {.key = "dep_name", .kind = CBM_EDGE_PROP_STRING, .text = deps[di].name},
+                };
+                cbm_gbuf_insert_edge_props(gb, source->id, deps[di].node_id, "CONFIGURES", props,
+                                           (int)(sizeof(props) / sizeof(props[0])));
                 edge_count++;
             }
         }

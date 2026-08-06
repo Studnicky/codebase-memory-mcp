@@ -135,8 +135,12 @@ static void handle_kustomize(cbm_pipeline_ctx_t *ctx, const char *path, const ch
             free(target_qn);
 
             if (target) {
-                cbm_gbuf_insert_edge(ctx->gbuf, mod_id, target->id, "IMPORTS",
-                                     "{\"via\":\"kustomize\"}");
+                const cbm_gbuf_prop_t kustomize_props[] = {
+                    {.key = "via", .kind = CBM_EDGE_PROP_STRING, .text = "kustomize"},
+                };
+                cbm_gbuf_insert_edge_props(
+                    ctx->gbuf, mod_id, target->id, "IMPORTS", kustomize_props,
+                    (int)(sizeof(kustomize_props) / sizeof(kustomize_props[0])));
                 import_count++;
             }
         }
@@ -352,11 +356,14 @@ static void k8s_link_selectors(cbm_pipeline_ctx_t *ctx, const k8s_record_array_t
                 continue;
             }
             if (k8s_selector_matches(svc, wl)) {
-                char props[CBM_SZ_256];
-                snprintf(props, sizeof(props),
-                         "{\"kind\":\"selector\",\"service\":\"%s\",\"workload\":\"%s\"}",
-                         svc->name, wl->name);
-                cbm_gbuf_insert_edge(ctx->gbuf, svc->node_id, wl->node_id, "INFRA_MAPS", props);
+                const cbm_gbuf_prop_t selector_props[] = {
+                    {.key = "kind", .kind = CBM_EDGE_PROP_STRING, .text = "selector"},
+                    {.key = "service", .kind = CBM_EDGE_PROP_STRING, .text = svc->name},
+                    {.key = "workload", .kind = CBM_EDGE_PROP_STRING, .text = wl->name},
+                };
+                cbm_gbuf_insert_edge_props(
+                    ctx->gbuf, svc->node_id, wl->node_id, "INFRA_MAPS", selector_props,
+                    (int)(sizeof(selector_props) / sizeof(selector_props[0])));
                 edges++;
             }
         }
@@ -403,7 +410,7 @@ static void handle_k8s_manifest(cbm_pipeline_ctx_t *ctx, const char *path, const
 
         /* DEFINES edge: File → Resource */
         if (file_node && node_id > 0) {
-            cbm_gbuf_insert_edge(ctx->gbuf, file_node->id, node_id, "DEFINES", "{}");
+            cbm_gbuf_insert_edge_props(ctx->gbuf, file_node->id, node_id, "DEFINES", NULL, 0);
         }
 
         /* Capture the first Resource for cross-manifest selector matching. */
@@ -450,7 +457,7 @@ static void handle_helm_chart(cbm_pipeline_ctx_t *ctx, const char *rel_path, con
     char *file_qn = cbm_pipeline_fqn_compute(ctx->project_name, rel_path, "__file__");
     const cbm_gbuf_node_t *file_node = file_qn ? cbm_gbuf_find_by_qn(ctx->gbuf, file_qn) : NULL;
     if (file_node && chart_id > 0) {
-        cbm_gbuf_insert_edge(ctx->gbuf, file_node->id, chart_id, "DEFINES", "{}");
+        cbm_gbuf_insert_edge_props(ctx->gbuf, file_node->id, chart_id, "DEFINES", NULL, 0);
     }
     free(file_qn);
 
@@ -464,7 +471,7 @@ static void handle_helm_chart(cbm_pipeline_ctx_t *ctx, const char *rel_path, con
             cbm_gbuf_upsert_node(ctx->gbuf, "Chart", hc.deps[i], dep_qn, rel_path, SKIP_ONE, 0,
                                  "{\"source\":\"helm\",\"external\":true}");
         if (dep_id > 0) {
-            cbm_gbuf_insert_edge(ctx->gbuf, chart_id, dep_id, "DEPENDS_ON", "{}");
+            cbm_gbuf_insert_edge_props(ctx->gbuf, chart_id, dep_id, "DEPENDS_ON", NULL, 0);
             dep_edges++;
         }
     }
@@ -495,7 +502,7 @@ static int emit_dep_edge(cbm_pipeline_ctx_t *ctx, const cbm_gbuf_node_t *src, co
     int64_t dep_id =
         cbm_gbuf_upsert_node(ctx->gbuf, "Package", name, dep_qn, rel_path, SKIP_ONE, 0, dep_props);
     if (dep_id > 0 && dep_id != src->id) {
-        cbm_gbuf_insert_edge(ctx->gbuf, src->id, dep_id, "DEPENDS_ON", "{}");
+        cbm_gbuf_insert_edge_props(ctx->gbuf, src->id, dep_id, "DEPENDS_ON", NULL, 0);
         return 1;
     }
     return 0;
