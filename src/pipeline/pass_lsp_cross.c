@@ -578,21 +578,12 @@ int cbm_pxc_build_import_map(const cbm_gbuf_t *gbuf, const char *project_name, c
     for (int i = 0; i < edge_count; i++) {
         const cbm_gbuf_edge_t *e = edges[i];
         const cbm_gbuf_node_t *target = cbm_gbuf_find_by_id(gbuf, e->target_id);
-        if (!target || !e->properties_json)
+        const char *local_name = target ? cbm_gbuf_edge_prop_string(e, "local_name") : NULL;
+        if (!local_name)
             continue;
-        const char *start = strstr(e->properties_json, "\"local_name\":\"");
-        if (!start)
-            continue;
-        start += strlen("\"local_name\":\"");
-        const char *end = strchr(start, '"');
-        if (!end || end <= start)
-            continue;
-        size_t n = (size_t)(end - start);
-        char *local = (char *)malloc(n + 1);
+        char *local = strdup(local_name);
         if (!local)
             continue;
-        memcpy(local, start, n);
-        local[n] = '\0';
         char *value = pxc_import_value_qn(lang, result, local, target);
         if (!value) {
             free(local);

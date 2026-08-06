@@ -433,14 +433,22 @@ static void delta_patch_edge(const cbm_gbuf_edge_t *edge, void *userdata) {
         tgt == edge->target_id) {
         return; /* both endpoints pre-existed unremapped: already recorded */
     }
+    char *props_json = cbm_gbuf_edge_props_json_alloc(edge);
+    if (!props_json) {
+        ctx->failed = true;
+        cbm_log_error("delta.patch_edge_props_alloc_failed", "type", edge->type ? edge->type : "");
+        return;
+    }
+
     sqlite3_reset(ctx->edge_stmt);
     sqlite3_bind_text(ctx->edge_stmt, 1, ctx->project, CBM_NOT_FOUND, SQLITE_TRANSIENT);
     sqlite3_bind_int64(ctx->edge_stmt, 2, src);
     sqlite3_bind_int64(ctx->edge_stmt, 3, tgt);
     sqlite3_bind_text(ctx->edge_stmt, 4, edge->type, CBM_NOT_FOUND, SQLITE_TRANSIENT);
-    sqlite3_bind_text(ctx->edge_stmt, 5, edge->properties_json ? edge->properties_json : "{}",
-                      CBM_NOT_FOUND, SQLITE_TRANSIENT);
-    if (sqlite3_step(ctx->edge_stmt) != SQLITE_DONE) {
+    sqlite3_bind_text(ctx->edge_stmt, 5, props_json, CBM_NOT_FOUND, SQLITE_TRANSIENT);
+    int step_rc = sqlite3_step(ctx->edge_stmt);
+    free(props_json);
+    if (step_rc != SQLITE_DONE) {
         ctx->failed = true;
         cbm_log_error("delta.patch_edge_failed", "type", edge->type ? edge->type : "");
         return;

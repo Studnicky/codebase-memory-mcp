@@ -133,19 +133,15 @@ static int build_import_map(cbm_pipeline_ctx_t *ctx, const char *rel_path,
     for (int i = 0; i < edge_count; i++) {
         const cbm_gbuf_edge_t *e = edges[i];
         const cbm_gbuf_node_t *target = cbm_gbuf_find_by_id(ctx->gbuf, e->target_id);
-        if (!target || !e->properties_json) {
+        if (!target) {
             continue;
         }
 
-        const char *start = strstr(e->properties_json, "\"local_name\":\"");
-        if (start) {
-            start += strlen("\"local_name\":\"");
-            const char *end = strchr(start, '"');
-            if (end && end > start) {
-                keys[count] = cbm_strndup(start, end - start);
-                vals[count] = target->qualified_name;
-                count++;
-            }
+        const char *local_name = cbm_gbuf_edge_prop_string(e, "local_name");
+        if (local_name) {
+            keys[count] = cbm_strndup(local_name, strlen(local_name));
+            vals[count] = target->qualified_name;
+            count++;
         }
     }
 

@@ -35,6 +35,7 @@ enum {
 #include "foundation/log.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 bool cbm_service_pattern_is_http_route_literal(const char *literal, const char *callee_name);
@@ -128,33 +129,6 @@ const char *cbm_route_canon_path(const char *in, char *out, size_t out_sz) {
     return out;
 }
 
-/* Extract a JSON string value by key from properties.
- * Returns pointer into buf (caller provides buffer). NULL if not found. */
-static const char *json_extract(const char *json, const char *key, char *buf, int bufsz) {
-    if (!json || !key) {
-        return NULL;
-    }
-    /* Build "key":" pattern */
-    char pattern[CBM_SZ_128];
-    snprintf(pattern, sizeof(pattern), "\"%s\":\"", key);
-    const char *start = strstr(json, pattern);
-    if (!start) {
-        return NULL;
-    }
-    start += strlen(pattern);
-    const char *end = strchr(start, '"');
-    if (!end || end == start) {
-        return NULL;
-    }
-    int len = (int)(end - start);
-    if (len >= bufsz) {
-        len = bufsz - SKIP_ONE;
-    }
-    memcpy(buf, start, (size_t)len);
-    buf[len] = '\0';
-    return buf;
-}
-
 /* Visitor context for edge scanning */
 typedef struct {
     cbm_gbuf_t *gb;
@@ -170,26 +144,19 @@ static void route_edge_visitor(const cbm_gbuf_edge_t *edge, void *userdata) {
     }
 
     /* Extract url_path from properties */
-    char url_buf[CBM_SZ_512];
-    const char *url = json_extract(edge->properties_json, "url_path", url_buf, sizeof(url_buf));
+    const char *url = cbm_gbuf_edge_prop_string(edge, "url_path");
     if (!url || !url[0]) {
         return;
     }
-    char callee_buf[CBM_SZ_256];
-    const char *callee =
-        json_extract(edge->properties_json, "callee", callee_buf, sizeof(callee_buf));
+    const char *callee = cbm_gbuf_edge_prop_string(edge, "callee");
     if (strcmp(edge->type, "HTTP_CALLS") == 0 &&
         !cbm_service_pattern_is_http_route_literal(url, callee)) {
         return;
     }
 
     /* Extract method or broker */
-    char method_buf[CBM_SZ_16];
-    char broker_buf[CBM_SZ_64];
-    const char *method =
-        json_extract(edge->properties_json, "method", method_buf, sizeof(method_buf));
-    const char *broker =
-        json_extract(edge->properties_json, "broker", broker_buf, sizeof(broker_buf));
+    const char *method = cbm_gbuf_edge_prop_string(edge, "method");
+    const char *broker = cbm_gbuf_edge_prop_string(edge, "broker");
 
     /* Build Route QN */
     char route_qn[CBM_ROUTE_QN_SIZE];
@@ -671,16 +638,13 @@ static void finish_data_flow_props(char *props, size_t propsz, size_t pos,
 
 typedef struct {
     int64_t source_id;
-    const char *props;
+    char *props; /* heap-owned: cbm_gbuf_edge_props_json_alloc(edge); caller frees */
     const char *edge_type;
 } caller_edge_ref_t;
 
 static bool http_call_edge_has_valid_route(const cbm_gbuf_edge_t *edge) {
-    char url_buf[CBM_SZ_512];
-    const char *url = json_extract(edge->properties_json, "url_path", url_buf, sizeof(url_buf));
-    char callee_buf[CBM_SZ_256];
-    const char *callee =
-        json_extract(edge->properties_json, "callee", callee_buf, sizeof(callee_buf));
+    const char *url = cbm_gbuf_edge_prop_string(edge, "url_path");
+    const char *callee = cbm_gbuf_edge_prop_string(edge, "callee");
     return cbm_service_pattern_is_http_route_literal(url, callee);
 }
 
@@ -758,7 +722,11 @@ static int collect_infra_handlers(cbm_gbuf_t *gb, int64_t route_id, int64_t *out
     return n;
 }
 
-/* Collect caller edges (HTTP_CALLS + ASYNC_CALLS) targeting a route. */
+/* Collect caller edges (HTTP_CALLS + ASYNC_CALLS) targeting a route. Each
+ * out[].props is a fresh heap allocation (cbm_gbuf_edge_props_json_alloc) —
+ * the caller frees them once done (see create_data_flows). An edge whose
+ * properties fail to serialize (OOM) is skipped rather than added with a
+ * missing props string. */
 static int collect_caller_edges(cbm_gbuf_t *gb, int64_t route_id, caller_edge_ref_t *out,
                                 int max_out) {
     int n = 0;
@@ -769,8 +737,12 @@ static int collect_caller_edges(cbm_gbuf_t *gb, int64_t route_id, caller_edge_re
         if (!http_call_edge_has_valid_route(http_edges[i])) {
             continue;
         }
+        char *props = cbm_gbuf_edge_props_json_alloc(http_edges[i]);
+        if (!props) {
+            continue;
+        }
         out[n].source_id = http_edges[i]->source_id;
-        out[n].props = http_edges[i]->properties_json;
+        out[n].props = props;
         out[n].edge_type = "HTTP_CALLS";
         n++;
     }
@@ -778,8 +750,12 @@ static int collect_caller_edges(cbm_gbuf_t *gb, int64_t route_id, caller_edge_re
     int async_count = 0;
     cbm_gbuf_find_edges_by_target_type(gb, route_id, "ASYNC_CALLS", &async_edges, &async_count);
     for (int i = 0; i < async_count && n < max_out; i++) {
+        char *props = cbm_gbuf_edge_props_json_alloc(async_edges[i]);
+        if (!props) {
+            continue;
+        }
         out[n].source_id = async_edges[i]->source_id;
-        out[n].props = async_edges[i]->properties_json;
+        out[n].props = props;
         out[n].edge_type = "ASYNC_CALLS";
         n++;
     }
@@ -902,6 +878,9 @@ static void create_data_flows(cbm_gbuf_t *gb) {
         caller_edge_ref_t caller_edges[CBM_SZ_64];
         int n_callers = collect_caller_edges(gb, routes[ri]->id, caller_edges, CBM_SZ_64);
         create_route_data_flows(gb, routes[ri], caller_edges, n_callers, &flows, &skipped);
+        for (int ci = 0; ci < n_callers; ci++) {
+            free(caller_edges[ci].props);
+        }
     }
 
     if (flows > 0 || skipped > 0) {

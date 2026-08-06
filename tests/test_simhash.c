@@ -657,7 +657,11 @@ TEST(pass_similarity_same_file_tagged) {
     cbm_gbuf_find_edges_by_source_type(gb, id_b, "SIMILAR_TO", &edges, &edge_count);
     ASSERT_EQ(edge_count, 1);
     /* Edge should have same_file property */
-    ASSERT_NOT_NULL(strstr(edges[0]->properties_json, "\"same_file\":true"));
+    {
+        bool same_file = false;
+        ASSERT_TRUE(cbm_gbuf_edge_prop_bool(edges[0], "same_file", &same_file));
+        ASSERT_TRUE(same_file);
+    }
 
     cbm_gbuf_free(gb);
     PASS();
@@ -728,8 +732,13 @@ TEST(pass_similarity_edge_properties) {
     int edge_count = 0;
     cbm_gbuf_find_edges_by_source_type(gb, id_a, "SIMILAR_TO", &edges, &edge_count);
     ASSERT_EQ(edge_count, 1);
-    ASSERT_NOT_NULL(strstr(edges[0]->properties_json, "\"jaccard\""));
-    ASSERT_NOT_NULL(strstr(edges[0]->properties_json, "\"same_file\":false"));
+    {
+        double jaccard = 0.0;
+        bool same_file = true;
+        ASSERT_TRUE(cbm_gbuf_edge_prop_number(edges[0], "jaccard", &jaccard));
+        ASSERT_TRUE(cbm_gbuf_edge_prop_bool(edges[0], "same_file", &same_file));
+        ASSERT_TRUE(!same_file);
+    }
 
     cbm_gbuf_free(gb);
     PASS();

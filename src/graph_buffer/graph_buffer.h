@@ -33,12 +33,34 @@ typedef struct {
     char *properties_json; /* heap-owned JSON string, "{}" default */
 } cbm_gbuf_node_t;
 
+/* Typed edge property kinds. STRING also carries verbatim JSON literal text
+ * for values the buffer cannot classify (arrays, objects) — see
+ * cbm_gbuf_insert_edge's JSON-parsing shim. */
+typedef enum {
+    CBM_EDGE_PROP_STRING,
+    CBM_EDGE_PROP_NUMBER,
+    CBM_EDGE_PROP_BOOL,
+} cbm_edge_prop_kind_t;
+
+/* A single typed edge property. As an argument to cbm_gbuf_insert_edge_props,
+ * key/text are borrowed (callers pass string literals or stack buffers that
+ * outlive only the call); the buffer heap-copies them on store. */
 typedef struct {
-    int64_t id;            /* temp ID */
-    int64_t source_id;     /* temp node ID */
-    int64_t target_id;     /* temp node ID */
-    char *type;            /* heap-owned */
-    char *properties_json; /* heap-owned JSON string, "{}" default */
+    const char *key; /* borrowed on input; heap-owned once stored on an edge */
+    cbm_edge_prop_kind_t kind;
+    const char *text; /* STRING only; NULL for NUMBER/BOOL */
+    double number;    /* NUMBER only */
+    bool flag;        /* BOOL only */
+    int decimals;     /* NUMBER only: fixed decimals when serializing to JSON */
+} cbm_gbuf_prop_t;
+
+typedef struct {
+    int64_t id;             /* temp ID */
+    int64_t source_id;      /* temp node ID */
+    int64_t target_id;      /* temp node ID */
+    char *type;             /* heap-owned */
+    cbm_gbuf_prop_t *props; /* heap-owned array; each key/text heap-owned */
+    int prop_count;
 } cbm_gbuf_edge_t;
 
 /* ── Lifecycle ──────────────────────────────────────────────────── */
@@ -123,6 +145,36 @@ void cbm_gbuf_foreach_edge(const cbm_gbuf_t *gb, cbm_gbuf_edge_visitor_fn fn, vo
  * Returns 0 on error. */
 int64_t cbm_gbuf_insert_edge(cbm_gbuf_t *gb, int64_t source_id, int64_t target_id, const char *type,
                              const char *properties_json);
+
+/* Insert an edge with typed properties. Deduplicates by (source_id, target_id,
+ * type) — IMPORTS edges also key on the "local_name" property (#768). On
+ * duplicate, replaces the stored properties only when the incoming set wins
+ * under edge_props_should_replace's rule (higher "confidence" wins; ties
+ * break on a deterministic serialized-JSON order; an empty incoming set never
+ * displaces stored properties). props/prop_count are borrowed for the call;
+ * key/text are heap-copied into the edge. Returns edge temp ID, 0 on error. */
+int64_t cbm_gbuf_insert_edge_props(cbm_gbuf_t *gb, int64_t source_id, int64_t target_id,
+                                   const char *type, const cbm_gbuf_prop_t *props, int prop_count);
+
+/* Typed property accessors. Return NULL/false when the edge has no property
+ * with that key and kind. The returned string pointer is borrowed (edge-owned,
+ * valid until the edge is freed or its properties are replaced). */
+const char *cbm_gbuf_edge_prop_string(const cbm_gbuf_edge_t *edge, const char *key);
+bool cbm_gbuf_edge_prop_number(const cbm_gbuf_edge_t *edge, const char *key, double *out);
+bool cbm_gbuf_edge_prop_bool(const cbm_gbuf_edge_t *edge, const char *key, bool *out);
+
+/* Serialize an edge's typed properties to a flat JSON object into `out`
+ * (NUL-terminated, keys in insertion order, numbers at their fixed decimals,
+ * strings JSON-escaped). Empty property list yields "{}". Returns true if the
+ * JSON fit in out_size; on overflow or error, out holds an empty string. */
+bool cbm_gbuf_edge_props_json(const cbm_gbuf_edge_t *edge, char *out, size_t out_size);
+
+/* Serialize an edge's typed properties to a malloc'd flat JSON object string
+ * (unbounded — for callers that cannot use a fixed-size buffer, e.g. an
+ * incremental-index snapshot capturing CALLS edges' arg-expression props).
+ * Caller frees. Returns NULL on OOM or a NULL edge — callers must treat NULL
+ * as a failed capture, not silently substitute "{}". */
+char *cbm_gbuf_edge_props_json_alloc(const cbm_gbuf_edge_t *edge);
 
 /* Find edges from source_id with given type.
  * Sets *out and *count. Caller does NOT free. */

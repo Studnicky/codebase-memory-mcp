@@ -18,6 +18,7 @@
 #include "discover/discover.h"
 #include "foundation/platform.h"
 #include "foundation/log.h"
+#include "foundation/constants.h"
 #include "cbm.h"
 
 #include <stdlib.h>
@@ -723,6 +724,19 @@ TEST(gbuf_next_id_accessors) {
  * carries an "lsp_*" strategy — proof the parallel path consults
  * result->resolved_calls and emits LSP-attributed edges. */
 
+/* True when edge's "strategy" string property is exactly `strategy`. */
+static bool edge_has_strategy(const cbm_gbuf_edge_t *edge, const char *strategy) {
+    const char *s = cbm_gbuf_edge_prop_string(edge, "strategy");
+    return s && strcmp(s, strategy) == 0;
+}
+
+/* True when edge's "strategy" string property starts with `prefix`
+ * (e.g. "lsp" matches "lsp", "lsp_exact", "lsp_fallback", ...). */
+static bool edge_has_strategy_prefix(const cbm_gbuf_edge_t *edge, const char *prefix) {
+    const char *s = cbm_gbuf_edge_prop_string(edge, "strategy");
+    return s && strncmp(s, prefix, strlen(prefix)) == 0;
+}
+
 typedef struct {
     int lsp_strategy_count;
     int total_calls;
@@ -734,7 +748,7 @@ static void count_lsp_call_edges(const cbm_gbuf_edge_t *edge, void *ud) {
         return;
     }
     c->total_calls++;
-    if (edge->properties_json && strstr(edge->properties_json, "\"strategy\":\"lsp")) {
+    if (edge_has_strategy_prefix(edge, "lsp")) {
         c->lsp_strategy_count++;
     }
 }
@@ -1285,12 +1299,16 @@ TEST(parallel_lsp_index_exact_ambiguity_does_not_fall_through_to_legacy) {
     if (!probe.ambiguity.injected || !probe.legacy_injected || !probe.carrier_allows_fallback ||
         !probe.shared_matcher_failed_closed || alpha_edges != 1 || beta_edges != 0 ||
         legacy_edges != 0) {
+        char legacy_props[CBM_SZ_256] = "";
+        if (legacy_edge) {
+            cbm_gbuf_edge_props_json(legacy_edge, legacy_props, sizeof(legacy_props));
+        }
         printf("  exact ambiguity + legacy diagnostic: exact_ambiguity=%d legacy=%d "
                "fallback_allowed=%d shared_failed_closed=%d alpha=%d beta=%d legacy_edge=%d "
                "props=%s\n",
                probe.ambiguity.injected, probe.legacy_injected, probe.carrier_allows_fallback,
                probe.shared_matcher_failed_closed, alpha_edges, beta_edges, legacy_edges,
-               legacy_edge && legacy_edge->properties_json ? legacy_edge->properties_json : "");
+               legacy_props);
     }
 
     cbm_gbuf_free(gbuf);
@@ -2850,12 +2868,12 @@ TEST(parallel_java_kotlin_lsp_override_cross_file_emits_lsp_strategy_edges) {
 
     ASSERT_NOT_NULL(java_to_kotlin);
     ASSERT_NOT_NULL(kotlin_to_java);
-    ASSERT_NOT_NULL(java_to_kotlin->properties_json);
-    ASSERT_NOT_NULL(kotlin_to_java->properties_json);
-    ASSERT_NOT_NULL(strstr(java_to_kotlin->properties_json, "\"strategy\":\"lsp"));
-    ASSERT_NOT_NULL(strstr(kotlin_to_java->properties_json, "\"strategy\":\"lsp"));
-    ASSERT_TRUE(strstr(java_to_kotlin->properties_json, "\"strategy\":\"callee_suffix\"") == NULL);
-    ASSERT_TRUE(strstr(kotlin_to_java->properties_json, "\"strategy\":\"callee_suffix\"") == NULL);
+    ASSERT_TRUE(java_to_kotlin->prop_count > 0);
+    ASSERT_TRUE(kotlin_to_java->prop_count > 0);
+    ASSERT_TRUE(edge_has_strategy_prefix(java_to_kotlin, "lsp"));
+    ASSERT_TRUE(edge_has_strategy_prefix(kotlin_to_java, "lsp"));
+    ASSERT_TRUE(!edge_has_strategy(java_to_kotlin, "callee_suffix"));
+    ASSERT_TRUE(!edge_has_strategy(kotlin_to_java, "callee_suffix"));
 
     cbm_gbuf_free(gbuf);
     unlink(kpath);
@@ -3215,10 +3233,10 @@ TEST(parallel_cross_file_reread_preserves_unretained_edges) {
         ASSERT_NOT_NULL(kotlin_to_java);
         /* And they must come from the source-dependent cross-file LSP, not a
          * source-free suffix heuristic — proving the re-read actually ran. */
-        ASSERT_NOT_NULL(java_to_kotlin->properties_json);
-        ASSERT_NOT_NULL(strstr(java_to_kotlin->properties_json, "\"strategy\":\"lsp"));
-        ASSERT_NOT_NULL(kotlin_to_java->properties_json);
-        ASSERT_NOT_NULL(strstr(kotlin_to_java->properties_json, "\"strategy\":\"lsp"));
+        ASSERT_TRUE(java_to_kotlin->prop_count > 0);
+        ASSERT_TRUE(edge_has_strategy_prefix(java_to_kotlin, "lsp"));
+        ASSERT_TRUE(kotlin_to_java->prop_count > 0);
+        ASSERT_TRUE(edge_has_strategy_prefix(kotlin_to_java, "lsp"));
 
         cbm_gbuf_free(gbuf);
     }

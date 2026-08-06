@@ -34,12 +34,16 @@ static int run_configlink(cbm_gbuf_t *gb, const char *project, const char *repo_
 
 /* ── Helpers ─────────────────────────────────────────────────────── */
 
-/* Helper to check if any CONFIGURES edge has a given strategy (parsed from JSON) */
+/* True when edge's "strategy" string property equals `strategy`. */
+static bool edge_has_strategy(const cbm_gbuf_edge_t *edge, const char *strategy) {
+    const char *s = cbm_gbuf_edge_prop_string(edge, "strategy");
+    return s && strcmp(s, strategy) == 0;
+}
+
+/* Helper to check if any CONFIGURES edge has a given strategy */
 static bool has_strategy(const cbm_gbuf_edge_t **edges, int count, const char *strategy) {
-    char needle[64];
-    snprintf(needle, sizeof(needle), "\"strategy\":\"%s\"", strategy);
     for (int i = 0; i < count; i++) {
-        if (edges[i]->properties_json && strstr(edges[i]->properties_json, needle))
+        if (edge_has_strategy(edges[i], strategy))
             return true;
     }
     return false;
@@ -48,14 +52,10 @@ static bool has_strategy(const cbm_gbuf_edge_t **edges, int count, const char *s
 /* Check if any CONFIGURES edge has given strategy AND confidence. */
 static bool has_strategy_with_confidence(const cbm_gbuf_edge_t **edges, int count,
                                          const char *strategy, double confidence) {
-    char strat_needle[64];
-    snprintf(strat_needle, sizeof(strat_needle), "\"strategy\":\"%s\"", strategy);
-    char conf_needle[64];
-    snprintf(conf_needle, sizeof(conf_needle), "\"confidence\":%.2f", confidence);
-
     for (int i = 0; i < count; i++) {
-        if (edges[i]->properties_json && strstr(edges[i]->properties_json, strat_needle) &&
-            strstr(edges[i]->properties_json, conf_needle))
+        double conf = 0.0;
+        if (edge_has_strategy(edges[i], strategy) &&
+            cbm_gbuf_edge_prop_number(edges[i], "confidence", &conf) && conf == confidence)
             return true;
     }
     return false;
@@ -64,14 +64,9 @@ static bool has_strategy_with_confidence(const cbm_gbuf_edge_t **edges, int coun
 /* Check if any CONFIGURES edge has given strategy AND config_key. */
 static bool has_strategy_with_key(const cbm_gbuf_edge_t **edges, int count, const char *strategy,
                                   const char *config_key) {
-    char strat_needle[64];
-    snprintf(strat_needle, sizeof(strat_needle), "\"strategy\":\"%s\"", strategy);
-    char key_needle[128];
-    snprintf(key_needle, sizeof(key_needle), "\"config_key\":\"%s\"", config_key);
-
     for (int i = 0; i < count; i++) {
-        if (edges[i]->properties_json && strstr(edges[i]->properties_json, strat_needle) &&
-            strstr(edges[i]->properties_json, key_needle))
+        const char *key = cbm_gbuf_edge_prop_string(edges[i], "config_key");
+        if (edge_has_strategy(edges[i], strategy) && key && strcmp(key, config_key) == 0)
             return true;
     }
     return false;

@@ -18,9 +18,14 @@ enum {
     GB_COL_5 = 5,
     GB_COL_6 = 6,
     GB_COL_7 = 7,
-    GB_URL_PATH_PREFIX = 12, /* strlen(""url_path":"") */
-    GB_MIN_FOR_DEDUP = 2,    /* need at least 2 vectors to sort+dedup */
-    GB_DEDUP_LOOKAHEAD = 1,  /* compare current with next element */
+    GB_URL_PATH_PREFIX = 12,   /* strlen(""url_path":"") */
+    GB_MIN_FOR_DEDUP = 2,      /* need at least 2 vectors to sort+dedup */
+    GB_DEDUP_LOOKAHEAD = 1,    /* compare current with next element */
+    GB_JSON_ESC_BUF = 8,       /* longest single-char JSON escape, e.g. "" + NUL */
+    GB_JSON_INIT_CAP = 256,    /* initial growable-buffer capacity for JSON serialization */
+    GB_JSON_GROW = 2,          /* growable-buffer doubling factor */
+    GB_NUM_BUF = 64,           /* fixed-decimal number rendering buffer */
+    GB_ASCII_PRINTABLE = 0x20, /* control characters below this need \u escaping */
 };
 #include "graph_buffer/graph_buffer.h"
 #include <yyjson/yyjson.h> // url_path extraction must match json_extract semantics
@@ -154,6 +159,18 @@ static uint64_t fnv1a64(const char *s, size_t len) {
     return h;
 }
 
+/* Find a property by key in a typed property array (edge-owned or a raw
+ * incoming array — both use cbm_gbuf_prop_t). Returns NULL if absent. */
+static const cbm_gbuf_prop_t *find_prop(const cbm_gbuf_prop_t *props, int prop_count,
+                                        const char *key) {
+    for (int i = 0; i < prop_count; i++) {
+        if (props[i].key && strcmp(props[i].key, key) == 0) {
+            return &props[i];
+        }
+    }
+    return NULL;
+}
+
 /* IMPORTS edges carry exactly one imported symbol's local_name (#768): two
  * named imports from the same specifier resolve to the same (source,
  * target) pair but are distinct symbols. Key on local_name too so the
@@ -171,21 +188,24 @@ static uint64_t fnv1a64(const char *s, size_t len) {
  * collide two long names sharing a prefix and silently drop an edge again.
  * The hash key is prefixed with byte 0x01, which cannot appear in the raw
  * JSON slice (control characters must be \u-escaped in JSON), so hash keys
- * can never collide with verbatim keys. */
+ * can never collide with verbatim keys.
+ *
+ * local_name is read from the typed property list rather than by scanning
+ * JSON text — the decoded value (not its escaped JSON encoding) is what's
+ * hashed/keyed on now, which only differs from the prior strstr-based key
+ * when local_name itself contains a JSON escape sequence (never true for the
+ * identifier-like names this codebase emits). */
 static void make_edge_key(char *buf, size_t bufsz, int64_t src, int64_t tgt, const char *type,
-                          const char *properties_json) {
-    if (properties_json && strcmp(type, "IMPORTS") == 0) {
-        static const char local_name_key[] = "\"local_name\":\"";
-        const char *ln = strstr(properties_json, local_name_key);
-        if (ln) {
-            ln += sizeof(local_name_key) - 1;
-            const char *end = strchr(ln, '"');
-            size_t ln_len = end ? (size_t)(end - ln) : strlen(ln);
+                          const cbm_gbuf_prop_t *props, int prop_count) {
+    if (strcmp(type, "IMPORTS") == 0) {
+        const cbm_gbuf_prop_t *ln = find_prop(props, prop_count, "local_name");
+        if (ln && ln->kind == CBM_EDGE_PROP_STRING && ln->text) {
+            size_t ln_len = strlen(ln->text);
             int n = snprintf(buf, bufsz, "%lld:%lld:%s:%.*s", (long long)src, (long long)tgt, type,
-                             (int)ln_len, ln);
+                             (int)ln_len, ln->text);
             if (n < 0 || (size_t)n >= bufsz) {
                 snprintf(buf, bufsz, "%lld:%lld:%s:\x01%016llx", (long long)src, (long long)tgt,
-                         type, (unsigned long long)fnv1a64(ln, ln_len));
+                         type, (unsigned long long)fnv1a64(ln->text, ln_len));
             }
             return;
         }
@@ -254,10 +274,21 @@ static void free_node_strings(cbm_gbuf_node_t *n) {
     free(n->properties_json);
 }
 
-/* Free a single edge's owned strings. type is interned (pool-owned) — NOT
- * freed here; the pool frees it once in cbm_gbuf_free. */
+/* Free a single edge's owned properties (each prop's key/text) and the props
+ * array itself. type is interned (pool-owned) — NOT freed here; the pool
+ * frees it once in cbm_gbuf_free. */
+static void free_edge_props(cbm_gbuf_prop_t *props, int prop_count) {
+    for (int i = 0; i < prop_count; i++) {
+        free((void *)props[i].key);
+        free((void *)props[i].text);
+    }
+    free(props);
+}
+
 static void free_edge_strings(cbm_gbuf_edge_t *e) {
-    free(e->properties_json);
+    free_edge_props(e->props, e->prop_count);
+    e->props = NULL;
+    e->prop_count = 0;
 }
 
 /* Allocate the next buffer-local or shared-atomic ID. */
@@ -298,7 +329,7 @@ static void remove_node_from_ptr_array(node_ptr_array_t *arr, int64_t node_id) {
 static void unindex_edge(cbm_gbuf_t *gb, const cbm_gbuf_edge_t *e) {
     char key[EDGE_KEY_BUF];
 
-    make_edge_key(key, sizeof(key), e->source_id, e->target_id, e->type, e->properties_json);
+    make_edge_key(key, sizeof(key), e->source_id, e->target_id, e->type, e->props, e->prop_count);
     const char *ekey = cbm_ht_get_key(gb->edge_by_key, key);
     cbm_ht_delete(gb->edge_by_key, key);
     free((void *)ekey);
@@ -1027,24 +1058,276 @@ void cbm_gbuf_foreach_edge(const cbm_gbuf_t *gb, cbm_gbuf_edge_visitor_fn fn, vo
     }
 }
 
+/* ── Edge properties: typed storage, JSON view, JSON shim ──────────── */
+
+/* Append `s` to the growable buffer *out (NUL-terminated at *len), growing
+ * via realloc as needed. Returns false (and leaves *out unmodified) on OOM. */
+static bool gb_buf_append(char **out, size_t *len, size_t *cap, const char *s) {
+    size_t n = strlen(s);
+    if (*len + n + SKIP_ONE > *cap) {
+        size_t new_cap = *cap > 0 ? *cap : GB_JSON_INIT_CAP;
+        while (*len + n + SKIP_ONE > new_cap) {
+            new_cap *= GB_JSON_GROW;
+        }
+        char *grown = realloc(*out, new_cap);
+        if (!grown) {
+            return false;
+        }
+        *out = grown;
+        *cap = new_cap;
+    }
+    memcpy(*out + *len, s, n);
+    *len += n;
+    (*out)[*len] = '\0';
+    return true;
+}
+
+/* JSON-escape and append `s` (without surrounding quotes) to the growable
+ * buffer. Returns false on OOM. */
+/* Render one byte in its JSON-escaped form. Control characters that have no
+ * short escape take the \uXXXX form, which keeps the output valid JSON for
+ * arbitrary extracted text. */
+static void gb_json_escape_byte(unsigned char ch, char esc[GB_JSON_ESC_BUF]) {
+    switch (ch) {
+    case '"':
+        snprintf(esc, GB_JSON_ESC_BUF, "\\\"");
+        return;
+    case '\\':
+        snprintf(esc, GB_JSON_ESC_BUF, "\\\\");
+        return;
+    case '\n':
+        snprintf(esc, GB_JSON_ESC_BUF, "\\n");
+        return;
+    case '\r':
+        snprintf(esc, GB_JSON_ESC_BUF, "\\r");
+        return;
+    case '\t':
+        snprintf(esc, GB_JSON_ESC_BUF, "\\t");
+        return;
+    default:
+        break;
+    }
+    if (ch < GB_ASCII_PRINTABLE) {
+        snprintf(esc, GB_JSON_ESC_BUF, "\\u%04x", ch);
+        return;
+    }
+    esc[0] = (char)ch;
+    esc[1] = '\0';
+}
+
+static bool gb_json_escape_append(char **out, size_t *len, size_t *cap, const char *s) {
+    char esc[GB_JSON_ESC_BUF];
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        gb_json_escape_byte(*p, esc);
+        if (!gb_buf_append(out, len, cap, esc)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* True when `s` is itself a JSON array or object literal (leading '[' or
+ * '{', ignoring whitespace) — the marker cbm_gbuf_insert_edge's JSON shim
+ * uses to smuggle nested values through the STRING kind losslessly. */
+static bool gb_is_raw_json_literal(const char *s) {
+    while (*s == ' ' || *s == '\t') {
+        s++;
+    }
+    return *s == '[' || *s == '{';
+}
+
+/* Append one property's JSON value (no key) to the growable buffer. */
+static bool gb_json_append_value(char **out, size_t *len, size_t *cap, const cbm_gbuf_prop_t *p) {
+    switch (p->kind) {
+    case CBM_EDGE_PROP_STRING: {
+        const char *text = p->text ? p->text : "";
+        if (gb_is_raw_json_literal(text)) {
+            return gb_buf_append(out, len, cap, text);
+        }
+        return gb_buf_append(out, len, cap, "\"") && gb_json_escape_append(out, len, cap, text) &&
+               gb_buf_append(out, len, cap, "\"");
+    }
+    case CBM_EDGE_PROP_NUMBER: {
+        char nb[GB_NUM_BUF];
+        snprintf(nb, sizeof(nb), "%.*f", p->decimals >= 0 ? p->decimals : 0, p->number);
+        return gb_buf_append(out, len, cap, nb);
+    }
+    case CBM_EDGE_PROP_BOOL:
+        return gb_buf_append(out, len, cap, p->flag ? "true" : "false");
+    default:
+        return gb_buf_append(out, len, cap, "null");
+    }
+}
+
+/* Serialize a typed property array to a malloc'd flat JSON object string,
+ * keys in insertion order. Returns NULL on OOM. */
+static char *gb_serialize_props(const cbm_gbuf_prop_t *props, int prop_count) {
+    char *out = NULL;
+    size_t len = 0;
+    size_t cap = 0;
+    bool ok = gb_buf_append(&out, &len, &cap, "{");
+    for (int i = 0; ok && i < prop_count; i++) {
+        if (i > 0) {
+            ok = gb_buf_append(&out, &len, &cap, ",");
+        }
+        ok = ok && gb_buf_append(&out, &len, &cap, "\"") &&
+             gb_json_escape_append(&out, &len, &cap, props[i].key ? props[i].key : "") &&
+             gb_buf_append(&out, &len, &cap, "\":") &&
+             gb_json_append_value(&out, &len, &cap, &props[i]);
+    }
+    ok = ok && gb_buf_append(&out, &len, &cap, "}");
+    if (!ok) {
+        free(out);
+        return NULL;
+    }
+    return out;
+}
+
+bool cbm_gbuf_edge_props_json(const cbm_gbuf_edge_t *edge, char *out, size_t out_size) {
+    if (!out || out_size == 0) {
+        return false;
+    }
+    out[0] = '\0';
+    if (!edge) {
+        return false;
+    }
+    char *serialized = gb_serialize_props(edge->props, edge->prop_count);
+    if (!serialized) {
+        return false;
+    }
+    bool fits = strlen(serialized) < out_size;
+    if (fits) {
+        snprintf(out, out_size, "%s", serialized);
+    }
+    free(serialized);
+    return fits;
+}
+
+char *cbm_gbuf_edge_props_json_alloc(const cbm_gbuf_edge_t *edge) {
+    if (!edge) {
+        return NULL;
+    }
+    return gb_serialize_props(edge->props, edge->prop_count);
+}
+
+const char *cbm_gbuf_edge_prop_string(const cbm_gbuf_edge_t *edge, const char *key) {
+    if (!edge || !key) {
+        return NULL;
+    }
+    const cbm_gbuf_prop_t *p = find_prop(edge->props, edge->prop_count, key);
+    return (p && p->kind == CBM_EDGE_PROP_STRING) ? p->text : NULL;
+}
+
+bool cbm_gbuf_edge_prop_number(const cbm_gbuf_edge_t *edge, const char *key, double *out) {
+    if (!edge || !key || !out) {
+        return false;
+    }
+    const cbm_gbuf_prop_t *p = find_prop(edge->props, edge->prop_count, key);
+    if (!p || p->kind != CBM_EDGE_PROP_NUMBER) {
+        return false;
+    }
+    *out = p->number;
+    return true;
+}
+
+bool cbm_gbuf_edge_prop_bool(const cbm_gbuf_edge_t *edge, const char *key, bool *out) {
+    if (!edge || !key || !out) {
+        return false;
+    }
+    const cbm_gbuf_prop_t *p = find_prop(edge->props, edge->prop_count, key);
+    if (!p || p->kind != CBM_EDGE_PROP_BOOL) {
+        return false;
+    }
+    *out = p->flag;
+    return true;
+}
+
+/* Heap-copy a borrowed property array (key always dup'd; text dup'd for
+ * STRING kind) into a freshly allocated, edge-owned array. count<=0 yields
+ * NULL with *out_count set to 0, a valid "no properties" edge. On OOM
+ * partway through, frees everything copied so far and returns NULL with
+ * *out_count set to 0 rather than leaking or handing back a half-populated
+ * array. */
+static cbm_gbuf_prop_t *gb_copy_props(const cbm_gbuf_prop_t *props, int count, int *out_count) {
+    *out_count = 0;
+    if (count <= 0) {
+        return NULL;
+    }
+    cbm_gbuf_prop_t *copy = calloc((size_t)count, sizeof(cbm_gbuf_prop_t));
+    if (!copy) {
+        return NULL;
+    }
+    for (int i = 0; i < count; i++) {
+        copy[i].kind = props[i].kind;
+        copy[i].number = props[i].number;
+        copy[i].flag = props[i].flag;
+        copy[i].decimals = props[i].decimals;
+        copy[i].key = strdup(props[i].key ? props[i].key : "");
+        copy[i].text = (props[i].kind == CBM_EDGE_PROP_STRING)
+                           ? strdup(props[i].text ? props[i].text : "")
+                           : NULL;
+        bool text_ok = props[i].kind != CBM_EDGE_PROP_STRING || copy[i].text;
+        if (!copy[i].key || !text_ok) {
+            free_edge_props(copy, i + SKIP_ONE);
+            return NULL;
+        }
+    }
+    *out_count = count;
+    return copy;
+}
+
+/* Decide whether incoming properties should replace an existing edge's
+ * properties on a dedup collision. Rule: higher "confidence" wins; when
+ * confidence is equal (or absent on both sides) a deterministic total order
+ * over the serialized JSON form breaks the tie so the outcome never depends
+ * on merge/arrival order; an empty/absent incoming property set never
+ * displaces stored properties. */
+static bool edge_props_should_replace(const cbm_gbuf_edge_t *existing, const cbm_gbuf_prop_t *props,
+                                      int prop_count) {
+    if (prop_count <= 0) {
+        return false;
+    }
+    const cbm_gbuf_prop_t *incoming_conf_prop = find_prop(props, prop_count, "confidence");
+    bool incoming_has = incoming_conf_prop && incoming_conf_prop->kind == CBM_EDGE_PROP_NUMBER;
+    double incoming_conf = incoming_has ? incoming_conf_prop->number : 0.0;
+    double existing_conf = 0.0;
+    bool existing_has = cbm_gbuf_edge_prop_number(existing, "confidence", &existing_conf);
+
+    if (incoming_has && existing_has && incoming_conf != existing_conf) {
+        return incoming_conf > existing_conf;
+    }
+    if (incoming_has != existing_has) {
+        return incoming_has;
+    }
+
+    char *incoming_json = gb_serialize_props(props, prop_count);
+    char existing_json[CBM_SZ_2K];
+    cbm_gbuf_edge_props_json(existing, existing_json, sizeof(existing_json));
+    bool replace = incoming_json && strcmp(incoming_json, existing_json) > 0;
+    free(incoming_json);
+    return replace;
+}
+
 /* ── Edge operations ─────────────────────────────────────────────── */
 
-int64_t cbm_gbuf_insert_edge(cbm_gbuf_t *gb, int64_t source_id, int64_t target_id, const char *type,
-                             const char *properties_json) {
+int64_t cbm_gbuf_insert_edge_props(cbm_gbuf_t *gb, int64_t source_id, int64_t target_id,
+                                   const char *type, const cbm_gbuf_prop_t *props, int prop_count) {
     if (!gb || !type) {
         return 0;
     }
 
     /* Check for dedup */
     char key[EDGE_KEY_BUF];
-    make_edge_key(key, sizeof(key), source_id, target_id, type, properties_json);
+    make_edge_key(key, sizeof(key), source_id, target_id, type, props, prop_count);
 
     cbm_gbuf_edge_t *existing = cbm_ht_get(gb->edge_by_key, key);
     if (existing) {
-        /* Merge properties (just replace for now) */
-        if (properties_json && strcmp(properties_json, "{}") != 0) {
-            free(existing->properties_json);
-            existing->properties_json = heap_strdup(properties_json);
+        if (edge_props_should_replace(existing, props, prop_count)) {
+            int new_count = 0;
+            cbm_gbuf_prop_t *new_props = gb_copy_props(props, prop_count, &new_count);
+            free_edge_props(existing->props, existing->prop_count);
+            existing->props = new_props;
+            existing->prop_count = new_count;
         }
         return existing->id;
     }
@@ -1060,7 +1343,7 @@ int64_t cbm_gbuf_insert_edge(cbm_gbuf_t *gb, int64_t source_id, int64_t target_i
     edge->source_id = source_id;
     edge->target_id = target_id;
     edge->type = (char *)gb_intern(gb, type);
-    edge->properties_json = heap_strdup(properties_json);
+    edge->props = gb_copy_props(props, prop_count, &edge->prop_count);
 
     /* Store pointer in array */
     cbm_da_push(&gb->edges, edge);
@@ -1071,6 +1354,117 @@ int64_t cbm_gbuf_insert_edge(cbm_gbuf_t *gb, int64_t source_id, int64_t target_i
     /* Secondary indexes */
     register_edge_in_indexes(gb, edge);
 
+    return id;
+}
+
+/* True when `raw` (a yyjson raw-number token, YYJSON_READ_NUMBER_AS_RAW) is
+ * plain fixed-point decimal notation ("-123.45", "0") with no exponent —
+ * the only form gb_json_append_value can re-emit byte-for-byte via "%.*f".
+ * On success, *decimals is the digit count after '.' (0 if none). */
+static bool gb_raw_number_decimals(const char *raw, int *decimals) {
+    if (strpbrk(raw, "eE")) {
+        return false;
+    }
+    const char *dot = strchr(raw, '.');
+    *decimals = dot ? (int)strlen(dot + SKIP_ONE) : 0;
+    return true;
+}
+
+/* Classify one JSON object value into a borrowed cbm_gbuf_prop_t. key/text
+ * are heap-allocated by this call (uniform ownership regardless of whether
+ * the source was doc-borrowed text or a freshly rendered literal), so the
+ * caller frees every prop the same way regardless of kind. */
+static void gb_prop_from_json_val(cbm_gbuf_prop_t *out, const char *key, yyjson_val *val) {
+    out->key = strdup(key ? key : "");
+    out->text = NULL;
+    out->decimals = 0;
+
+    if (yyjson_is_str(val)) {
+        out->kind = CBM_EDGE_PROP_STRING;
+        const char *s = yyjson_get_str(val);
+        out->text = strdup(s ? s : "");
+        return;
+    }
+    if (yyjson_is_bool(val)) {
+        out->kind = CBM_EDGE_PROP_BOOL;
+        out->flag = yyjson_get_bool(val);
+        return;
+    }
+    int decimals = 0;
+    const char *raw = yyjson_is_raw(val) ? yyjson_get_raw(val) : NULL;
+    if (raw && gb_raw_number_decimals(raw, &decimals)) {
+        out->kind = CBM_EDGE_PROP_NUMBER;
+        out->number = strtod(raw, NULL);
+        out->decimals = decimals;
+        return;
+    }
+    /* Array, object, null, or an exponent-notation number: none round-trip
+     * through the fixed-decimal NUMBER slot or escaped STRING quoting
+     * without loss (#requirement: lossless round-trip for nested values), so
+     * keep the exact source text and re-emit it unescaped — gb_is_raw_json_literal
+     * recognizes '['/'{' text on the way back out. A raw number here would
+     * lose its distinguishing mark and get quoted as a string on re-emit,
+     * which is an accepted trade-off: this codebase's emitters never produce
+     * exponent notation for edge properties. */
+    out->kind = CBM_EDGE_PROP_STRING;
+    char *rendered = yyjson_val_write(val, YYJSON_WRITE_NOFLAG, NULL);
+    out->text = rendered ? rendered : strdup("null");
+}
+
+/* Parse a flat JSON object ("{}"/NULL → zero props) into a heap-allocated,
+ * caller-owned cbm_gbuf_prop_t array. Only handles what this codebase emits:
+ * a flat object with string/number/bool values; nested arrays/objects are
+ * preserved verbatim as STRING props rather than corrupted (see
+ * gb_prop_from_json_val). Returns NULL (and *out_count=0) for "{}"/NULL/
+ * malformed input/OOM — never partially parsed. */
+static cbm_gbuf_prop_t *gb_parse_props_json(const char *json, int *out_count) {
+    *out_count = 0;
+    if (!json || strcmp(json, "{}") == 0) {
+        return NULL;
+    }
+    yyjson_doc *doc = yyjson_read(json, strlen(json), YYJSON_READ_NUMBER_AS_RAW);
+    if (!doc) {
+        return NULL;
+    }
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    if (!root || !yyjson_is_obj(root) || yyjson_obj_size(root) == 0) {
+        yyjson_doc_free(doc);
+        return NULL;
+    }
+
+    int n = (int)yyjson_obj_size(root);
+    cbm_gbuf_prop_t *props = calloc((size_t)n, sizeof(cbm_gbuf_prop_t));
+    if (!props) {
+        yyjson_doc_free(doc);
+        return NULL;
+    }
+
+    yyjson_obj_iter iter;
+    yyjson_obj_iter_init(root, &iter);
+    yyjson_val *key_val;
+    int idx = 0;
+    while ((key_val = yyjson_obj_iter_next(&iter))) {
+        gb_prop_from_json_val(&props[idx], yyjson_get_str(key_val),
+                              yyjson_obj_iter_get_val(key_val));
+        idx++;
+    }
+    yyjson_doc_free(doc);
+
+    *out_count = idx;
+    return props;
+}
+
+/* JSON shim: parses `properties_json` into typed props, delegates to
+ * cbm_gbuf_insert_edge_props, then releases the temporary parse. Kept for
+ * the 66 existing call sites that build a JSON string directly. */
+int64_t cbm_gbuf_insert_edge(cbm_gbuf_t *gb, int64_t source_id, int64_t target_id, const char *type,
+                             const char *properties_json) {
+    int prop_count = 0;
+    cbm_gbuf_prop_t *props = gb_parse_props_json(properties_json, &prop_count);
+
+    int64_t id = cbm_gbuf_insert_edge_props(gb, source_id, target_id, type, props, prop_count);
+
+    free_edge_props(props, prop_count);
     return id;
 }
 
@@ -1149,8 +1543,8 @@ int cbm_gbuf_delete_edges_by_type(cbm_gbuf_t *gb, const char *type) {
         cbm_gbuf_edge_t *e = gb->edges.items[i];
         if (strcmp(e->type, type) == 0) {
             char key[EDGE_KEY_BUF];
-            make_edge_key(key, sizeof(key), e->source_id, e->target_id, e->type,
-                          e->properties_json);
+            make_edge_key(key, sizeof(key), e->source_id, e->target_id, e->type, e->props,
+                          e->prop_count);
             const char *ekey = cbm_ht_get_key(gb->edge_by_key, key);
             cbm_ht_delete(gb->edge_by_key, key);
             free((void *)ekey);
@@ -1316,7 +1710,7 @@ static void merge_remap_edges(cbm_gbuf_t *dst, cbm_gbuf_t *src, CBMHashTable *re
             }
         }
 
-        cbm_gbuf_insert_edge(dst, new_src, new_tgt, se->type, se->properties_json);
+        cbm_gbuf_insert_edge_props(dst, new_src, new_tgt, se->type, se->props, se->prop_count);
     }
 }
 
@@ -1364,40 +1758,12 @@ int cbm_gbuf_merge(cbm_gbuf_t *dst, cbm_gbuf_t *src) {
 
 /* ── Dump / Flush ────────────────────────────────────────────────── */
 
-/* Extract a string property from a properties JSON string.
- * Returns heap-allocated string or NULL. Caller must free.
- * Parses real JSON: the dump writer feeds these values into indexes whose
- * backing columns are GENERATED AS json_extract(properties,'$.<key>').
- * Naive byte slicing returned the ESCAPED text (and cut at embedded \\")
- * while json_extract yields the unescaped value — the mismatch left rows
- * "missing from index idx_edges_url_path" under PRAGMA integrity_check.
- * key_quoted ("\"key\"") is a fast pre-filter to skip the JSON parse. */
-static char *extract_prop_string(const char *props, const char *key_quoted, const char *key) {
-    if (!props || !strstr(props, key_quoted)) {
-        return NULL;
-    }
-    yyjson_doc *doc = yyjson_read(props, strlen(props), 0);
-    if (!doc) {
-        return NULL;
-    }
-    char *out = NULL;
-    yyjson_val *v = yyjson_obj_get(yyjson_doc_get_root(doc), key);
-    if (v && yyjson_is_str(v)) {
-        const char *sv = yyjson_get_str(v);
-        out = cbm_strndup(sv, strlen(sv));
-    }
-    yyjson_doc_free(doc);
-    return out;
-}
-
-static char *extract_url_path(const char *props) {
-    return extract_prop_string(props, "\"url_path\"", "url_path");
-}
-
-/* local_name feeds the hand-built sqlite_autoindex_edges_1 — its backing
- * column local_name_gen is GENERATED only for IMPORTS edges (#768). */
-static char *extract_local_name(const char *props) {
-    return extract_prop_string(props, "\"local_name\"", "local_name");
+/* Heap-copy a typed STRING property's value for callers that need an
+ * independently-owned buffer (the dump writer holds these past the point
+ * where the edge's own props array may be freed). Returns NULL if absent. */
+static char *gb_prop_string_dup(const cbm_gbuf_edge_t *edge, const char *key) {
+    const char *s = cbm_gbuf_edge_prop_string(edge, key);
+    return s ? strdup(s) : NULL;
 }
 
 /* Remap a temp edge ID to its final sequential ID, or 0 if out of range. */
@@ -1458,11 +1824,12 @@ static CBMDumpNode *build_dump_nodes(cbm_gbuf_t *gb, int live_count, int64_t *te
     return dump_nodes;
 }
 
-/* Build dump-ready edge array with remapped IDs. Returns url_paths and
- * local_names (heap string arrays owned by the caller) via out params. */
+/* Build dump-ready edge array with remapped IDs. Returns url_paths,
+ * local_names, and the serialized properties JSON (heap string arrays owned
+ * by the caller) via out params — each parallel to dump_edges[0..*out_count). */
 static CBMDumpEdge *build_dump_edges(cbm_gbuf_t *gb, const int64_t *temp_to_final,
                                      int64_t max_temp_id, int *out_count, char ***out_url_paths,
-                                     char ***out_local_names) {
+                                     char ***out_local_names, char ***out_props_json) {
     /* Count valid edges (both endpoints resolved) */
     int valid_edges = 0;
     for (int i = 0; i < gb->edges.count; i++) {
@@ -1473,10 +1840,11 @@ static CBMDumpEdge *build_dump_edges(cbm_gbuf_t *gb, const int64_t *temp_to_fina
         }
     }
 
-    CBMDumpEdge *dump_edges =
-        malloc((size_t)(valid_edges > 0 ? valid_edges : SKIP_ONE) * sizeof(CBMDumpEdge));
-    char **url_paths = calloc((size_t)(valid_edges > 0 ? valid_edges : SKIP_ONE), sizeof(char *));
-    char **local_names = calloc((size_t)(valid_edges > 0 ? valid_edges : SKIP_ONE), sizeof(char *));
+    size_t alloc_count = (size_t)(valid_edges > 0 ? valid_edges : SKIP_ONE);
+    CBMDumpEdge *dump_edges = malloc(alloc_count * sizeof(CBMDumpEdge));
+    char **url_paths = calloc(alloc_count, sizeof(char *));
+    char **local_names = calloc(alloc_count, sizeof(char *));
+    char **props_json = calloc(alloc_count, sizeof(char *));
     int idx = 0;
 
     for (int i = 0; i < gb->edges.count; i++) {
@@ -1487,23 +1855,25 @@ static CBMDumpEdge *build_dump_edges(cbm_gbuf_t *gb, const int64_t *temp_to_fina
             continue;
         }
 
-        char *url_path = extract_url_path(e->properties_json);
+        char *url_path = gb_prop_string_dup(e, "url_path");
         url_paths[idx] = url_path;
 
         /* IMPORTS only — mirrors the local_name_gen CASE in the edges DDL. */
         char *local_name = (e->type && strcmp(e->type, "IMPORTS") == 0)
-                               ? extract_local_name(e->properties_json)
+                               ? gb_prop_string_dup(e, "local_name")
                                : NULL;
         local_names[idx] = local_name;
 
-        const char *props = e->properties_json ? e->properties_json : "{}";
+        char *serialized = gb_serialize_props(e->props, e->prop_count);
+        props_json[idx] = serialized ? serialized : strdup("{}");
+
         dump_edges[idx] = (CBMDumpEdge){
             .id = idx + SKIP_ONE,
             .project = gb->project,
             .source_id = src,
             .target_id = tgt,
             .type = e->type,
-            .properties = props,
+            .properties = props_json[idx],
             .url_path = url_path ? url_path : "",
             .local_name = local_name ? local_name : "",
         };
@@ -1513,6 +1883,7 @@ static CBMDumpEdge *build_dump_edges(cbm_gbuf_t *gb, const int64_t *temp_to_fina
     *out_count = idx;
     *out_url_paths = url_paths;
     *out_local_names = local_names;
+    *out_props_json = props_json;
     return dump_edges;
 }
 
@@ -1564,15 +1935,17 @@ static void log_dump_summary(int node_count, int edge_count) {
     cbm_log_info("gbuf.dump", "nodes", b1, "edges", b2);
 }
 
-static void free_dump_resources(char **url_paths, char **local_names, int edge_count,
-                                CBMDumpEdge *dump_edges, CBMDumpNode *dump_nodes,
+static void free_dump_resources(char **url_paths, char **local_names, char **props_json,
+                                int edge_count, CBMDumpEdge *dump_edges, CBMDumpNode *dump_nodes,
                                 int64_t *temp_to_final) {
     for (int i = 0; i < edge_count; i++) {
         free(url_paths[i]);
         free(local_names[i]);
+        free(props_json[i]);
     }
     free(url_paths);
     free(local_names);
+    free(props_json);
     free(dump_edges);
     free(dump_nodes);
     free(temp_to_final);
@@ -1683,11 +2056,12 @@ int cbm_gbuf_dump_to_sqlite(cbm_gbuf_t *gb, const char *path) {
     int edge_idx = 0;
     char **url_paths = NULL;
     char **local_names = NULL;
+    char **props_json = NULL;
     CBMDumpEdge *dump_edges = NULL;
     if (rc == 0) {
         CBM_PROF_START(t_build_edges);
-        dump_edges =
-            build_dump_edges(gb, temp_to_final, max_temp_id, &edge_idx, &url_paths, &local_names);
+        dump_edges = build_dump_edges(gb, temp_to_final, max_temp_id, &edge_idx, &url_paths,
+                                      &local_names, &props_json);
         CBM_PROF_END_N("dump", "3_build_dump_edges", t_build_edges, edge_idx);
         release_and_remap_vectors(gb, temp_to_final, max_temp_id);
     }
@@ -1704,7 +2078,8 @@ int cbm_gbuf_dump_to_sqlite(cbm_gbuf_t *gb, const char *path) {
     }
 
     log_dump_summary(node_idx, edge_idx);
-    free_dump_resources(url_paths, local_names, edge_idx, dump_edges, dump_nodes, temp_to_final);
+    free_dump_resources(url_paths, local_names, props_json, edge_idx, dump_edges, dump_nodes,
+                        temp_to_final);
     free(src_nodes);
     return rc;
 }
@@ -1765,14 +2140,16 @@ int cbm_gbuf_flush_to_store(cbm_gbuf_t *gb, cbm_store_t *store) {
             continue;
         }
 
+        char *props_json = gb_serialize_props(e->props, e->prop_count);
         cbm_edge_t se = {
             .project = gb->project,
             .source_id = real_src,
             .target_id = real_tgt,
             .type = e->type,
-            .properties_json = e->properties_json,
+            .properties_json = props_json ? props_json : "{}",
         };
         cbm_store_insert_edge(store, &se);
+        free(props_json);
     }
 
     cbm_store_commit(store);
@@ -1826,14 +2203,16 @@ int cbm_gbuf_merge_into_store(cbm_gbuf_t *gb, cbm_store_t *store) {
             continue;
         }
 
+        char *props_json = gb_serialize_props(e->props, e->prop_count);
         cbm_edge_t se = {
             .project = gb->project,
             .source_id = real_src,
             .target_id = real_tgt,
             .type = e->type,
-            .properties_json = e->properties_json,
+            .properties_json = props_json ? props_json : "{}",
         };
         cbm_store_insert_edge(store, &se);
+        free(props_json);
     }
 
     cbm_store_commit(store);

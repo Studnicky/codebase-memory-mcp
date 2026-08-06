@@ -1,0 +1,18 @@
+{
+  "accessedPaths": [
+    "/Users/studs/Documents/agentic-guardrails-environment-design.md"
+  ],
+  "updatedAt": "2026-08-06T01:34:48.920Z",
+  "promptSummary": "They're not doing this with RDF are they?",
+  "taskClassification": "unknown",
+  "taskKeywords": [
+    "they",
+    "doing",
+    "rdf"
+  ],
+  "compactionGrepCount": 0,
+  "compactionGrepPatterns": [],
+  "sessionName": null,
+  "promptCount": 1,
+  "previousContextPercentage": 0
+}

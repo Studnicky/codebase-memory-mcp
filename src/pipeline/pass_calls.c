@@ -90,23 +90,6 @@ static const char *itoa_log(int val) {
 
 /* Build per-file import map from cached extraction result or graph buffer edges.
  * Returns parallel arrays of (local_name, module_qn) pairs. Caller frees. */
-/* Parse "local_name":"value" from JSON properties string. Returns strdup'd key or NULL. */
-static char *extract_local_name_from_json(const char *props_json) {
-    if (!props_json) {
-        return NULL;
-    }
-    const char *start = strstr(props_json, "\"local_name\":\"");
-    if (!start) {
-        return NULL;
-    }
-    start += strlen("\"local_name\":\"");
-    const char *end = strchr(start, '"');
-    if (!end || end <= start) {
-        return NULL;
-    }
-    return cbm_strndup(start, end - start);
-}
-
 static int build_import_map(cbm_pipeline_ctx_t *ctx, const char *rel_path,
                             const CBMFileResult *result, const char ***out_keys,
                             const char ***out_vals, int *out_count) {
@@ -168,7 +151,8 @@ static int build_import_map(cbm_pipeline_ctx_t *ctx, const char *rel_path,
         if (!target) {
             continue;
         }
-        char *key = extract_local_name_from_json(e->properties_json);
+        const char *local_name = cbm_gbuf_edge_prop_string(e, "local_name");
+        char *key = local_name ? strdup(local_name) : NULL;
         if (key) {
             keys[count] = key;
             vals[count] = target->qualified_name;
