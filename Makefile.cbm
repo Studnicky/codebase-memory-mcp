@@ -52,38 +52,41 @@ endif
 # bare int64_t identifiers and hand-rolled numeric parsing hide best. These
 # warnings surface every such site.
 #
-# They are staged: reported on every build, not yet fatal, while the existing
-# occurrences are driven to zero. Each -Wno-error= line is a debt marker and is
-# removed — promoting that warning to a hard error — as its count reaches zero.
-# New code is expected to compile clean under all of them today.
+# Every one of them is fatal under -Werror. The tree compiles clean with no
+# exemptions, so there is no count to carry and nothing to stage: a new
+# conversion, qualifier drop or misalignment fails the build where it is
+# written. Do not reintroduce a -Wno-error= line to land a change — the warning
+# is the finding, and silencing it here hides it everywhere at once.
+#
+# A cast is not a fix for -Wsign-conversion. Widening an int capacity to size_t
+# at the malloc call leaves `cap *= 2` as signed overflow, which is undefined
+# and which the compiler may assume cannot happen; the cast then launders the
+# result into an allocation size, and no warning remains to point at it. Fix
+# the declaration, or bound the value before the multiply.
 #
 # -Wwrite-strings is deliberately absent: it retypes string literals as const
 # rather than reporting a conversion, so it produces pointer-qualifier errors
 # across existing call signatures instead of a countable warning set.
 CFLAGS_STRICT = -Wconversion -Wsign-conversion -Wshadow -Wcast-qual -Wcast-align \
                 -Wstrict-prototypes -Wmissing-prototypes -Wdouble-promotion \
-                -Wpointer-arith -Wredundant-decls -Wundef \
-                -Wno-error=conversion -Wno-error=sign-conversion \
-                -Wno-error=cast-qual -Wno-error=cast-align \
-                -Wno-error=strict-prototypes -Wno-error=missing-prototypes \
-                -Wno-error=pointer-arith \
-                -Wno-error=redundant-decls -Wno-error=undef \
-                -Wno-error=enum-float-conversion -Wno-error=implicit-int-conversion \
-                -Wno-error=implicit-int-float-conversion \
-                -Wno-error=implicit-const-int-float-conversion \
-                -Wno-error=float-conversion
+                -Wpointer-arith -Wredundant-decls -Wundef
 
 # -Wdate-time: with -Werror, any use of __DATE__/__TIME__/__TIMESTAMP__ fails the
 # build. Build-time entropy is how one identical source tree produced a new hash
 # on every compile (see the local patch in vendored/mimalloc/src/options.c) —
 # once removed, it must not creep back through a new call site.
 CFLAGS_COMMON = -std=c11 -D_DEFAULT_SOURCE -D_GNU_SOURCE -Wall -Wextra -Werror \
-                -Wno-unused-parameter -Wno-sign-compare -Wdate-time \
+                -Wno-unused-parameter -Wdate-time \
                 $(CFLAGS_STRICT) \
                 $(GCC_ONLY_FLAGS) \
                 -Isrc -Ivendored -Ivendored/sqlite3 \
                 -Ivendored/mimalloc/include \
-                -I$(CBM_DIR) -I$(TS_INCLUDE)
+                -I$(CBM_DIR) -I$(TS_INCLUDE) \
+                -isystem $(CBM_DIR)/vendored/verstable
+# verstable.h is vendored third-party code, consumed as-is via the angle-bracket
+# include form below (same convention as mimalloc/sqlite3/tre/zstd) — its
+# diagnostics are not this project's to fix, so it is on the system-header
+# search path (narrowly scoped to its own directory) rather than the quoted one.
 
 CXXFLAGS_COMMON = -std=c++14 -Wall -Wextra -Werror \
                   -Wno-unused-parameter \
