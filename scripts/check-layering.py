@@ -165,6 +165,79 @@ def external_library(raw_include, resolved):
     return None
 
 
+
+# A definition at column 0 whose line ends in `{`, and a declaration ending in
+# `;`. The tree is clang-formatted, so a definition's return type and name sit
+# on one line at column 0 and this is exact rather than heuristic.
+DEFINITION_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_ *]*?\b([a-z_][a-z0-9_]*)\s*\([^;]*\)\s*\{\s*$")
+DECLARATION_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_ *]*?\b([a-z_][a-z0-9_]*)\s*\([^;]*\)\s*;\s*$")
+EXTERN_DECL_RE = re.compile(r"^\s*extern\s+[A-Za-z_][A-Za-z0-9_ *]*?\b([a-z_][a-z0-9_]*)\s*\([^;]*\)\s*;")
+
+
+def collect_symbol_edges():
+    """Return violations of symbol ownership — the link-time dependencies the
+    include graph cannot see.
+
+    A module can reach another module's code without naming its header, and
+    then no #include records the edge. Two shapes do it:
+
+      1. A symbol declared in module A's header but defined in module B's
+         source. The linker resolves it, every binary containing both modules
+         builds, and the dependency is invisible until something links A
+         without B. cbm_path_within_root sat in mcp for exactly this reason.
+      2. A bare `extern` declaration inside a .c file naming a symbol another
+         module defines. The declaration is local to that file, so nothing
+         checks it against the definition and no header records the edge.
+
+    Both are reported outright. There is no allow-list: a module's header
+    declares what that module defines, and a cross-module call goes through a
+    header so the graph above can see it."""
+    definitions = {}
+    declarations = {}
+    externs = []
+    for rel_path in sorted(iter_source_files()):
+        module = module_of(rel_path)
+        if module is None:
+            continue
+        abs_path = os.path.join(PROJECT_DIR, rel_path)
+        is_source = rel_path.endswith((".c", ".cpp", ".cc"))
+        with open(abs_path, encoding="utf-8", errors="replace") as fh:
+            for lineno, line in enumerate(fh, start=1):
+                if line.startswith(("static", "typedef", "#")):
+                    continue
+                if is_source:
+                    m = DEFINITION_RE.match(line)
+                    if m:
+                        definitions.setdefault(m.group(1), (module, rel_path, lineno))
+                    m = EXTERN_DECL_RE.match(line)
+                    if m:
+                        externs.append((m.group(1), module, rel_path, lineno))
+                else:
+                    m = DECLARATION_RE.match(line)
+                    if m:
+                        declarations.setdefault(m.group(1), (module, rel_path, lineno))
+
+    violations = []
+    for symbol, (decl_module, decl_file, decl_line) in sorted(declarations.items()):
+        if symbol not in definitions:
+            continue
+        def_module, def_file, def_line = definitions[symbol]
+        if def_module != decl_module:
+            violations.append(
+                f"{symbol}: declared in {decl_file}:{decl_line} ({decl_module}) "
+                f"but defined in {def_file}:{def_line} ({def_module})")
+    for symbol, module, rel_path, lineno in sorted(externs):
+        if symbol not in definitions:
+            continue
+        def_module, def_file, def_line = definitions[symbol]
+        if def_module != module:
+            violations.append(
+                f"{symbol}: extern declared in {rel_path}:{lineno} ({module}) "
+                f"but defined in {def_file}:{def_line} ({def_module}) — "
+                f"declare it in {def_module}'s header instead")
+    return violations
+
+
 def collect_edges():
     """Return (edges, edge_sites, unresolvable).
 
@@ -319,9 +392,18 @@ def main():
             print(f"  {from_module} -> {library}")
         status = 1
 
+    # Link-time dependencies the include graph cannot see.
+    symbol_violations = collect_symbol_edges()
+    if symbol_violations:
+        print(f"BLOCKED: {len(symbol_violations)} symbol(s) crossing a module "
+              f"boundary without an include to record it:")
+        for violation in symbol_violations:
+            print(f"  {violation}")
+        status = 1
+
     if status == 0:
         print(f"OK: {len(edges)} module edge(s) and {len(external_edges)} "
-              f"third-party edge(s), all allow-listed")
+              f"third-party edge(s) allow-listed, symbol ownership intact")
     return status
 
 
