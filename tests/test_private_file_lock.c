@@ -1,5 +1,6 @@
 /* RED contract for handle-anchored owner-only SH/EX lock files. */
 #include "test_framework.h"
+#include "suites.h"
 
 #include "foundation/compat.h"
 #include "foundation/private_file_lock.h"

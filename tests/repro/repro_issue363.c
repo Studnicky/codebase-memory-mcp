@@ -36,6 +36,7 @@
  */
 
 #include "test_framework.h"
+#include "suites.h"
 #include <foundation/mem.h>
 #include <foundation/compat.h>
 #include <stdint.h>

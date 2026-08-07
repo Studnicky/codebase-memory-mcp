@@ -6,6 +6,7 @@
 #include "../src/foundation/compat.h"
 #include "../src/foundation/compat_fs.h"
 #include "test_framework.h"
+#include "suites.h"
 #include "test_helpers.h"
 #include "ui/config.h"
 #include "ui/embedded_assets.h"

@@ -8,6 +8,7 @@
 #include "../src/foundation/compat_fs.h"
 #include "../src/foundation/platform.h"
 #include "test_framework.h"
+#include "suites.h"
 #include "discover/discover.h"
 #include "discover/userconfig.h"
 

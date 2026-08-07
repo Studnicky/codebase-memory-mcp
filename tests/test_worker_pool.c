@@ -5,6 +5,7 @@
  * Suite: suite_worker_pool  — Parallel-for correctness + concurrency validation
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "foundation/platform.h"
 #include "foundation/worker_pool.h"
 

@@ -28,6 +28,7 @@
  *  21. Quality parity benchmarks vs tree-sitter-only baseline
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "cbm.h"
 #include "../src/pipeline/lsp_resolve.h"
 #include "lsp/kotlin_lsp.h"

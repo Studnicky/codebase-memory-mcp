@@ -2,6 +2,7 @@
  * test_hash_table.c — RED phase tests for foundation/hash_table.
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "../src/foundation/hash_table.h"
 
 TEST(ht_create_free) {

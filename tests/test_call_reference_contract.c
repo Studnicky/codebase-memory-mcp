@@ -1,6 +1,7 @@
 /* Production-graph contracts for callable values. These tests intentionally
  * exercise the full MCP indexing path rather than only raw extraction/LSP rows. */
 #include "test_framework.h"
+#include "suites.h"
 #include "repro_harness.h"
 
 #include <store/store.h>

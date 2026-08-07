@@ -23,6 +23,7 @@
  */
 
 #include "test_framework.h"
+#include "suites.h"
 #include "cbm.h"
 #include "lsp/java_lsp.h"
 

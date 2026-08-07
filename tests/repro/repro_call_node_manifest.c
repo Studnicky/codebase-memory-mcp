@@ -18,6 +18,7 @@
  * negative behavior guard.
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "lang_specs.h"
 
 #include <stdbool.h>

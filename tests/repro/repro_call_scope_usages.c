@@ -9,6 +9,7 @@
  * so duplicate CALLS/USAGE emissions cannot masquerade as a successful fix.
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "cbm.h"
 
 #include <stdio.h>

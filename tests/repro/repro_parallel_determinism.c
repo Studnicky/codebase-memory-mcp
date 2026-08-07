@@ -37,6 +37,7 @@
  * this stays on the known-red board until the race is fixed.
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "repro_harness.h"
 #include <store/store.h>
 #include <pipeline/pipeline.h>

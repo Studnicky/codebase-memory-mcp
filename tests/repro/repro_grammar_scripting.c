@@ -88,6 +88,7 @@
  */
 
 #include "test_framework.h"
+#include "suites.h"
 #include "repro_invariant_lib.h"
 #include <store/store.h>
 

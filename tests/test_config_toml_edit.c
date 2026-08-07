@@ -8,6 +8,7 @@
 #include "foundation/compat.h"
 #include "foundation/compat_fs.h"
 #include "test_framework.h"
+#include "suites.h"
 #include "test_helpers.h"
 
 #include <stdbool.h>

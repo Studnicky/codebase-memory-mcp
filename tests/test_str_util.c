@@ -2,6 +2,7 @@
  * test_str_util.c — RED phase tests for foundation/str_util.
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "../src/foundation/str_util.h"
 
 static CBMArena a;

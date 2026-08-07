@@ -29,6 +29,7 @@
  */
 
 #include "test_framework.h"
+#include "suites.h"
 #include "cbm.h"
 #include <stdio.h>
 #include <stdlib.h>

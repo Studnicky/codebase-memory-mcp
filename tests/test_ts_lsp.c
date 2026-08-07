@@ -22,6 +22,7 @@
  *  26. Crash safety                    (`tslsp_nocrash_*`)
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "cbm.h"
 #include "../src/foundation/compat.h"
 #include "../src/pipeline/lsp_resolve.h"

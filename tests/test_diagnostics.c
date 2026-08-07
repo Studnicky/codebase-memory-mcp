@@ -3,6 +3,7 @@
  * periodic diagnostics writer.
  */
 #include "test_framework.h"
+#include "suites.h"
 
 #include "../src/foundation/compat.h"
 #include "../src/foundation/compat_fs.h"

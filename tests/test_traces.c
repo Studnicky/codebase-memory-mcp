@@ -5,6 +5,7 @@
  * The TestIngestOTLPJSON integration test is deferred (needs full MCP pipeline).
  */
 #include "test_framework.h"
+#include "suites.h"
 #include <traces/traces.h>
 #include <string.h>
 

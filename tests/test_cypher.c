@@ -5,6 +5,7 @@
  * Covers lexer, parser, and end-to-end execution.
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "../src/foundation/compat.h"
 #include "../src/foundation/compat_thread.h"
 #include <cypher/cypher.h>

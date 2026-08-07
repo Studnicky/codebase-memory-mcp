@@ -10,6 +10,7 @@
  *     field chains, map index, stdlib interfaces
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "cbm.h"
 #include "lsp/go_lsp.h"
 #include "pipeline/lsp_resolve.h"

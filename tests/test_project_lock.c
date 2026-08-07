@@ -1,5 +1,6 @@
 /* RED contract for daemon/local-CLI cross-process project coordination. */
 #include "test_framework.h"
+#include "suites.h"
 #include "test_helpers.h"
 
 #include "daemon/ipc.h"

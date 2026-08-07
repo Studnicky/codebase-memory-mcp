@@ -58,6 +58,7 @@
 
 #include <foundation/compat.h>
 #include "test_framework.h"
+#include "suites.h"
 #include "test_helpers.h"
 #include <cli/cli.h>
 #include <string.h>

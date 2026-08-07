@@ -6,6 +6,7 @@
  * Optional[T] sugar, and protocol structural matching.
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "cbm.h"
 #include "lsp/type_rep.h"
 

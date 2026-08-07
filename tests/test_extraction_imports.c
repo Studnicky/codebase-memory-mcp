@@ -78,6 +78,7 @@
  */
 
 #include "test_framework.h"
+#include "suites.h"
 #include "cbm.h"
 #include <string.h>
 #include <stdlib.h>

@@ -7,6 +7,7 @@
  * indirectly via the integration test that builds a tmp tsconfig tree.
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "../src/pipeline/path_alias.h"
 #include "../src/foundation/compat.h"
 

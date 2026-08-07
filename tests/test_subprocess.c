@@ -9,6 +9,7 @@
  *      (SKIP_PLATFORM on Windows, which lacks it).
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "../src/foundation/subprocess.h"
 #include "../src/foundation/compat.h"
 #include "../src/foundation/platform.h"

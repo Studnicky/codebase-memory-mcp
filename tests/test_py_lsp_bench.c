@@ -26,6 +26,7 @@
  * is 95%+ — see docs/BENCHMARK_PYTHON.md).
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "cbm.h"
 #include "lsp/py_lsp.h"
 #include <stdlib.h>

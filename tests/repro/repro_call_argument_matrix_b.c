@@ -12,6 +12,7 @@
  * transcoded to ObjectScript UDL before grammar extraction.
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "cbm.h"
 #include "lang_specs.h"
 

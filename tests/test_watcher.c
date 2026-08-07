@@ -9,6 +9,7 @@
 #include "../src/foundation/constants.h"
 #include "../src/foundation/platform.h"
 #include "test_framework.h"
+#include "suites.h"
 #include "test_helpers.h"
 #include <host/application.h>
 #include <watcher/watcher.h>

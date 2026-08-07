@@ -14,6 +14,7 @@
  * top-level Puppet DSL case), so duplicate emissions and scope drift stay RED.
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "cbm.h"
 #include "lang_specs.h"
 #include "macro_table.h"

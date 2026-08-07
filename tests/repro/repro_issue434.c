@@ -57,6 +57,7 @@
  */
 
 #include "test_framework.h"
+#include "suites.h"
 #include "repro_harness.h"
 #include <pipeline/artifact.h>
 #include <foundation/compat.h>

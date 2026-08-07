@@ -8,6 +8,7 @@
  * method dispatch, decorators, generics, cross-file).
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "cbm.h"
 #include "lsp/py_lsp.h"
 #include "pipeline/lsp_resolve.h"

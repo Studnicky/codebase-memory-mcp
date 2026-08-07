@@ -5,6 +5,7 @@
  * the editor can register it with the main runner alongside its build wiring.
  */
 #include "test_framework.h"
+#include "suites.h"
 
 #define CBM_JSON_LIKE_ENABLE_TEST_API 1
 #include "../src/cli/config_json_like.h"

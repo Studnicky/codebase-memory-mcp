@@ -16,6 +16,7 @@
  * global helpers.value function — see docs/PHP_LSP_PRE_FLIGHT.md §4.2.
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "cbm.h"
 #include "../src/pipeline/lsp_resolve.h"
 #include "lsp/php_lsp.h"

@@ -50,6 +50,7 @@
  */
 
 #include "test_framework.h"
+#include "suites.h"
 #include <pipeline/pipeline.h>
 
 #include <stdlib.h>

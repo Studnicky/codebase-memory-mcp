@@ -1,5 +1,6 @@
 /* RED contract for early process-role classification. */
 #include "test_framework.h"
+#include "suites.h"
 
 #include "daemon/bootstrap.h"
 #include "daemon/ipc.h"

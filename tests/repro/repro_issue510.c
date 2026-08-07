@@ -42,6 +42,7 @@
  */
 #include <foundation/compat.h>
 #include "test_framework.h"
+#include "suites.h"
 #include "test_helpers.h"
 #include "discover/discover.h"
 

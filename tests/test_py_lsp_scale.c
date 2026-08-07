@@ -4,6 +4,7 @@
  * 4x the runtime (catches accidental O(n^2) in the resolver).
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "cbm.h"
 #include "lsp/py_lsp.h"
 #include <time.h>

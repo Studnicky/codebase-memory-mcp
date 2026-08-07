@@ -95,6 +95,7 @@
 //   across a long-running server session.
 
 #include "test_framework.h"
+#include "suites.h"
 #include "repro_harness.h"
 #include <foundation/mem.h>
 

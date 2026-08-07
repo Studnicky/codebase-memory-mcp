@@ -7,6 +7,7 @@
  * all such identifiers when WalkState.inside_call is true.
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "repro_harness.h"
 #include "foundation/compat.h"
 #include "pipeline/lsp_resolve.h"

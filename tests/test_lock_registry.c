@@ -1,5 +1,6 @@
 /* RED contract for the generic writer-preference lock registry. */
 #include "test_framework.h"
+#include "suites.h"
 
 #include "foundation/compat.h"
 #include "foundation/compat_thread.h"
