@@ -10,7 +10,7 @@
 #include "../src/foundation/platform.h"
 #include "test_framework.h"
 #include "test_helpers.h"
-#include <daemon/application.h>
+#include <host/application.h>
 #include <watcher/watcher.h>
 #include <store/store.h>
 #include <errno.h>

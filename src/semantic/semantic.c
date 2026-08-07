@@ -12,7 +12,7 @@
 #include "foundation/profile.h"
 #include "foundation/platform.h"
 #include "foundation/compat_thread.h"
-#include "pipeline/worker_pool.h"
+#include "foundation/worker_pool.h"
 #include "simhash/minhash.h"
 #include "nomic/code_vectors.h"
 

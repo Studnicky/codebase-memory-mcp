@@ -16,10 +16,10 @@
  */
 #include "cbm.h"
 #include "store/store.h" // cbm_alloc_init — bind 3rd-party allocators to mimalloc before any sqlite/git init
-#include "daemon/application.h"
+#include "host/application.h"
 #include "daemon/bootstrap.h"
-#include "daemon/frontend.h"
-#include "daemon/host.h"
+#include "host/frontend.h"
+#include "host/host.h"
 #include "daemon/ipc.h"
 #include "daemon/project_lock.h"
 #include "daemon/version_cohort.h"

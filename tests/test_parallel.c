@@ -13,7 +13,7 @@
 #include "pipeline/pipeline_internal.h"
 #include "pipeline/pass_lsp_cross.h"
 #include "pipeline/lsp_resolve.h"
-#include "pipeline/worker_pool.h"
+#include "foundation/worker_pool.h"
 #include "graph_buffer/graph_buffer.h"
 #include "discover/discover.h"
 #include "foundation/platform.h"

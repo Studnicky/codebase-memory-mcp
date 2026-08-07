@@ -6,7 +6,7 @@
  */
 #include "test_framework.h"
 #include "foundation/platform.h"
-#include "pipeline/worker_pool.h"
+#include "foundation/worker_pool.h"
 
 #include <stdatomic.h>
 #include <string.h>

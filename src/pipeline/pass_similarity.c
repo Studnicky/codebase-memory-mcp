@@ -25,7 +25,7 @@ enum {
     /* Serialized decimal precision for a SIMILAR_TO edge's "jaccard" prop. */
     SIM_JACCARD_DECIMALS = 3,
 };
-#include "pipeline/worker_pool.h"
+#include "foundation/worker_pool.h"
 
 #include <stdatomic.h>
 #include <stdio.h>

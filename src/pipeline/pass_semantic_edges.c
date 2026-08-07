@@ -23,7 +23,7 @@
 #define XXH_INLINE_ALL
 #include "xxhash/xxhash.h"
 
-#include "pipeline/worker_pool.h"
+#include "foundation/worker_pool.h"
 #include "foundation/platform.h"
 #include "foundation/profile.h"
 

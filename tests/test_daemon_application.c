@@ -5,8 +5,8 @@
 #include "test_helpers.h"
 
 #include "cli/cli.h"
-#include "daemon/application.h"
-#include "daemon/application_internal.h"
+#include "host/application.h"
+#include "host/application_internal.h"
 #include "daemon/ipc.h"
 #include "daemon/project_lock.h"
 #include "foundation/compat.h"

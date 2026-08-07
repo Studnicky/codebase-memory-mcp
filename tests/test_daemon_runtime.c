@@ -9,9 +9,9 @@
 #include "test_helpers.h"
 #include "test_daemon_runtime_contract.h"
 
-#include "daemon/application.h"
-#include "daemon/host.h"
-#include "daemon/host_internal.h"
+#include "host/application.h"
+#include "host/host.h"
+#include "host/host_internal.h"
 #include "daemon/ipc.h"
 #include "daemon/runtime.h"
 #include "daemon/service.h"
