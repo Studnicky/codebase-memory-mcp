@@ -47,6 +47,7 @@
 
 #include <foundation/compat.h>
 #include "test_framework.h"
+#include "suites.h"
 
 #include <cli/cli.h>
 #include <store/store.h>

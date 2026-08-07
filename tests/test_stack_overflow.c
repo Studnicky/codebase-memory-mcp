@@ -10,6 +10,7 @@
  * the expected total. Before the fix, counts plateau at the cap.
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "cbm.h"
 #include "lang_specs.h" /* cbm_ts_language — direct-parse GLR cap regression (#913) */
 

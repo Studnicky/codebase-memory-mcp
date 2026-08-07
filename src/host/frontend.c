@@ -1,9 +1,9 @@
 /*
  * frontend.c — Stateless stdio bridge for a daemon-backed MCP session.
  */
-#include "daemon/frontend.h"
+#include "host/frontend.h"
 
-#include "daemon/application.h"
+#include "host/application.h"
 #include "foundation/compat.h"
 #include "foundation/compat_thread.h"
 #include "foundation/platform.h"

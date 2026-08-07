@@ -3,13 +3,10 @@
  *
  * Includes all test suites and runs them sequentially.
  */
-/* Global test counters (declared extern in test_framework.h) */
-int tf_pass_count = 0;
-int tf_fail_count = 0;
-int tf_skip_count = 0;
-
 #include "test_framework.h"
 #include "test_helpers.h"
+#include "suites.h"
+#include "suite_runner.h"
 #include "test_daemon_runtime_contract.h"
 #include "foundation/compat.h"     /* cbm_setenv — #845 supervisor kill switch */
 #include "foundation/compat_fs.h"  /* cbm_fopen — worker response file */
@@ -530,8 +527,6 @@ static int tf_maybe_run_mcp_idxfailclosed_probe(int argc, char **argv) {
     if (argc != 4 || strcmp(argv[1], "__cbm_mcp_idxfailclosed_probe") != 0) {
         return -1;
     }
-    extern int mcp_test_idxfailclosed_supervisor_start_check(const char *repo_dir,
-                                                             const char *cache_dir);
     alarm(20);
     return mcp_test_idxfailclosed_supervisor_start_check(argv[2], argv[3]);
 #else
@@ -540,200 +535,6 @@ static int tf_maybe_run_mcp_idxfailclosed_probe(int argc, char **argv) {
     return -1;
 #endif
 }
-
-static int g_suite_argc = 0;
-static char **g_suite_argv = NULL;
-static bool *g_suite_arg_matched = NULL;
-
-static bool suite_requested(const char *name) {
-    if (g_suite_argc <= 1) {
-        return true;
-    }
-    bool requested = false;
-    for (int i = 1; i < g_suite_argc; i++) {
-        if (strcmp(g_suite_argv[i], name) == 0) {
-            g_suite_arg_matched[i] = true;
-            requested = true;
-        }
-    }
-    return requested;
-}
-
-/* --list-suites: print every registered suite name, one per line, without
- * running anything. The list and the run share this ONE macro table, so the
- * list can never drift from what actually executes — shard runners (make
- * test-par, the CI shard matrix) enumerate suites from here and their union
- * guard compares against it. */
-static bool g_list_only = false;
-
-/* CBM_SKIP_PERF=1 excludes throughput/scale/perf-metric suites from the run.
- * The fidelity pass (CBM_LOCAL_CI_CPUS=4) and CI PRs set it: those suites
- * measure performance, which is meaningless under artificial CPU starvation,
- * and they dominate wall-clock. Correctness coverage is unaffected — the perf
- * suites run at full power in the perf/release legs (CBM_SKIP_PERF unset). The
- * skip applies to BOTH --list-suites and the run through the same macro, so
- * the shard union guard stays consistent. */
-static bool g_skip_perf = false;
-
-#define RUN_SELECTED_SUITE(name)             \
-    do {                                     \
-        if (g_list_only) {                   \
-            printf("%s\n", #name);           \
-        } else if (suite_requested(#name)) { \
-            RUN_SUITE(name);                 \
-        }                                    \
-    } while (0)
-
-#define RUN_SELECTED_SUITE_PERF(name)        \
-    do {                                     \
-        if (g_skip_perf) {                   \
-            break;                           \
-        }                                    \
-        if (g_list_only) {                   \
-            printf("%s\n", #name);           \
-        } else if (suite_requested(#name)) { \
-            RUN_SUITE(name);                 \
-        }                                    \
-    } while (0)
-
-/* Forward declarations of suite functions */
-extern void suite_arena(void);
-extern void suite_hash_table(void);
-extern void suite_dyn_array(void);
-extern void suite_str_intern(void);
-extern void suite_log(void);
-extern void suite_str_util(void);
-extern void suite_platform(void);
-extern void suite_diagnostics(void);
-extern void suite_subprocess(void);
-extern void suite_private_file_lock(void);
-extern void suite_lock_registry(void);
-extern void suite_extraction(void);
-extern void suite_extraction_inheritance(void);
-extern void suite_extraction_imports(void);
-extern void suite_parse_coverage(void);
-extern void suite_grammar_regression(void);
-extern void suite_grammar_labels(void);
-extern void suite_grammar_imports(void);
-extern void suite_ac(void);
-extern void suite_store_nodes(void);
-extern void suite_store_edges(void);
-extern void suite_store_search(void);
-extern void suite_cypher(void);
-extern void suite_mcp(void);
-extern void suite_mcp_mutation_guard(void);
-extern void suite_index_supervisor(void);
-extern void suite_daemon(void);
-extern void suite_project_lock(void);
-extern void suite_version_cohort(void);
-extern void suite_daemon_version(void);
-extern void suite_daemon_runtime(void);
-extern void suite_daemon_application(void);
-extern void suite_daemon_frontend(void);
-extern void suite_daemon_bootstrap(void);
-extern void suite_daemon_ipc(void);
-extern void suite_language(void);
-extern void suite_userconfig(void);
-extern void suite_gitignore(void);
-extern void suite_git_context(void);
-extern void suite_discover(void);
-extern void suite_graph_buffer(void);
-extern void suite_registry(void);
-extern void suite_pipeline(void);
-extern void suite_pipeline_semantic_manifest_repro(void);
-extern void suite_cross_repo(void);
-extern void suite_index_resilience(void);
-extern void suite_fqn(void);
-extern void suite_route_canon(void);
-extern void suite_path_alias(void);
-extern void suite_watcher(void);
-extern void suite_lz4(void);
-extern void suite_zstd(void);
-extern void suite_artifact(void);
-extern void suite_sqlite_writer(void);
-extern void suite_go_lsp(void);
-extern void suite_c_lsp(void);
-extern void suite_php_lsp(void);
-extern void suite_cs_lsp(void);
-extern void suite_cs_lsp_bench(void);
-extern void suite_perl_lsp(void);
-extern void suite_scope(void);
-extern void suite_type_rep(void);
-extern void suite_py_lsp(void);
-extern void suite_py_lsp_bench(void);
-extern void suite_py_lsp_stress(void);
-extern void suite_py_lsp_scale(void);
-extern void suite_ts_lsp(void);
-extern void suite_java_lsp(void);
-extern void suite_java_lsp_coverage(void);
-extern void suite_kotlin_lsp(void);
-extern void suite_rust_lsp(void);
-extern void suite_store_arch(void);
-extern void suite_store_bulk(void);
-extern void suite_store_pragmas(void);
-extern void suite_store_checkpoint(void);
-extern void suite_traces(void);
-extern void suite_configlink(void);
-extern void suite_infrascan(void);
-extern void suite_cli(void);
-extern void suite_agent_clients(void);
-extern void suite_agent_profiles(void);
-extern void suite_config_json_like(void);
-extern void suite_config_toml_edit(void);
-extern void suite_config_yaml_edit(void);
-extern void suite_config_text_edit(void);
-extern void suite_activation_transaction(void);
-extern void suite_system_info(void);
-extern void suite_worker_pool(void);
-extern void suite_parallel(void);
-extern void suite_call_reference_language_complex_contract(void);
-extern void suite_repro_call_scope_usages(void);
-extern void suite_repro_call_argument_usages(void);
-extern void suite_repro_reference_precision(void);
-extern void suite_repro_lexical_binding_precision(void);
-extern void suite_repro_call_argument_matrix_a(void);
-extern void suite_repro_call_argument_matrix_b(void);
-extern void suite_repro_call_node_behaviors(void);
-extern void suite_repro_language_registry(void);
-extern void suite_repro_call_node_manifest(void);
-extern void suite_repro_lsp_ordered_signatures(void);
-extern void suite_repro_lsp_ordered_local(void);
-extern void suite_repro_ts_overload_return_chains(void);
-extern void suite_repro_harness_cleanup(void);
-extern void suite_repro_runner_filter(void);
-extern void suite_call_reference_contract(void);
-extern void suite_mem(void);
-extern void suite_ui(void);
-extern void suite_httpd(void);
-extern void suite_security(void);
-extern void suite_yaml(void);
-extern void suite_integration(void);
-extern void suite_lang_contract(void);
-extern void suite_edge_imports(void);
-extern void suite_edge_structural(void);
-extern void suite_lsp_resolution_probe(void);
-extern void suite_node_creation_probe(void);
-extern void suite_edge_types_probe(void);
-extern void suite_convergence_probe(void);
-extern void suite_matrix_known_classes(void);
-extern void suite_matrix_new_constructs(void);
-extern void suite_grammar_probe_a(void);
-extern void suite_grammar_probe_b(void);
-extern void suite_grammar_probe_c(void);
-extern void suite_grammar_probe_d(void);
-extern void suite_grammar_probe_e(void);
-extern void suite_grammar_probe_f(void);
-extern void suite_grammar_probe_g(void);
-extern void suite_incremental(void);
-extern void suite_semantic(void);
-extern void suite_ast_profile(void);
-extern void suite_slab_alloc(void);
-extern void suite_simhash(void);
-extern void suite_stack_overflow_a(void);
-extern void suite_stack_overflow_b(void);
-extern void suite_stack_overflow_c(void);
-extern void suite_dump_verify(void);
-extern void suite_dump_verify_io(void);
 
 /* Free the main thread's thread-local node-type bitset cache before exit so
  * LeakSanitizer (Linux x64) doesn't report it. Worker threads free their own
@@ -821,21 +622,9 @@ int main(int argc, char **argv) {
         return 2;
     }
 
-    const char *skip_perf_env = getenv("CBM_SKIP_PERF");
-    g_skip_perf = skip_perf_env != NULL && strcmp(skip_perf_env, "1") == 0;
-    if (argc == 2 && strcmp(argv[1], "--list-suites") == 0) {
-        g_list_only = true;
-        g_suite_argc = 1; /* no suite-name args to match */
-    } else {
-        g_suite_argc = argc;
-        g_suite_argv = argv;
-    }
-    if (g_suite_argc > 1) {
-        g_suite_arg_matched = calloc((size_t)argc, sizeof(*g_suite_arg_matched));
-        if (!g_suite_arg_matched) {
-            fprintf(stderr, "Failed to allocate test-suite argument tracking\n");
-            return 1;
-        }
+    int selection_rc = suite_runner_begin(argc, argv);
+    if (selection_rc >= 0) {
+        return selection_rc;
     }
     if (!g_list_only) {
         printf("\n  codebase-memory-mcp  C test suite\n");
@@ -1048,22 +837,7 @@ int main(int argc, char **argv) {
         sqlite3_shutdown();
         return 0;
     }
-    bool any_suite_matched = false;
-    for (int i = 1; i < g_suite_argc; i++) {
-        any_suite_matched = any_suite_matched || g_suite_arg_matched[i];
-    }
-    fflush(stdout);
-    for (int i = 1; i < g_suite_argc; i++) {
-        if (!g_suite_arg_matched[i]) {
-            fprintf(stderr, "Unknown test suite: %s\n", g_suite_argv[i]);
-            tf_fail_count++;
-        }
-    }
-    if (g_suite_argc > 1 && !any_suite_matched) {
-        fprintf(stderr, "No matching test suites requested\n");
-    }
-    free(g_suite_arg_matched);
-    g_suite_arg_matched = NULL;
+    suite_runner_report_unmatched();
 
     /* Release process-lifetime caches so LeakSanitizer reports no leaks. */
     cbm_kind_in_set_free_cache();

@@ -1,0 +1,51 @@
+# Modules permitted to include a third-party library's header directly.
+#
+# Each line is a trust boundary crossed without an adapter. The foreign
+# API's types, error conventions and lifetime rules reach into that module
+# unchanged: sqlite3 signals errors with negative ints, lz4/zstd return
+# negative lengths, POSIX regex uses -1 for an unmatched group. Every one
+# of those has produced a real defect here.
+#
+# src/foundation/compat_regex.h is the shape to copy: it owns <regex.h>
+# and publishes cbm_regex_t / cbm_regmatch_t / CBM_REG_NOMATCH so callers
+# never see the foreign types. Landing an adapter means deleting lines
+# from this file — and the gate fails if a line outlives its edge, so a
+# retired dependency cannot quietly come back.
+#
+# Regenerate the raw set with:
+#   scripts/check-layering.py --report-externals
+
+cbm -> common
+cbm -> grammars
+cbm -> lz4
+cbm -> mimalloc
+cbm -> simplecpp
+cbm -> sqlite3
+cbm -> tree-sitter
+cbm -> ts_runtime
+cbm -> yyjson
+cbm -> zstd
+cli -> yyjson
+cli -> zlib
+discover -> yyjson
+foundation -> mimalloc
+foundation -> tre
+foundation -> verstable
+graph_buffer -> sqlite3
+graph_buffer -> yyjson
+host -> yyjson
+main -> yyjson
+mcp -> sqlite3
+mcp -> yyjson
+pipeline -> sqlite3
+pipeline -> xxhash
+pipeline -> yyjson
+semantic -> tree-sitter
+semantic -> xxhash
+simhash -> tree-sitter
+simhash -> xxhash
+store -> sqlite3
+store -> xxhash
+ui -> libgit2
+ui -> sqlite3
+ui -> yyjson

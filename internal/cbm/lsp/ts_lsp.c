@@ -146,7 +146,7 @@ static TSNode find_first_kind(TSNode node, const char *kind) {
 }
 
 static void ts_emit_resolved_call_at(TSLSPContext *ctx, const char *callee_qn, const char *strategy,
-                                     float confidence, TSNode site) {
+                                     double confidence, TSNode site) {
     if (!ctx || !ctx->resolved_calls || !callee_qn || !ctx->enclosing_func_qn)
         return;
     CBMResolvedCall rc = {0};
@@ -164,7 +164,7 @@ static void ts_emit_resolved_call_at(TSLSPContext *ctx, const char *callee_qn, c
 }
 
 static void ts_emit_resolved_reference(TSLSPContext *ctx, const char *callee_qn,
-                                       const char *strategy, float confidence, TSNode site) {
+                                       const char *strategy, double confidence, TSNode site) {
     if (!ctx || !ctx->resolved_calls || !callee_qn || !ctx->enclosing_func_qn ||
         ts_node_is_null(site)) {
         return;

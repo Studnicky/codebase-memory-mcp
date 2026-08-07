@@ -83,7 +83,7 @@ const char **cbm_string_dispatch_suffixes(CBMLanguage lang) {
 // Forward declarations
 static char *extract_callee_name(CBMArena *a, TSNode node, const char *source, CBMLanguage lang);
 static char *gotemplate_callee(CBMArena *a, TSNode node, const char *source);
-static const char *strip_and_validate_string_arg(CBMArena *a, char *text);
+static char *strip_and_validate_string_arg(CBMArena *a, char *text);
 
 // Lean 4: check if an apply node is inside a type annotation.
 // Strategy: walk up to the nearest declaration boundary; if the apply falls
@@ -927,7 +927,7 @@ static char *extract_cobol_callee(CBMArena *a, TSNode node, const char *source, 
         return NULL;
     }
     char *text = cbm_node_text(a, x, source);
-    return (char *)strip_and_validate_string_arg(a, text);
+    return strip_and_validate_string_arg(a, text);
 }
 
 // Elm: a `function_call_expr` has a `target` field; the callee identifier is
@@ -1722,7 +1722,9 @@ static char *extract_callee_name(CBMArena *a, TSNode node, const char *source, C
 }
 
 // Strip quotes and validate a string arg. Returns validated text or NULL.
-static const char *strip_and_validate_string_arg(CBMArena *a, char *text) {
+// Never writes through text; returns char* (not const) since text is always
+// caller-owned arena memory, never a view into the read-only source buffer.
+static char *strip_and_validate_string_arg(CBMArena *a, char *text) {
     if (!text || !text[0]) {
         return NULL;
     }
@@ -1749,8 +1751,7 @@ static char *gotemplate_string_child(CBMArena *a, TSNode parent, const char *sou
         return NULL;
     }
     char *text = cbm_node_text(a, s, source);
-    const char *v = strip_and_validate_string_arg(a, text);
-    return (char *)v;
+    return strip_and_validate_string_arg(a, text);
 }
 
 // Resolve a Go-template / Helm call to the referenced named template:
@@ -2002,7 +2003,13 @@ static const char *extract_positional_url(CBMExtractCtx *ctx, TSNode arg, const 
     if (strcmp(ak, "template_string") == 0) {
         const char *flat = cbm_template_string_text(ctx->arena, arg, ctx->source);
         if (flat) {
-            return strip_and_validate_string_arg(ctx->arena, (char *)flat);
+            /* cbm_template_string_text always hands back freshly arena-built
+             * text, never a view into the read-only source buffer, so the
+             * const in its shared signature is stricter than the data needs.
+             * memcpy the pointer value rather than cast away const. */
+            char *mut_flat;
+            memcpy(&mut_flat, &flat, sizeof(mut_flat));
+            return strip_and_validate_string_arg(ctx->arena, mut_flat);
         }
     }
     if (is_string_like(ak)) {

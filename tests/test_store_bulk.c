@@ -13,6 +13,7 @@
  *   bulk_crash_recovery           — DB is readable after simulated crash mid-bulk
  */
 #include "test_framework.h"
+#include "suites.h"
 #include <store/store.h>
 #include <foundation/compat.h>
 #include <sqlite3.h>

@@ -8,6 +8,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "cli/cli.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -67,6 +69,10 @@ typedef bool (*cbm_agent_probe_fn)(const char *value, const void *context);
 
 typedef struct {
     const char *home_dir;
+    /* Scan mode paired with home_dir: whether command_exists/path_exists may
+     * consult machine-global install locations (real scan) or must stay
+     * confined to PATH and home-local bin dirs (synthetic dry-run/plan). */
+    cbm_scan_mode_t scan_mode;
     const char *xdg_config_home;
     const char *appdata_dir;
     const char *glab_config_dir;

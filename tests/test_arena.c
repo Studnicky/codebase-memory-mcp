@@ -2,6 +2,7 @@
  * test_arena.c — RED phase tests for foundation/arena.
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "../src/foundation/arena.h"
 #include <stdint.h>
 

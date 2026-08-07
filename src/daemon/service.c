@@ -9,6 +9,7 @@
 #endif
 
 #include "foundation/sha256.h"
+#include "foundation/platform.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -22,6 +23,17 @@ enum {
     DAEMON_SERVICE_IO_CAP = 64 * 1024,
     DAEMON_SERVICE_ESCAPED_VERSION_CAP = (CBM_DAEMON_VERSION_TEXT_SIZE - 1) * 6 + 1,
     DAEMON_SERVICE_LOG_RECORD_CAP = 1536,
+};
+
+/* Field order of the on-disk build-fingerprint record. */
+enum {
+    FINGERPRINT_CACHE_DEVICE = 0,
+    FINGERPRINT_CACHE_INODE = 1,
+    FINGERPRINT_CACHE_SIZE = 2,
+    FINGERPRINT_CACHE_MTIME_SEC = 3,
+    FINGERPRINT_CACHE_MTIME_NSEC = 4,
+    FINGERPRINT_CACHE_NUMBERS = 5,
+    FINGERPRINT_CACHE_BASE = 10,
 };
 
 static cbm_daemon_conflict_log_test_hook_fn g_conflict_log_test_hook;
@@ -355,6 +367,175 @@ static bool fd_regular(int fd, struct stat *status_out) {
     return true;
 }
 
+/* ── Build-fingerprint identity cache ────────────────────────────────
+ *
+ * The fingerprint answers one question — "is the peer running the same build
+ * as me?" — and is computed by SHA-256 over the whole executable. That file is
+ * hundreds of MB and is re-read by every process in a command's tree (client,
+ * daemon, index worker), so the digest is memoized against the file's identity
+ * rather than recomputed.
+ *
+ * The identity key is (device, inode, size, mtime). A rebuild or an in-place
+ * update writes a new inode or mtime, so a stale digest cannot survive a build
+ * change — which is exactly the property the conflict check depends on. The
+ * key is NOT a tamper check: the caller already executes this file, and the
+ * comparison exists to detect version skew between processes, not modification.
+ */
+typedef struct {
+    dev_t device;
+    ino_t inode;
+    off_t size;
+    time_t mtime_sec;
+    long mtime_nsec;
+} fingerprint_identity_t;
+
+static void fingerprint_identity_of(const struct stat *status, fingerprint_identity_t *out) {
+    out->device = status->st_dev;
+    out->inode = status->st_ino;
+    out->size = status->st_size;
+#ifdef __APPLE__
+    out->mtime_sec = status->st_mtimespec.tv_sec;
+    out->mtime_nsec = status->st_mtimespec.tv_nsec;
+#else
+    out->mtime_sec = status->st_mtim.tv_sec;
+    out->mtime_nsec = status->st_mtim.tv_nsec;
+#endif
+}
+
+static bool fingerprint_identity_same(const fingerprint_identity_t *first,
+                                      const fingerprint_identity_t *second) {
+    return first->device == second->device && first->inode == second->inode &&
+           first->size == second->size && first->mtime_sec == second->mtime_sec &&
+           first->mtime_nsec == second->mtime_nsec;
+}
+
+/* On-disk memo, shared by every process in a command's tree. Lives beside the
+ * caches so it inherits their lifecycle; absence, corruption, or any I/O
+ * failure simply falls back to hashing, so the cache is never load-bearing for
+ * correctness. */
+static bool fingerprint_cache_path(char *out, size_t out_size) {
+    char dir[DAEMON_SERVICE_PATH_CAP];
+    if (!cbm_safe_getenv("CBM_CACHE_DIR", dir, sizeof(dir), NULL) || dir[0] == '\0') {
+        char home[DAEMON_SERVICE_PATH_CAP];
+        if (!cbm_safe_getenv("HOME", home, sizeof(home), NULL) || home[0] == '\0') {
+            return false;
+        }
+        int written = snprintf(dir, sizeof(dir), "%s/.cache/codebase-memory-mcp", home);
+        if (written < 0 || (size_t)written >= sizeof(dir)) {
+            return false;
+        }
+    }
+    int written = snprintf(out, out_size, "%s/build-fingerprint.cache", dir);
+    return written > 0 && (size_t)written < out_size;
+}
+
+static bool fingerprint_disk_cache_get(const fingerprint_identity_t *identity,
+                                       char out[CBM_DAEMON_BUILD_FINGERPRINT_SIZE]) {
+    char path[DAEMON_SERVICE_PATH_CAP];
+    if (!fingerprint_cache_path(path, sizeof(path))) {
+        return false;
+    }
+    FILE *file = fopen(path, "re");
+    if (!file) {
+        return false;
+    }
+    char line[DAEMON_SERVICE_PATH_CAP];
+    char *read = fgets(line, sizeof(line), file);
+    (void)fclose(file);
+    if (!read) {
+        return false;
+    }
+
+    /* Parse the whitespace-separated record explicitly: a truncated or
+     * malformed cache file must read as a miss, never as a partial identity
+     * that could match by accident. */
+    unsigned long long numbers[FINGERPRINT_CACHE_NUMBERS];
+    char *cursor = line;
+    for (size_t i = 0; i < FINGERPRINT_CACHE_NUMBERS; i++) {
+        char *end = NULL;
+        errno = 0;
+        numbers[i] = strtoull(cursor, &end, FINGERPRINT_CACHE_BASE);
+        if (end == cursor || errno != 0) {
+            return false;
+        }
+        cursor = end;
+    }
+    while (*cursor == ' ' || *cursor == '\t') {
+        cursor++;
+    }
+    char value[CBM_DAEMON_BUILD_FINGERPRINT_SIZE] = {0};
+    size_t digest_length = strcspn(cursor, " \t\r\n");
+    if (digest_length != CBM_SHA256_HEX_LEN || digest_length >= sizeof(value)) {
+        return false;
+    }
+    memcpy(value, cursor, digest_length);
+    if (!fingerprint_valid(value)) {
+        return false;
+    }
+
+    fingerprint_identity_t cached = {.device = (dev_t)numbers[FINGERPRINT_CACHE_DEVICE],
+                                     .inode = (ino_t)numbers[FINGERPRINT_CACHE_INODE],
+                                     .size = (off_t)numbers[FINGERPRINT_CACHE_SIZE],
+                                     .mtime_sec = (time_t)numbers[FINGERPRINT_CACHE_MTIME_SEC],
+                                     .mtime_nsec = (long)numbers[FINGERPRINT_CACHE_MTIME_NSEC]};
+    if (!fingerprint_identity_same(&cached, identity)) {
+        return false;
+    }
+    memcpy(out, value, sizeof(value));
+    return true;
+}
+
+/* Publish via temp-file + rename so a concurrent reader never observes a torn
+ * record. Every writer computes the same digest for the same image, so the
+ * last writer winning is not a conflict. */
+static void fingerprint_disk_cache_put(const fingerprint_identity_t *identity,
+                                       const char value[CBM_DAEMON_BUILD_FINGERPRINT_SIZE]) {
+    char path[DAEMON_SERVICE_PATH_CAP];
+    if (!fingerprint_cache_path(path, sizeof(path))) {
+        return;
+    }
+    char temp[DAEMON_SERVICE_PATH_CAP];
+    int written = snprintf(temp, sizeof(temp), "%s.%d.tmp", path, (int)getpid());
+    if (written < 0 || (size_t)written >= sizeof(temp)) {
+        return;
+    }
+    FILE *file = fopen(temp, "we");
+    if (!file) {
+        return;
+    }
+    bool ok = fprintf(file, "%llu %llu %lld %lld %ld %s\n", (unsigned long long)identity->device,
+                      (unsigned long long)identity->inode, (long long)identity->size,
+                      (long long)identity->mtime_sec, identity->mtime_nsec, value) > 0;
+    ok = fclose(file) == 0 && ok;
+    if (!ok || rename(temp, path) != 0) {
+        (void)unlink(temp);
+    }
+}
+
+/* Process-lifetime memo. A single process asks for the fingerprint more than
+ * once (rendezvous encode, then supervisor capture), and each ask would
+ * otherwise re-read the whole image. */
+static fingerprint_identity_t fingerprint_memo_identity;
+static char fingerprint_memo_value[CBM_DAEMON_BUILD_FINGERPRINT_SIZE];
+static bool fingerprint_memo_valid;
+
+static bool fingerprint_memo_get(const fingerprint_identity_t *identity,
+                                 char out[CBM_DAEMON_BUILD_FINGERPRINT_SIZE]) {
+    if (!fingerprint_memo_valid ||
+        !fingerprint_identity_same(&fingerprint_memo_identity, identity)) {
+        return false;
+    }
+    memcpy(out, fingerprint_memo_value, sizeof(fingerprint_memo_value));
+    return true;
+}
+
+static void fingerprint_memo_put(const fingerprint_identity_t *identity,
+                                 const char value[CBM_DAEMON_BUILD_FINGERPRINT_SIZE]) {
+    fingerprint_memo_identity = *identity;
+    memcpy(fingerprint_memo_value, value, sizeof(fingerprint_memo_value));
+    fingerprint_memo_valid = true;
+}
+
 bool cbm_daemon_build_fingerprint_native_file(uintptr_t native_file,
                                               char out[CBM_DAEMON_BUILD_FINGERPRINT_SIZE]) {
     if (!out) {
@@ -368,6 +549,16 @@ bool cbm_daemon_build_fingerprint_native_file(uintptr_t native_file,
     struct stat before;
     if (fd < 0 || !fd_regular(fd, &before) || before.st_size < 0) {
         return false;
+    }
+
+    fingerprint_identity_t identity;
+    fingerprint_identity_of(&before, &identity);
+    if (fingerprint_memo_get(&identity, out)) {
+        return true;
+    }
+    if (fingerprint_disk_cache_get(&identity, out)) {
+        fingerprint_memo_put(&identity, out);
+        return true;
     }
 
     cbm_sha256_ctx context;
@@ -400,6 +591,8 @@ bool cbm_daemon_build_fingerprint_native_file(uintptr_t native_file,
     uint8_t digest[CBM_SHA256_DIGEST_LEN];
     cbm_sha256_final(&context, digest);
     digest_to_hex(digest, out);
+    fingerprint_memo_put(&identity, out);
+    fingerprint_disk_cache_put(&identity, out);
     return true;
 }
 

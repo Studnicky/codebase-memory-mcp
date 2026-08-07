@@ -16,6 +16,7 @@
  * global helpers.value function — see docs/PHP_LSP_PRE_FLIGHT.md §4.2.
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "cbm.h"
 #include "../src/pipeline/lsp_resolve.h"
 #include "lsp/php_lsp.h"
@@ -5273,7 +5274,7 @@ TEST(phplsp_ordinary_same_leaf_calls_join_by_exact_site) {
     int zero_span_hijackers = 0;
     for (int i = 0; i < r->resolved_calls.count; i++) {
         const CBMResolvedCall *rc = &r->resolved_calls.items[i];
-        if (rc->kind != CBM_RESOLVED_INVOCATION || rc->confidence <= 0.0f || !rc->caller_qn ||
+        if (rc->kind != CBM_RESOLVED_INVOCATION || rc->confidence <= 0.0 || !rc->caller_qn ||
             !strstr(rc->caller_qn, "OccurrenceProbe.run") || !rc->callee_qn ||
             !strstr(rc->callee_qn, ".render")) {
             continue;

@@ -5,6 +5,7 @@
  * exact graph CALL_REFERENCE edge; that narrower semantic contract is covered
  * by the reference-precision suites. */
 #include "test_framework.h"
+#include "suites.h"
 #include "lang_specs.h"
 #include "tree_sitter/api.h"
 

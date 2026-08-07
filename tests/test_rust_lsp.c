@@ -18,6 +18,7 @@
  * `suite_rust_lsp` at the bottom; test_main.c registers it via RUN_SUITE.
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "cbm.h"
 #include "lsp/rust_lsp.h"
 #include "pipeline/lsp_resolve.h"
@@ -116,7 +117,7 @@ static int find_confident(const CBMResolvedCallArray *arr, const char *callerSub
                           const char *calleeSub) {
     for (int i = 0; i < arr->count; i++) {
         const CBMResolvedCall *rc = &arr->items[i];
-        if (rc->confidence >= 0.6f && rc->caller_qn && strstr(rc->caller_qn, callerSub) &&
+        if (rc->confidence >= 0.6 && rc->caller_qn && strstr(rc->caller_qn, callerSub) &&
             rc->callee_qn && strstr(rc->callee_qn, calleeSub)) {
             return i;
         }
@@ -128,7 +129,7 @@ static int count_confident_strategy(const CBMResolvedCallArray *arr, const char 
     int count = 0;
     for (int i = 0; arr && i < arr->count; i++) {
         const CBMResolvedCall *rc = &arr->items[i];
-        if (rc->confidence >= 0.6f && rc->strategy && strcmp(rc->strategy, strategy) == 0) {
+        if (rc->confidence >= 0.6 && rc->strategy && strcmp(rc->strategy, strategy) == 0) {
             count++;
         }
     }
@@ -768,7 +769,7 @@ TEST(rustlsp_shared_dispatch_merges_existing_exact_occurrence) {
     const char *local_target = NULL;
     for (int i = 0; i < result->resolved_calls.count; i++) {
         const CBMResolvedCall *rc = &result->resolved_calls.items[i];
-        if (rc->confidence >= 0.6f && rc->callee_qn && rc->site_start_byte == local_start &&
+        if (rc->confidence >= 0.6 && rc->callee_qn && rc->site_start_byte == local_start &&
             rc->site_end_byte == local_end) {
             local_before++;
             local_target = rc->callee_qn;
@@ -808,7 +809,7 @@ TEST(rustlsp_shared_dispatch_merges_existing_exact_occurrence) {
     const CBMCall *render_carrier = NULL;
     for (int i = 0; i < result->resolved_calls.count; i++) {
         const CBMResolvedCall *rc = &result->resolved_calls.items[i];
-        if (rc->confidence < 0.6f || !rc->callee_qn)
+        if (rc->confidence < 0.6 || !rc->callee_qn)
             continue;
         if (strcmp(rc->callee_qn, local_target) == 0 && rc->site_start_byte == local_start &&
             rc->site_end_byte == local_end) {
@@ -4942,11 +4943,14 @@ TEST(rustlsp_cov_edge_method_returning_self_chain) {
 }
 TEST(rustlsp_cov_edge_many_function_def) {
     char src[8192] = {0};
-    char* p = src;
-    p += snprintf(p, src + sizeof(src) - p,"fn main() {\n");
-    for (int i = 0; i < 20; i++) p += snprintf(p, src + sizeof(src) - p, "    fn_%d();\n", i);
-    p += snprintf(p, src + sizeof(src) - p,"}\n");
-    for (int i = 0; i < 20; i++) p += snprintf(p, src + sizeof(src) - p, "fn fn_%d() {}\n", i);
+    /* Buffer offset as size_t: the format strings here are fixed ASCII
+     * text, so snprintf never returns negative (encoding error), and the
+     * generated content (20 short lines) stays well under sizeof(src). */
+    size_t off = 0;
+    off += (size_t)snprintf(src + off, sizeof(src) - off, "fn main() {\n");
+    for (int i = 0; i < 20; i++) off += (size_t)snprintf(src + off, sizeof(src) - off, "    fn_%d();\n", i);
+    off += (size_t)snprintf(src + off, sizeof(src) - off, "}\n");
+    for (int i = 0; i < 20; i++) off += (size_t)snprintf(src + off, sizeof(src) - off, "fn fn_%d() {}\n", i);
     CBMFileResult *r = extract_rust(src);
     ASSERT_NOT_NULL(r);
     int hits = 0;
@@ -4960,12 +4964,15 @@ TEST(rustlsp_cov_edge_many_function_def) {
 }
 TEST(rustlsp_cov_edge_many_methods_one_struct) {
     char src[8192] = {0};
-    char* p = src;
-    p += snprintf(p, src + sizeof(src) - p,"struct M;\nimpl M {\n");
-    for (int i = 0; i < 15; i++) p += snprintf(p, src + sizeof(src) - p, "    fn m_%d(&self) {}\n", i);
-    p += snprintf(p, src + sizeof(src) - p,"}\nfn run(m: &M) {\n");
-    for (int i = 0; i < 15; i++) p += snprintf(p, src + sizeof(src) - p, "    m.m_%d();\n", i);
-    p += snprintf(p, src + sizeof(src) - p,"}\n");
+    /* Buffer offset as size_t: the format strings here are fixed ASCII
+     * text, so snprintf never returns negative (encoding error), and the
+     * generated content (15 short lines) stays well under sizeof(src). */
+    size_t off = 0;
+    off += (size_t)snprintf(src + off, sizeof(src) - off, "struct M;\nimpl M {\n");
+    for (int i = 0; i < 15; i++) off += (size_t)snprintf(src + off, sizeof(src) - off, "    fn m_%d(&self) {}\n", i);
+    off += (size_t)snprintf(src + off, sizeof(src) - off, "}\nfn run(m: &M) {\n");
+    for (int i = 0; i < 15; i++) off += (size_t)snprintf(src + off, sizeof(src) - off, "    m.m_%d();\n", i);
+    off += (size_t)snprintf(src + off, sizeof(src) - off, "}\n");
     CBMFileResult *r = extract_rust(src);
     ASSERT_NOT_NULL(r);
     int hits = 0;
@@ -6733,7 +6740,7 @@ TEST(rustlsp_followup_c_real_world_idioms) {
      * a registered stdlib/crate path or an `lsp_unresolved` (conf 0). */
     for (int i = 0; i < r->resolved_calls.count; i++) {
         const CBMResolvedCall* rc = &r->resolved_calls.items[i];
-        if (rc->confidence < 0.6f) continue;  /* unresolved diag, OK */
+        if (rc->confidence < 0.6) continue;  /* unresolved diag, OK */
         if (!rc->callee_qn) continue;
         /* Just assert non-empty — `precision` in this test layer
          * means "we never emit empty / NULL targets at high
@@ -6749,12 +6756,15 @@ TEST(rustlsp_followup_c_real_world_idioms) {
 TEST(rustlsp_followup_b_pathological_no_hang) {
     /* Deeply nested call: should not hang or crash. */
     char src[8192];
-    char* p = src;
-    p += snprintf(p, src + sizeof(src) - p, "fn h() {}\nfn run() {\n");
+    /* Buffer offset as size_t: the format strings here are fixed ASCII
+     * text, so snprintf never returns negative (encoding error), and the
+     * generated content (200 short lines) stays well under sizeof(src). */
+    size_t off = 0;
+    off += (size_t)snprintf(src + off, sizeof(src) - off, "fn h() {}\nfn run() {\n");
     for (int i = 0; i < 200; i++) {
-        p += snprintf(p, src + sizeof(src) - p, "    h();\n");
+        off += (size_t)snprintf(src + off, sizeof(src) - off, "    h();\n");
     }
-    p += snprintf(p, src + sizeof(src) - p, "}\n");
+    off += (size_t)snprintf(src + off, sizeof(src) - off, "}\n");
     CBMFileResult *r = extract_rust(src);
     ASSERT_NOT_NULL(r);
     /* Some `h` calls must resolve (we won't process all 200 if the cap

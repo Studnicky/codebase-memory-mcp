@@ -1,10 +1,11 @@
 /*
  * application.c — Daemon-owned CBM application sessions and thin-client wire.
  */
-#include "daemon/application.h"
-#include "daemon/application_internal.h"
+#include "host/application.h"
+#include "host/application_internal.h"
 
 #include "cli/cli.h"
+#include "foundation/build_version.h"
 #include "foundation/compat.h"
 #include "foundation/compat_fs.h"
 #include "foundation/compat_thread.h"
@@ -1745,13 +1746,13 @@ static void application_update_publish_terminal_locked(cbm_daemon_application_t 
                                                        const char *latest_version,
                                                        bool completed_generation) {
     if (!application->update_cancel_requested && application_update_version_valid(latest_version) &&
-        cbm_compare_versions(latest_version, cbm_cli_get_version()) > 0) {
+        cbm_compare_versions(latest_version, cbm_build_version_get()) > 0) {
         (void)snprintf(application->update_notice, sizeof(application->update_notice),
                        "Update available: %s -> %s -- run: codebase-memory-mcp update  |  "
                        "Enjoying codebase-memory-mcp? Please leave a star: "
                        "https://github.com/DeusData/codebase-memory-mcp",
-                       cbm_cli_get_version(), latest_version);
-        cbm_log_info("update.available", "current", cbm_cli_get_version(), "latest",
+                       cbm_build_version_get(), latest_version);
+        cbm_log_info("update.available", "current", cbm_build_version_get(), "latest",
                      latest_version);
     }
     for (cbm_daemon_application_session_t *session = application->sessions; session;

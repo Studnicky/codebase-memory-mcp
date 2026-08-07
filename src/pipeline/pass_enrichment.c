@@ -149,7 +149,7 @@ int cbm_tokenize_decorator(const char *dec, char **out, int max_out) {
 
 /* Per-node tokenization state */
 typedef struct {
-    int64_t node_id;
+    cbm_node_id_t node_id;
     char *qualified_name;
     char **words;
     int word_count;
@@ -211,7 +211,7 @@ static int extract_decorator_words(const char *json, char ***out_words) {
 
     /* Collect unique words from all decorators */
     char *all_words[CBM_SZ_256];
-    int total = 0;
+    size_t total = 0;
     CBMHashTable *seen = cbm_ht_create(CBM_SZ_32);
 
     for (int i = 0; decorators[i]; i++) {
@@ -237,12 +237,14 @@ static int extract_decorator_words(const char *json, char ***out_words) {
 
     *out_words = malloc(sizeof(char *) * total);
     memcpy(*out_words, all_words, sizeof(char *) * total);
-    return total;
+    /* total is bounded by the CBM_SZ_256 cap enforced above, so it always
+     * fits the int this function returns. */
+    return (int)total;
 }
 
 /* Insert "decorator_tags" into a properties_json string.
  * Returns a newly allocated JSON string. Caller must free(). */
-static char *inject_decorator_tags(const char *json, char **tags, int tag_count) {
+static char *inject_decorator_tags(const char *json, char **tags, size_t tag_count) {
     yyjson_doc *doc = yyjson_read(json, strlen(json), 0);
     yyjson_val *root = doc ? yyjson_doc_get_root(doc) : NULL;
 
@@ -261,7 +263,7 @@ static char *inject_decorator_tags(const char *json, char **tags, int tag_count)
 
     /* Add sorted tag array */
     yyjson_mut_val *arr = yyjson_mut_arr(mdoc);
-    for (int i = 0; i < tag_count; i++) {
+    for (size_t i = 0; i < tag_count; i++) {
         yyjson_mut_arr_add_str(mdoc, arr, tags[i]);
     }
     yyjson_mut_obj_add_val(mdoc, mroot, "decorator_tags", arr);
@@ -274,12 +276,12 @@ static char *inject_decorator_tags(const char *json, char **tags, int tag_count)
 
 /* Simple string comparison for qsort */
 static int cmp_str(const void *a, const void *b) {
-    return strcmp(*(const char **)a, *(const char **)b);
+    return strcmp(*(const char *const *)a, *(const char *const *)b);
 }
 
 /* Free tagged_node_t array. */
-static void free_tagged_nodes(tagged_node_t *nodes, int count) {
-    for (int n = 0; n < count; n++) {
+static void free_tagged_nodes(tagged_node_t *nodes, size_t count) {
+    for (size_t n = 0; n < count; n++) {
         free(nodes[n].qualified_name);
         for (int w = 0; w < nodes[n].word_count; w++) {
             free(nodes[n].words[w]);
@@ -290,16 +292,16 @@ static void free_tagged_nodes(tagged_node_t *nodes, int count) {
 }
 
 /* Phase 1: Collect decorated nodes and count word frequency. */
-static int collect_decorated_nodes(cbm_gbuf_t *gbuf, tagged_node_t **out_nodes,
-                                   CBMHashTable *word_counts) {
+static size_t collect_decorated_nodes(cbm_gbuf_t *gbuf, tagged_node_t **out_nodes,
+                                      CBMHashTable *word_counts) {
     /* "Struct" alongside "Class" so Go/Rust/Swift/D struct names keep
      * contributing to / receiving auto-tags as they did when structs were
      * labelled "Class". */
     static const char *labels[] = {"Function", "Method", "Class", "Struct"};
     static const int nlabels = 4;
     tagged_node_t *nodes = NULL;
-    int node_count = 0;
-    int node_cap = 0;
+    size_t node_count = 0;
+    size_t node_cap = 0;
 
     for (int l = 0; l < nlabels; l++) {
         const cbm_gbuf_node_t **found = NULL;
@@ -336,12 +338,12 @@ static int collect_decorated_nodes(cbm_gbuf_t *gbuf, tagged_node_t **out_nodes,
 }
 
 /* Phase 3: Apply candidate tags to nodes in the gbuf. */
-static int apply_decorator_tags(cbm_gbuf_t *gbuf, tagged_node_t *nodes, int node_count,
+static int apply_decorator_tags(cbm_gbuf_t *gbuf, tagged_node_t *nodes, size_t node_count,
                                 CBMHashTable *candidates) {
     int tagged = 0;
-    for (int n = 0; n < node_count; n++) {
+    for (size_t n = 0; n < node_count; n++) {
         char *tag_words[CBM_SZ_256];
-        int tag_count = 0;
+        size_t tag_count = 0;
         for (int w = 0; w < nodes[n].word_count; w++) {
             if (cbm_ht_get(candidates, nodes[n].words[w]) && tag_count < CBM_SZ_256) {
                 tag_words[tag_count++] = nodes[n].words[w];
@@ -376,7 +378,7 @@ int cbm_pipeline_pass_decorator_tags(cbm_gbuf_t *gbuf, const char *project) {
 
     CBMHashTable *word_counts = cbm_ht_create(CBM_SZ_128);
     tagged_node_t *nodes = NULL;
-    int node_count = collect_decorated_nodes(gbuf, &nodes, word_counts);
+    size_t node_count = collect_decorated_nodes(gbuf, &nodes, word_counts);
     if (node_count == 0) {
         cbm_ht_free(word_counts);
         free(nodes);
@@ -386,7 +388,7 @@ int cbm_pipeline_pass_decorator_tags(cbm_gbuf_t *gbuf, const char *project) {
     /* Phase 2: Determine candidates (words on 2+ nodes) */
     CBMHashTable *candidates = cbm_ht_create(CBM_SZ_64);
     int candidate_count = 0;
-    for (int n = 0; n < node_count; n++) {
+    for (size_t n = 0; n < node_count; n++) {
         for (int w = 0; w < nodes[n].word_count; w++) {
             const char *word = nodes[n].words[w];
             intptr_t cnt = (intptr_t)cbm_ht_get(word_counts, word);

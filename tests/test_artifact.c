@@ -2,6 +2,7 @@
  * test_artifact.c — Tests for persistent artifact export/import.
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "store/store.h"
 #include "pipeline/artifact.h"
 #include "pipeline/pipeline.h"

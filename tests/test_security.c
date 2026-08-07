@@ -7,6 +7,7 @@
  *   - Path containment (realpath prevents directory traversal)
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "test_helpers.h"
 #include <store/store.h>
 #include <cypher/cypher.h>

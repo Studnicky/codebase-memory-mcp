@@ -999,8 +999,8 @@ static void handle_string_constants(CBMExtractCtx *ctx, TSNode node, const WalkS
     }
 
     char *name = cbm_node_text(ctx->arena, name_node, ctx->source);
-    char *value =
-        flat_value ? (char *)flat_value : cbm_node_text(ctx->arena, value_node, ctx->source);
+    const char *value =
+        flat_value ? flat_value : cbm_node_text(ctx->arena, value_node, ctx->source);
     if (!name || !name[0] || !value || !value[0]) {
         return;
     }

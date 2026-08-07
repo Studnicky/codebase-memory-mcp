@@ -5,6 +5,7 @@
  */
 #include "../src/foundation/compat.h"
 #include "test_framework.h"
+#include "suites.h"
 #include "discover/discover.h"
 #include <string.h> /* strdup (test seam) */
 

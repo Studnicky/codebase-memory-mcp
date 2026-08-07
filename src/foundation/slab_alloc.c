@@ -85,6 +85,15 @@ typedef struct slab_page {
 _Static_assert(sizeof(slab_page_t) <= SLAB_DATA_OFFSET,
                "slab_page header must fit in SLAB_DATA_OFFSET");
 _Static_assert(SLAB_DATA_OFFSET % SLAB_CHUNK_SIZE == 0, "SLAB_DATA_OFFSET must be chunk-aligned");
+/* Every chunk offset is page-base + SLAB_DATA_OFFSET + i*SLAB_CHUNK_SIZE. The
+ * page base is SLAB_PAGE_SIZE-aligned (cbm_aligned_alloc) and both offsets
+ * are multiples of SLAB_CHUNK_SIZE, so a chunk pointer is always at least as
+ * aligned as slab_free_node_t requires — this makes that guarantee explicit
+ * rather than leaving it implicit at the cast site. */
+_Static_assert(SLAB_CHUNK_SIZE % _Alignof(slab_free_node_t) == 0,
+               "chunks must stay aligned for slab_free_node_t");
+_Static_assert(SLAB_PAGE_SIZE % _Alignof(slab_free_node_t) == 0,
+               "slab pages must stay aligned for slab_free_node_t");
 
 /* Per-thread Tier 1 state. */
 struct slab_state {
@@ -230,8 +239,11 @@ static bool slab_grow(slab_state_t *s) {
     s->pages = page;
 
     for (size_t i = 0; i < SLAB_PAGE_CHUNKS; i++) {
-        slab_free_node_t *node =
-            (slab_free_node_t *)((char *)page + SLAB_DATA_OFFSET + i * SLAB_CHUNK_SIZE);
+        /* Alignment is guaranteed by construction (see the _Static_asserts
+         * above), so route through uintptr_t rather than a char* pointer
+         * cast that increases alignment requirements. */
+        uintptr_t addr = (uintptr_t)page + SLAB_DATA_OFFSET + i * SLAB_CHUNK_SIZE;
+        slab_free_node_t *node = (slab_free_node_t *)addr;
         node->next = s->freelist;
         s->freelist = node;
     }

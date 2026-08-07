@@ -13,6 +13,7 @@
  * every platform regardless of core count.
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "repro_harness.h" /* RProj, rh_to_fwd_slashes, rh_count_label, rh_cleanup */
 #include <yyjson/yyjson.h>
 
@@ -748,9 +749,7 @@ TEST(index_relative_repo_path_canonicalized) {
     ASSERT_NOT_NULL(info.root_path);
     ASSERT_TRUE(info.root_path[0] == '/');
     ASSERT_STR_EQ(info.root_path, canon);
-    free((char *)info.name);
-    free((char *)info.indexed_at);
-    free((char *)info.root_path);
+    cbm_project_free_fields(&info);
 
     /* ...and it stays queryable. */
     cbm_node_t *hits = NULL;

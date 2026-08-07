@@ -6,6 +6,10 @@
  * connection, explicit workspace context, shared watcher subscriptions,
  * daemon-owned index jobs, and one update-check generation. Frontends never
  * construct stores or watchers.
+ *
+ * `host` is the composition root: it wires the adapters (cli, mcp, store,
+ * ui, watcher) onto the daemon client protocol. It may depend on any
+ * adapter. No adapter may depend on `host`.
  */
 #ifndef CBM_DAEMON_APPLICATION_H
 #define CBM_DAEMON_APPLICATION_H

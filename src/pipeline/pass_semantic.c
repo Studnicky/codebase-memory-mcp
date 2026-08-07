@@ -12,7 +12,6 @@
  * Depends on: pass_definitions having populated the registry and graph buffer
  */
 #include "foundation/constants.h"
-#include "foundation/str_util.h" // cbm_json_escape
 #include "pipeline/pipeline.h"
 #include <stdint.h>
 #include "pipeline/pipeline_internal.h"
@@ -21,6 +20,7 @@
 #include "foundation/compat.h"
 #include "foundation/compat_fs.h"
 #include "foundation/limits.h"
+#include "foundation/platform.h"
 #include "cbm.h"
 
 #include <stdio.h>
@@ -54,7 +54,7 @@ static char *read_file(const char *path, int *out_len) {
         (void)fclose(f);
         return NULL;
     }
-    size_t nread = fread(buf, SKIP_ONE, size, f);
+    size_t nread = fread(buf, SKIP_ONE, (size_t)size, f);
     (void)fclose(f);
     if (nread > (size_t)size) {
         nread = (size_t)size;
@@ -126,26 +126,22 @@ static int build_import_map(cbm_pipeline_ctx_t *ctx, const char *rel_path,
         return 0;
     }
 
-    const char **keys = calloc(edge_count, sizeof(const char *));
-    const char **vals = calloc(edge_count, sizeof(const char *));
+    const char **keys = calloc((size_t)edge_count, sizeof(const char *));
+    const char **vals = calloc((size_t)edge_count, sizeof(const char *));
     int count = 0;
 
     for (int i = 0; i < edge_count; i++) {
         const cbm_gbuf_edge_t *e = edges[i];
         const cbm_gbuf_node_t *target = cbm_gbuf_find_by_id(ctx->gbuf, e->target_id);
-        if (!target || !e->properties_json) {
+        if (!target) {
             continue;
         }
 
-        const char *start = strstr(e->properties_json, "\"local_name\":\"");
-        if (start) {
-            start += strlen("\"local_name\":\"");
-            const char *end = strchr(start, '"');
-            if (end && end > start) {
-                keys[count] = cbm_strndup(start, end - start);
-                vals[count] = target->qualified_name;
-                count++;
-            }
+        const char *local_name = cbm_gbuf_edge_prop_string(e, "local_name");
+        if (local_name) {
+            keys[count] = cbm_strndup(local_name, strlen(local_name));
+            vals[count] = target->qualified_name;
+            count++;
         }
     }
 
@@ -158,7 +154,7 @@ static int build_import_map(cbm_pipeline_ctx_t *ctx, const char *rel_path,
 static void free_import_map(const char **keys, const char **vals, int count) {
     if (keys) {
         for (int i = 0; i < count; i++) {
-            free((void *)keys[i]);
+            safe_str_free(&keys[i]);
         }
         free((void *)keys);
     }
@@ -239,7 +235,7 @@ static bool fp_ends_with(const char *fp, const char *suffix) {
 /* Info about one interface method (name + node ID). */
 typedef struct {
     const char *name;
-    int64_t id;
+    cbm_node_id_t id;
 } go_imethod_t;
 
 /* Check if class has all interface methods and create IMPLEMENTS + OVERRIDE edges. */
@@ -291,10 +287,14 @@ static int check_go_class_implements(cbm_pipeline_ctx_t *ctx, const cbm_gbuf_nod
         }
         matched[m] = found;
     }
-    cbm_gbuf_insert_edge(ctx->gbuf, cls->id, iface->id, "IMPLEMENTS", "{}");
+    cbm_gbuf_insert_edge_props(ctx->gbuf,
+                               (cbm_edge_endpoints_t){.source = cls->id, .target = iface->id},
+                               "IMPLEMENTS", NULL, 0);
     int edges = SKIP_ONE;
     for (int m = 0; m < im_count; m++) {
-        cbm_gbuf_insert_edge(ctx->gbuf, matched[m]->id, imethods[m].id, "OVERRIDE", "{}");
+        cbm_gbuf_insert_edge_props(
+            ctx->gbuf, (cbm_edge_endpoints_t){.source = matched[m]->id, .target = imethods[m].id},
+            "OVERRIDE", NULL, 0);
         edges++;
     }
     return edges;
@@ -405,7 +405,7 @@ static void resolve_decorator(cbm_pipeline_ctx_t *ctx, const cbm_gbuf_node_t *no
      * may fall back from `tokio::main` to same-module `main`.  That is not a
      * local decorator target (and the self-edge is discarded below), so keep
      * the full external spelling by materialising the synthetic decorator. */
-    if (dec && dec->id == node->id && decorator[0] == '#' && decorator[1] == '[' &&
+    if (dec && cbm_node_id_eq(dec->id, node->id) && decorator[0] == '#' && decorator[1] == '[' &&
         strstr(func_name, "::")) {
         dec = NULL;
     }
@@ -419,24 +419,28 @@ static void resolve_decorator(cbm_pipeline_ctx_t *ctx, const cbm_gbuf_node_t *no
          * ctx->gbuf mutation is safe here (mirrors pass_route_nodes). */
         char syn_qn[CBM_SZ_512];
         synth_decorator_qn(func_name, syn_qn, sizeof(syn_qn));
-        int64_t syn_id =
+        cbm_node_id_t syn_id =
             cbm_gbuf_upsert_node(ctx->gbuf, "Decorator", func_name, syn_qn, "", 0, 0, "{}");
-        if (syn_id != 0) {
+        if (cbm_node_id_valid(syn_id)) {
             dec = cbm_gbuf_find_by_qn(ctx->gbuf, syn_qn);
         }
     }
-    if (dec && node->id != dec->id) {
+    if (dec && !cbm_node_id_eq(node->id, dec->id)) {
         /* Decorator source text can contain quotes and raw newlines — escape
          * it or the edge properties JSON is malformed (twin of the parallel
          * path in pass_parallel.c). */
-        char esc_dec[CBM_SZ_256];
-        cbm_json_escape(esc_dec, sizeof(esc_dec), decorator);
-        char props[CBM_SZ_512];
-        snprintf(props, sizeof(props), "{\"decorator\":\"%s\"}", esc_dec);
-        cbm_gbuf_insert_edge(ctx->gbuf, node->id, dec->id, "DECORATES", props);
+        enum { DECORATES_PROP_COUNT = 1 };
+        cbm_gbuf_prop_t props[DECORATES_PROP_COUNT] = {
+            {.key = "decorator", .kind = CBM_EDGE_PROP_STRING, .text = decorator},
+        };
+        cbm_gbuf_insert_edge_props(ctx->gbuf,
+                                   (cbm_edge_endpoints_t){.source = node->id, .target = dec->id},
+                                   "DECORATES", props, DECORATES_PROP_COUNT);
         /* Ensure a reference edge exists so the decorator appears in usage queries
          * without being misclassified as a real call by downstream passes. */
-        cbm_gbuf_insert_edge(ctx->gbuf, node->id, dec->id, "USAGE", "{}");
+        cbm_gbuf_insert_edge_props(ctx->gbuf,
+                                   (cbm_edge_endpoints_t){.source = node->id, .target = dec->id},
+                                   "USAGE", NULL, 0);
         (*count)++;
     }
 }
@@ -460,7 +464,7 @@ static void sem_process_def_edges(cbm_pipeline_ctx_t *ctx, const CBMDefinition *
                 continue;
             }
             const cbm_gbuf_node_t *base_node = cbm_gbuf_find_by_qn(ctx->gbuf, base_qn);
-            if (base_node && node->id != base_node->id) {
+            if (base_node && !cbm_node_id_eq(node->id, base_node->id)) {
                 /* A base that resolves to an Interface is an IMPLEMENTS relation
                  * (Java `implements`, C# `: IFace`, TS `implements`); a Class/
                  * Type/Enum base is plain INHERITS. Keyed off the target NODE's
@@ -468,8 +472,9 @@ static void sem_process_def_edges(cbm_pipeline_ctx_t *ctx, const CBMDefinition *
                  * sequential and parallel venues cannot diverge (the parallel
                  * path once hardcoded INHERITS and demoted every explicit
                  * implements at scale). */
-                cbm_gbuf_insert_edge(ctx->gbuf, node->id, base_node->id,
-                                     cbm_semantic_base_edge_type(base_node), "{}");
+                cbm_gbuf_insert_edge_props(
+                    ctx->gbuf, (cbm_edge_endpoints_t){.source = node->id, .target = base_node->id},
+                    cbm_semantic_base_edge_type(base_node), NULL, 0);
                 (*inherits_count)++;
             }
         }
@@ -525,8 +530,10 @@ static int resolve_impl_traits(cbm_pipeline_ctx_t *ctx, const CBMFileResult *res
         }
         const cbm_gbuf_node_t *tn = cbm_gbuf_find_by_qn(ctx->gbuf, trait_qn);
         const cbm_gbuf_node_t *sn = cbm_gbuf_find_by_qn(ctx->gbuf, struct_qn);
-        if (tn && sn && tn->id != sn->id) {
-            cbm_gbuf_insert_edge(ctx->gbuf, sn->id, tn->id, "IMPLEMENTS", "{}");
+        if (tn && sn && !cbm_node_id_eq(tn->id, sn->id)) {
+            cbm_gbuf_insert_edge_props(ctx->gbuf,
+                                       (cbm_edge_endpoints_t){.source = sn->id, .target = tn->id},
+                                       "IMPLEMENTS", NULL, 0);
             count++;
         }
     }
@@ -624,8 +631,11 @@ static int override_match_methods(cbm_pipeline_ctx_t *ctx, const cbm_gbuf_node_t
         }
         for (int b = 0; b < base_dm_count; b++) {
             const cbm_gbuf_node_t *bm = cbm_gbuf_find_by_id(ctx->gbuf, base_dm[b]->target_id);
-            if (bm && bm->name && cm->id != bm->id && strcmp(cm->name, bm->name) == 0) {
-                cbm_gbuf_insert_edge(ctx->gbuf, cm->id, bm->id, "OVERRIDE", "{}");
+            if (bm && bm->name && !cbm_node_id_eq(cm->id, bm->id) &&
+                strcmp(cm->name, bm->name) == 0) {
+                cbm_gbuf_insert_edge_props(
+                    ctx->gbuf, (cbm_edge_endpoints_t){.source = cm->id, .target = bm->id},
+                    "OVERRIDE", NULL, 0);
                 created++;
                 break;
             }

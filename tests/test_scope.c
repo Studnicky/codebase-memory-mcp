@@ -7,6 +7,7 @@
  * Go and C/C++ LSP implementations rely on.
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "cbm.h"
 #include "lsp/scope.h"
 #include "lsp/type_rep.h"

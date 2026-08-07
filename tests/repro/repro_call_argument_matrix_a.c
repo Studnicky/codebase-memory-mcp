@@ -16,6 +16,7 @@
  * reference syntax is var(...); that row makes no vocabulary-isolation claim.
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "lang_specs.h"
 
 #include <stdio.h>

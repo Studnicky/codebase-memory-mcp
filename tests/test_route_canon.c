@@ -8,6 +8,7 @@
  * See src/pipeline/pass_route_nodes.c.
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "pipeline/pipeline_internal.h"
 
 #include <string.h>

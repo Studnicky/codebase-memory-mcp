@@ -107,6 +107,7 @@
 
 #include <foundation/compat.h>
 #include "test_framework.h"
+#include "suites.h"
 
 #include <foundation/platform.h>
 

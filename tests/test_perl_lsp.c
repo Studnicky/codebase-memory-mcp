@@ -25,6 +25,7 @@
  * the emitted QN string.
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "cbm.h"
 #include "../src/pipeline/lsp_resolve.h"
 #include "lsp/perl_lsp.h"
@@ -431,7 +432,7 @@ TEST(perllsp_repeated_target_calls_join_by_exact_site) {
     int zero_span_semantics = 0;
     for (int i = 0; i < r->resolved_calls.count; i++) {
         const CBMResolvedCall *rc = &r->resolved_calls.items[i];
-        if (rc->kind != CBM_RESOLVED_INVOCATION || rc->confidence <= 0.0f || !rc->caller_qn ||
+        if (rc->kind != CBM_RESOLVED_INVOCATION || rc->confidence <= 0.0 || !rc->caller_qn ||
             !strstr(rc->caller_qn, "main.occurrence_probe") || !rc->callee_qn ||
             !strstr(rc->callee_qn, "render")) {
             continue;
@@ -506,7 +507,7 @@ static int assert_perl_repeated_exact_join(const char *source, const char *calle
     int zero_span_semantics = 0;
     for (int i = 0; i < r->resolved_calls.count; i++) {
         const CBMResolvedCall *resolved = &r->resolved_calls.items[i];
-        if (resolved->kind != CBM_RESOLVED_INVOCATION || resolved->confidence <= 0.0f ||
+        if (resolved->kind != CBM_RESOLVED_INVOCATION || resolved->confidence <= 0.0 ||
             !resolved->caller_qn || !strstr(resolved->caller_qn, caller_fragment) ||
             !resolved->callee_qn || !strstr(resolved->callee_qn, callee_fragment)) {
             continue;

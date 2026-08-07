@@ -155,7 +155,7 @@ static void py_invalidate_possible_bindings(PyLSPContext *ctx, TSNode node, int 
 static const CBMRegisteredFunc *py_lookup_attribute(PyLSPContext *ctx, const char *type_qn,
                                                     const char *member_name);
 static void py_emit_resolved_call(PyLSPContext *ctx, const char *callee_qn, const char *strategy,
-                                  float confidence, TSNode site);
+                                  double confidence, TSNode site);
 static const CBMType *py_resolve_annotation(PyLSPContext *ctx, const char *ann);
 static const CBMType *py_iterable_element_type(PyLSPContext *ctx, const CBMType *iter_type);
 static const CBMType *py_lookup_field(PyLSPContext *ctx, const char *type_qn,
@@ -794,7 +794,7 @@ static const char *py_lookup_dict_dispatch(PyLSPContext *ctx, const char *var, c
 }
 
 static void py_emit_resolved_call_reason(PyLSPContext *ctx, const char *callee_qn,
-                                         const char *strategy, float confidence, const char *reason,
+                                         const char *strategy, double confidence, const char *reason,
                                          TSNode site) {
     if (!ctx || !ctx->resolved_calls || !callee_qn || !ctx->enclosing_func_qn)
         return;
@@ -836,7 +836,7 @@ static void py_emit_resolved_call_reason(PyLSPContext *ctx, const char *callee_q
 }
 
 static void py_emit_resolved_call(PyLSPContext *ctx, const char *callee_qn, const char *strategy,
-                                  float confidence, TSNode site) {
+                                  double confidence, TSNode site) {
     py_emit_resolved_call_reason(ctx, callee_qn, strategy, confidence, NULL, site);
 }
 

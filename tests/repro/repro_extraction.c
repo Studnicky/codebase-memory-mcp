@@ -10,6 +10,7 @@
  *   (more added per wave: #495 #521 #382 #408 #523 #56 #333)
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "cbm.h"
 
 /* Convenience: extract, return result (caller frees). Mirrors test_extraction.c. */

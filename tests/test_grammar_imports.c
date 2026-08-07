@@ -11,6 +11,7 @@
  * reproducing the bug (gap_note documents the already-root-caused ones).
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "cbm.h"
 
 #include <string.h>

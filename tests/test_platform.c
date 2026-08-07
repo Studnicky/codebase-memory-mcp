@@ -2,6 +2,7 @@
  * test_platform.c — RED phase tests for foundation/platform.
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "../src/foundation/compat.h" /* cbm_setenv / cbm_unsetenv (Windows-portable) */
 #include "../src/foundation/compat_fs.h"
 #include "../src/foundation/constants.h"

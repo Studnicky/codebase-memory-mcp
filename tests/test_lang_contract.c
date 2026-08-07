@@ -17,6 +17,7 @@
  */
 #include "../src/foundation/compat.h"
 #include "test_framework.h"
+#include "suites.h"
 #include "test_helpers.h"
 #include "cbm.h"
 #include "grammar_cases.h"

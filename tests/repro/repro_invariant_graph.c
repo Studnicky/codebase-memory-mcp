@@ -13,6 +13,7 @@
  */
 
 #include "test_framework.h"
+#include "suites.h"
 #include "repro_harness.h"
 #include <store/store.h>
 #include <discover/discover.h>

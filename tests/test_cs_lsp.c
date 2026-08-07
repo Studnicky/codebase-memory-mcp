@@ -24,6 +24,7 @@
  */
 
 #include "test_framework.h"
+#include "suites.h"
 #include "cbm.h"
 #include "../src/pipeline/lsp_resolve.h"
 #include "lsp/cs_lsp.h"
@@ -945,7 +946,7 @@ TEST(cslsp_quality_indicator) {
     for (int i = 0; i < r->resolved_calls.count; i++) {
         const CBMResolvedCall *rc = &r->resolved_calls.items[i];
         if (!rc->callee_qn) continue;
-        if (rc->confidence >= 0.9f) high++;
+        if (rc->confidence >= 0.9) high++;
         total_named++;
     }
     /* Expect resolutions for: s.V, xs.Add, Console.WriteLine, S.ctor, p.V → 5 */
@@ -1191,7 +1192,7 @@ TEST(cslsp_ordinary_same_leaf_calls_join_by_exact_site) {
     int zero_span_hijackers = 0;
     for (int i = 0; i < r->resolved_calls.count; i++) {
         const CBMResolvedCall *rc = &r->resolved_calls.items[i];
-        if (rc->kind != CBM_RESOLVED_INVOCATION || rc->confidence <= 0.0f || !rc->caller_qn ||
+        if (rc->kind != CBM_RESOLVED_INVOCATION || rc->confidence <= 0.0 || !rc->caller_qn ||
             !strstr(rc->caller_qn, "OccurrenceProbe.Run") || !rc->callee_qn ||
             !strstr(rc->callee_qn, ".Render")) {
             continue;

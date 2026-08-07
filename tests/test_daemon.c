@@ -2,6 +2,7 @@
  * test_daemon.c — Guards for shared MCP-daemon coordination and framing.
  */
 #include "test_framework.h"
+#include "suites.h"
 
 #include "daemon/daemon.h"
 #include "mcp/mcp.h"

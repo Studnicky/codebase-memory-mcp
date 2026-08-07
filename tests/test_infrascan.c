@@ -1,4 +1,5 @@
 #include "test_framework.h"
+#include "suites.h"
 #include "graph_buffer/graph_buffer.h"
 #include "pipeline/pipeline_internal.h"
 
@@ -10,9 +11,9 @@ bool cbm_service_pattern_is_http_route_literal(const char *literal, const char *
 static int has_data_flow(cbm_gbuf_t *gb, int64_t source_id, int64_t target_id) {
     const cbm_gbuf_edge_t **edges = NULL;
     int count = 0;
-    cbm_gbuf_find_edges_by_source_type(gb, source_id, "DATA_FLOWS", &edges, &count);
+    cbm_gbuf_find_edges_by_source_type(gb, cbm_node_id(source_id), "DATA_FLOWS", &edges, &count);
     for (int i = 0; i < count; i++) {
-        if (edges[i]->target_id == target_id) {
+        if (edges[i]->target_id.v == target_id) {
             return 1;
         }
     }
@@ -37,27 +38,34 @@ TEST(infrascan_http_route_literal_guard_rejects_filesystem_paths) {
 TEST(infrascan_route_nodes_skip_bad_http_url_paths) {
     cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp/cbm_infrascan_route_guard");
     ASSERT_NOT_NULL(gb);
-    int64_t caller =
-        cbm_gbuf_upsert_node(gb, "Function", "client", "test.client", "client.py", 1, 3, "{}");
-    int64_t fs_callee =
-        cbm_gbuf_upsert_node(gb, "Function", "requests.get", "requests.get", "", 0, 0, "{}");
-    int64_t split_callee =
-        cbm_gbuf_upsert_node(gb, "Function", "str.split", "str.split", "", 0, 0, "{}");
-    int64_t empty_callee =
-        cbm_gbuf_upsert_node(gb, "Function", "requests.post", "requests.post", "", 0, 0, "{}");
+    int64_t caller = cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "Function", "client", "test.client", "client.py", 1, 3, "{}"));
+    int64_t fs_callee = cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "Function", "requests.get", "requests.get", "", 0, 0, "{}"));
+    int64_t split_callee = cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "Function", "str.split", "str.split", "", 0, 0, "{}"));
+    int64_t empty_callee = cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "Function", "requests.post", "requests.post", "", 0, 0, "{}"));
     ASSERT_GT(caller, 0);
     ASSERT_GT(fs_callee, 0);
     ASSERT_GT(split_callee, 0);
     ASSERT_GT(empty_callee, 0);
 
-    cbm_gbuf_insert_edge(gb, caller, fs_callee, "HTTP_CALLS",
-                         "{\"callee\":\"requests.get\",\"url_path\":\"/etc/crio/crio.conf\","
-                         "\"method\":\"GET\"}");
-    cbm_gbuf_insert_edge(gb, caller, split_callee, "HTTP_CALLS",
-                         "{\"callee\":\"str.split\",\"url_path\":\"/locations/\","
-                         "\"method\":\"ANY\"}");
-    cbm_gbuf_insert_edge(gb, caller, empty_callee, "HTTP_CALLS",
-                         "{\"callee\":\"requests.get\",\"method\":\"GET\"}");
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(caller), .target = cbm_node_id(fs_callee)},
+        "HTTP_CALLS",
+        "{\"callee\":\"requests.get\",\"url_path\":\"/etc/crio/crio.conf\","
+        "\"method\":\"GET\"}"));
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb,
+        (cbm_edge_endpoints_t){.source = cbm_node_id(caller), .target = cbm_node_id(split_callee)},
+        "HTTP_CALLS",
+        "{\"callee\":\"str.split\",\"url_path\":\"/locations/\","
+        "\"method\":\"ANY\"}"));
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb,
+        (cbm_edge_endpoints_t){.source = cbm_node_id(caller), .target = cbm_node_id(empty_callee)},
+        "HTTP_CALLS", "{\"callee\":\"requests.get\",\"method\":\"GET\"}"));
 
     cbm_pipeline_create_route_nodes(gb);
 
@@ -73,19 +81,19 @@ TEST(infrascan_http_calls_join_matching_handler_route) {
     cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp/cbm_infrascan_route_join");
     ASSERT_NOT_NULL(gb);
 
-    int64_t route = cbm_gbuf_upsert_node(gb, "Route", "/api/orders", "__route__GET__/api/orders",
-                                         "", 0, 0, "{\"method\":\"GET\"}");
-    int64_t handler = cbm_gbuf_upsert_node(gb, "Function", "get_orders", "test.get_orders",
-                                           "server.py", 1, 3, "{}");
-    int64_t client =
-        cbm_gbuf_upsert_node(gb, "Function", "client", "test.client", "client.py", 1, 3, "{}");
-    int64_t bad_route =
-        cbm_gbuf_upsert_node(gb, "Route", "/etc/crio/crio.conf",
-                             "__route__GET__/etc/crio/crio.conf", "", 0, 0, "{\"method\":\"GET\"}");
-    int64_t bad_handler = cbm_gbuf_upsert_node(gb, "Function", "bad_handler", "test.bad_handler",
-                                               "server.py", 5, 7, "{}");
-    int64_t bad_client = cbm_gbuf_upsert_node(gb, "Function", "bad_client", "test.bad_client",
-                                              "client.py", 5, 7, "{}");
+    int64_t route = cbm_node_id_value(cbm_gbuf_upsert_node(
+        gb, "Route", "/api/orders", "__route__GET__/api/orders", "", 0, 0, "{\"method\":\"GET\"}"));
+    int64_t handler = cbm_node_id_value(cbm_gbuf_upsert_node(
+        gb, "Function", "get_orders", "test.get_orders", "server.py", 1, 3, "{}"));
+    int64_t client = cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "Function", "client", "test.client", "client.py", 1, 3, "{}"));
+    int64_t bad_route = cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Route", "/etc/crio/crio.conf",
+                                                               "__route__GET__/etc/crio/crio.conf",
+                                                               "", 0, 0, "{\"method\":\"GET\"}"));
+    int64_t bad_handler = cbm_node_id_value(cbm_gbuf_upsert_node(
+        gb, "Function", "bad_handler", "test.bad_handler", "server.py", 5, 7, "{}"));
+    int64_t bad_client = cbm_node_id_value(cbm_gbuf_upsert_node(
+        gb, "Function", "bad_client", "test.bad_client", "client.py", 5, 7, "{}"));
     ASSERT_GT(route, 0);
     ASSERT_GT(handler, 0);
     ASSERT_GT(client, 0);
@@ -93,15 +101,25 @@ TEST(infrascan_http_calls_join_matching_handler_route) {
     ASSERT_GT(bad_handler, 0);
     ASSERT_GT(bad_client, 0);
 
-    cbm_gbuf_insert_edge(gb, handler, route, "HANDLES", "{\"handler\":\"test.get_orders\"}");
-    cbm_gbuf_insert_edge(gb, client, route, "HTTP_CALLS",
-                         "{\"callee\":\"requests.get\",\"url_path\":\"/api/orders\","
-                         "\"method\":\"GET\"}");
-    cbm_gbuf_insert_edge(gb, bad_handler, bad_route, "HANDLES",
-                         "{\"handler\":\"test.bad_handler\"}");
-    cbm_gbuf_insert_edge(gb, bad_client, bad_route, "HTTP_CALLS",
-                         "{\"callee\":\"requests.get\",\"url_path\":\"/etc/crio/crio.conf\","
-                         "\"method\":\"GET\"}");
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(handler), .target = cbm_node_id(route)},
+        "HANDLES", "{\"handler\":\"test.get_orders\"}"));
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(client), .target = cbm_node_id(route)},
+        "HTTP_CALLS",
+        "{\"callee\":\"requests.get\",\"url_path\":\"/api/orders\","
+        "\"method\":\"GET\"}"));
+    cbm_edge_id_value(
+        cbm_gbuf_insert_edge(gb,
+                             (cbm_edge_endpoints_t){.source = cbm_node_id(bad_handler),
+                                                    .target = cbm_node_id(bad_route)},
+                             "HANDLES", "{\"handler\":\"test.bad_handler\"}"));
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb,
+        (cbm_edge_endpoints_t){.source = cbm_node_id(bad_client), .target = cbm_node_id(bad_route)},
+        "HTTP_CALLS",
+        "{\"callee\":\"requests.get\",\"url_path\":\"/etc/crio/crio.conf\","
+        "\"method\":\"GET\"}"));
 
     cbm_pipeline_create_route_nodes(gb);
 

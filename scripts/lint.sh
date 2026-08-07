@@ -61,6 +61,16 @@ print_env "lint.sh"
 echo "=== no-skips policy (tests pass or fail) ==="
 bash "$ROOT/scripts/check-no-test-skips.sh"
 
+# Architecture policy over the include graph, two gates in one pass:
+#   layering.allow  — the inter-module edge set
+#   externals.allow — which modules reach a third-party library directly,
+#                     i.e. cross a trust boundary without an adapter
+# Both ratchet in both directions: a new edge fails, and an allow-list entry
+# outliving the edge it described fails, so cleanup is permanent. Runs in
+# both modes.
+echo "=== architecture policy (module + third-party include graph) ==="
+python3 "$ROOT/scripts/check-layering.py"
+
 if $CI_ONLY; then
     echo "=== CI mode: cppcheck + clang-format ==="
     make -j2 -f Makefile.cbm lint-ci "${MAKE_ARGS[@]+"${MAKE_ARGS[@]}"}"

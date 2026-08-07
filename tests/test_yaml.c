@@ -2,6 +2,7 @@
  * test_yaml.c — Tests for foundation/yaml YAML parser.
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "../src/foundation/yaml.h"
 
 /* ── Parsing: NULL and empty input ─────────────────────────────── */

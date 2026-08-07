@@ -5,6 +5,7 @@
  * realloc grow/shrink, zeroing, ownership, thread reset.
  */
 #include "test_framework.h"
+#include "suites.h"
 #include <foundation/slab_alloc.h>
 
 #include <stdint.h>

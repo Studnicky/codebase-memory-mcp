@@ -14,6 +14,7 @@
  * is "parses without crashing"). Tighten a row's min_defs to lock in a count.
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "cbm.h"
 #include "grammar_cases.h"
 

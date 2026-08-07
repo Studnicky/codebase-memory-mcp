@@ -76,6 +76,7 @@
 #include <foundation/compat.h>
 #include <foundation/compat_fs.h>
 #include "test_framework.h"
+#include "suites.h"
 
 #include <store/store.h>
 #include <mcp/mcp.h>

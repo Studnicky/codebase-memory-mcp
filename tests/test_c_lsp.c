@@ -19,6 +19,7 @@
  *   - DLL patterns, SFINAE, placement new
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "cbm.h"
 #include "lsp/c_lsp.h"
 #include "lsp/py_lsp.h"
@@ -7176,18 +7177,22 @@ TEST(clsp_nocrash_mixedcand_cpp_cast) {
 TEST(clsp_nocrash_extremely_large_function) {
     /* Dynamically build source with 50 local vars */
     char src[4096];
-    int off = 0;
-    off += snprintf(src + off, sizeof(src) - off, "struct W { void m() {} };\n");
-    off += snprintf(src + off, sizeof(src) - off, "void test() {\n");
+    /* Buffer offset as size_t: the format strings here are fixed ASCII
+     * text, so snprintf never returns negative (encoding error). The
+     * per-var loop still clamps against truncation since 50 vars can
+     * approach sizeof(src). */
+    size_t off = 0;
+    off += (size_t)snprintf(src + off, sizeof(src) - off, "struct W { void m() {} };\n");
+    off += (size_t)snprintf(src + off, sizeof(src) - off, "void test() {\n");
     for (int i = 0; i < 50; i++) {
-        off += snprintf(src + off, sizeof(src) - (size_t)off, "    W w%d;\n", i);
-        if (off >= (int)sizeof(src)) {
-            off = (int)sizeof(src) - 1;
+        off += (size_t)snprintf(src + off, sizeof(src) - off, "    W w%d;\n", i);
+        if (off >= sizeof(src)) {
+            off = sizeof(src) - 1;
         }
     }
-    off += snprintf(src + off, sizeof(src) - off, "    W w0;\n");
-    off += snprintf(src + off, sizeof(src) - off, "    w0.m();\n");
-    off += snprintf(src + off, sizeof(src) - off, "}\n");
+    off += (size_t)snprintf(src + off, sizeof(src) - off, "    W w0;\n");
+    off += (size_t)snprintf(src + off, sizeof(src) - off, "    w0.m();\n");
+    off += (size_t)snprintf(src + off, sizeof(src) - off, "}\n");
     CBMFileResult *r = extract_cpp(src);
     ASSERT_NOT_NULL(r);
     ASSERT_GTE(find_resolved(r, "test", ".m"), 0);
@@ -15558,7 +15563,7 @@ static int assert_cpp_family_repeated_method_occurrences(CBMLanguage language) {
     }
     for (int i = 0; i < result->resolved_calls.count; i++) {
         const CBMResolvedCall *resolved = &result->resolved_calls.items[i];
-        if (resolved->kind != CBM_RESOLVED_INVOCATION || resolved->confidence <= 0.0f ||
+        if (resolved->kind != CBM_RESOLVED_INVOCATION || resolved->confidence <= 0.0 ||
             !resolved->caller_qn || !strstr(resolved->caller_qn, "occurrence_probe") ||
             !resolved->callee_qn ||
             strcmp(cbm_lsp_bare_segment(resolved->callee_qn), "render") != 0) {
@@ -15637,7 +15642,7 @@ TEST(clsp_c_reassigned_function_pointer_calls_join_exact_occurrences) {
     }
     for (int i = 0; i < result->resolved_calls.count; i++) {
         const CBMResolvedCall *resolved = &result->resolved_calls.items[i];
-        if (resolved->kind != CBM_RESOLVED_INVOCATION || resolved->confidence <= 0.0f ||
+        if (resolved->kind != CBM_RESOLVED_INVOCATION || resolved->confidence <= 0.0 ||
             !resolved->caller_qn || !strstr(resolved->caller_qn, "occurrence_probe") ||
             !resolved->reason || strcmp(resolved->reason, "fp") != 0) {
             continue;
@@ -15835,7 +15840,7 @@ static int assert_cpp_family_preprocessed_collision_isolated(CBMLanguage languag
     const CBMResolvedCall *expanded_bravo_semantic = NULL;
     for (int i = 0; i < result->resolved_calls.count; i++) {
         const CBMResolvedCall *resolved = &result->resolved_calls.items[i];
-        if (resolved->kind != CBM_RESOLVED_INVOCATION || resolved->confidence <= 0.0f ||
+        if (resolved->kind != CBM_RESOLVED_INVOCATION || resolved->confidence <= 0.0 ||
             resolved->site_start_byte != collision_start ||
             resolved->site_end_byte != collision_end || !resolved->callee_qn) {
             continue;
@@ -15906,7 +15911,7 @@ TEST(clsp_c_preprocessed_coordinate_collision_isolated) {
     const CBMResolvedCall *bravo_semantic = NULL;
     for (int i = 0; i < result->resolved_calls.count; i++) {
         const CBMResolvedCall *resolved = &result->resolved_calls.items[i];
-        if (resolved->kind != CBM_RESOLVED_INVOCATION || resolved->confidence <= 0.0f ||
+        if (resolved->kind != CBM_RESOLVED_INVOCATION || resolved->confidence <= 0.0 ||
             resolved->site_start_byte != collision_start ||
             resolved->site_end_byte != collision_end || !resolved->callee_qn || !resolved->reason ||
             strcmp(resolved->reason, "fp") != 0) {

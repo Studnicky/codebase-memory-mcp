@@ -33,8 +33,8 @@ typedef struct {
 
 struct cbm_gitignore {
     gi_pattern_t *patterns;
-    int count;
-    int capacity;
+    size_t count;
+    size_t capacity;
 };
 
 /* ── Pattern matching engine ─────────────────────────────────────── */
@@ -173,7 +173,7 @@ static bool glob_match(const char *pat, const char *str) { // NOLINT(misc-no-rec
 
 /* ── Pattern parsing ─────────────────────────────────────────────── */
 
-static void gi_add_pattern(cbm_gitignore_t *gi, const char *line, int len) {
+static void gi_add_pattern(cbm_gitignore_t *gi, const char *line, size_t len) {
     /* Trim trailing whitespace */
     while (len > 0 && (line[len - SKIP_ONE] == ' ' || line[len - SKIP_ONE] == '\t' ||
                        line[len - SKIP_ONE] == '\r')) {
@@ -220,7 +220,7 @@ static void gi_add_pattern(cbm_gitignore_t *gi, const char *line, int len) {
 
     /* Check if pattern contains / anywhere (makes it rooted) */
     if (!p.rooted) {
-        for (int i = 0; i < len; i++) {
+        for (size_t i = 0; i < len; i++) {
             if (start[i] == '/') {
                 p.rooted = true;
                 break;
@@ -238,7 +238,7 @@ static void gi_add_pattern(cbm_gitignore_t *gi, const char *line, int len) {
 
     /* Grow array if needed */
     if (gi->count >= gi->capacity) {
-        int new_cap = gi->capacity ? gi->capacity * PAIR_LEN : GI_INIT_CAP;
+        size_t new_cap = gi->capacity ? gi->capacity * PAIR_LEN : GI_INIT_CAP;
         gi_pattern_t *new_patterns = realloc(gi->patterns, new_cap * sizeof(gi_pattern_t));
         if (!new_patterns) {
             free(p.pattern);
@@ -267,7 +267,7 @@ cbm_gitignore_t *cbm_gitignore_parse(const char *content) {
     while (*line) {
         /* Find end of line */
         const char *eol = strchr(line, '\n');
-        int len = eol ? (int)(eol - line) : (int)strlen(line);
+        size_t len = eol ? (size_t)(eol - line) : strlen(line);
 
         /* Skip comments and blank lines */
         if (len > 0 && line[0] != '#') {
@@ -303,13 +303,15 @@ cbm_gitignore_t *cbm_gitignore_load(const char *path) {
         return cbm_gitignore_parse("");
     }
 
-    char *buf = malloc(size + SKIP_ONE);
+    /* size > 0 is established above, so the cast to size_t is safe. */
+    size_t usize = (size_t)size;
+    char *buf = malloc(usize + SKIP_ONE);
     if (!buf) {
         (void)fclose(f);
         return NULL;
     }
 
-    size_t n = fread(buf, SKIP_ONE, size, f);
+    size_t n = fread(buf, SKIP_ONE, usize, f);
     buf[n] = '\0';
     (void)fclose(f);
 
@@ -352,7 +354,7 @@ int cbm_gitignore_match_result(const cbm_gitignore_t *gi, const char *rel_path, 
 
     int matched = 0;
 
-    for (int i = 0; i < gi->count; i++) {
+    for (size_t i = 0; i < gi->count; i++) {
         const gi_pattern_t *p = &gi->patterns[i];
 
         if (p->dir_only && !is_dir) {
@@ -378,7 +380,7 @@ void cbm_gitignore_free(cbm_gitignore_t *gi) {
     if (!gi) {
         return;
     }
-    for (int i = 0; i < gi->count; i++) {
+    for (size_t i = 0; i < gi->count; i++) {
         free(gi->patterns[i].pattern);
     }
     free(gi->patterns);
@@ -396,17 +398,17 @@ bool cbm_gitignore_merge(cbm_gitignore_t *dst, const cbm_gitignore_t *src) {
     if (!src || src->count == 0) {
         return true; /* nothing to merge */
     }
-    int needed = dst->count + src->count;
+    size_t needed = dst->count + src->count;
     if (needed > dst->capacity) {
-        gi_pattern_t *grown = realloc(dst->patterns, (size_t)needed * sizeof(gi_pattern_t));
+        gi_pattern_t *grown = realloc(dst->patterns, needed * sizeof(gi_pattern_t));
         if (!grown) {
             return false; /* dst left unchanged */
         }
         dst->patterns = grown;
         dst->capacity = needed;
     }
-    int start_count = dst->count;
-    for (int i = 0; i < src->count; i++) {
+    size_t start_count = dst->count;
+    for (size_t i = 0; i < src->count; i++) {
         char *pat = cbm_gitignore_merge_dup_hook_for_test
                         ? cbm_gitignore_merge_dup_hook_for_test(src->patterns[i].pattern)
                         : strdup(src->patterns[i].pattern);
@@ -414,7 +416,7 @@ bool cbm_gitignore_merge(cbm_gitignore_t *dst, const cbm_gitignore_t *src) {
             /* Roll back partial copies so dst is unchanged on failure (atomic
              * merge). A silent partial merge could drop the very exclude
              * pattern the caller relied on while keeping others. */
-            for (int j = start_count; j < dst->count; j++) {
+            for (size_t j = start_count; j < dst->count; j++) {
                 free(dst->patterns[j].pattern);
             }
             dst->count = start_count;

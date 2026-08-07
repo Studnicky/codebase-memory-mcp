@@ -25,6 +25,7 @@
 
 #include <yyjson/yyjson.h>
 
+#include <limits.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -103,7 +104,16 @@ void cbm_pkg_entries_init(cbm_pkg_entries_t *e) {
 
 static void pkg_entries_push(cbm_pkg_entries_t *e, char *pkg_name, char *entry_rel) {
     if (e->count >= e->cap) {
-        int new_cap = e->cap == 0 ? PKGMAP_INIT_CAP : e->cap * SKIP_ONE * PAIR_LEN;
+        /* e->cap is a fixed int per cbm_pkg_entries_t's header contract, so the
+         * doubling grows in size_t first (no signed-overflow UB) and is
+         * range-checked before truncating back into that int field. */
+        size_t new_cap = e->cap == 0 ? (size_t)PKGMAP_INIT_CAP
+                                     : (size_t)e->cap * SKIP_ONE * PAIR_LEN;
+        if (new_cap > (size_t)INT_MAX) {
+            free(pkg_name);
+            free(entry_rel);
+            return;
+        }
         cbm_pkg_entry_t *tmp = realloc(e->items, new_cap * sizeof(cbm_pkg_entry_t));
         if (!tmp) {
             free(pkg_name);
@@ -111,7 +121,7 @@ static void pkg_entries_push(cbm_pkg_entries_t *e, char *pkg_name, char *entry_r
             return;
         }
         e->items = tmp;
-        e->cap = new_cap;
+        e->cap = (int)new_cap;
     }
     e->items[e->count].pkg_name = pkg_name;
     e->items[e->count].entry_rel = entry_rel;
@@ -1274,7 +1284,7 @@ CBMHashTable *cbm_pkgmap_build_from_repo(const char *repo_path, const cbm_file_i
 
 static void pkgmap_free_entry(const char *key, void *value, void *userdata) {
     (void)userdata;
-    free((void *)key);
+    safe_str_free(&key);
     free(value);
 }
 
@@ -2106,7 +2116,7 @@ CBMHashTable *cbm_pipeline_namespace_map_build(const char *project_name,
 
 static void ns_map_free_entry(const char *key, void *value, void *ud) {
     (void)ud;
-    free((void *)key); /* strdup'd in cbm_pipeline_namespace_map_build */
+    safe_str_free(&key); /* strdup'd in cbm_pipeline_namespace_map_build */
     free(value);
 }
 

@@ -50,8 +50,8 @@ enum {
 #include "pipeline/pipeline.h"
 #include "pipeline/pass_cross_repo.h"
 #include "git/git_context.h"
-#include "cli/cli.h"
 #include "watcher/watcher.h"
+#include "foundation/build_version.h"
 #include "foundation/mem.h"
 #include "foundation/diagnostics.h"
 #include "foundation/platform.h"
@@ -1262,7 +1262,7 @@ static char *cbm_mcp_initialize_response_for_profile(const char *params_json,
 
     yyjson_mut_val *impl = yyjson_mut_obj(doc);
     yyjson_mut_obj_add_str(doc, impl, "name", "codebase-memory-mcp");
-    yyjson_mut_obj_add_str(doc, impl, "version", cbm_cli_get_version());
+    yyjson_mut_obj_add_str(doc, impl, "version", cbm_build_version_get());
     yyjson_mut_obj_add_val(doc, root, "serverInfo", impl);
 
     yyjson_mut_val *caps = yyjson_mut_obj(doc);
@@ -2778,8 +2778,12 @@ enum {
  * See the matching helper in src/store/store.c for the same pattern. */
 static sqlite3_destructor_type mcp_sqlite_transient(void) {
     static const volatile intptr_t raw = -1;
+    /* Read through the volatile qualifier into a plain local first: memcpy
+     * from &local needs no qualifier-dropping cast, since local itself is
+     * neither const nor volatile. */
+    intptr_t local = raw;
     sqlite3_destructor_type dtor = NULL;
-    memcpy(&dtor, (const void *)&raw, sizeof(dtor));
+    memcpy(&dtor, &local, sizeof(dtor));
     return dtor;
 }
 #define MCP_SQLITE_TRANSIENT (mcp_sqlite_transient())
@@ -5338,10 +5342,13 @@ static char *handle_get_architecture(cbm_mcp_server_t *srv, const char *args) {
                     for (int m = 0; m < show && off < (int)sizeof(row) - 2; m++) {
                         char qn[CBM_SZ_512];
                         arch_node_qn(store, members[c][m], qn, sizeof(qn));
-                        off += snprintf(row + off, sizeof(row) - off, "%s%s", m ? ";" : "", qn);
+                        // Loop guard above holds off in [0, sizeof(row) - 2).
+                        off += snprintf(row + off, sizeof(row) - (size_t)off, "%s%s", m ? ";" : "",
+                                        qn);
                     }
                     if (clipped && off < (int)sizeof(row) - 8) {
-                        snprintf(row + off, sizeof(row) - off, ";+%d", sizes[c] - show);
+                        // Guard above holds off in [0, sizeof(row) - 8).
+                        snprintf(row + off, sizeof(row) - (size_t)off, ";+%d", sizes[c] - show);
                     }
                     cbm_sb_append(&sb, row);
                     cbm_sb_append(&sb, "\n");
@@ -5986,7 +5993,7 @@ static void bfs_union_same_name(cbm_store_t *store, const cbm_node_t *nodes, int
                                 const char *direction, const char **edge_types, int edge_type_count,
                                 int depth, int limit, cbm_traverse_result_t *out) {
     memset(out, 0, sizeof(*out));
-    int vcap = 0, ecap = 0;
+    size_t vcap = 0, ecap = 0;
     for (int k = 0; k < node_count; k++) {
         cbm_traverse_result_t tr = {0};
         cbm_store_bfs(store, nodes[k].id, direction, edge_types, edge_type_count, depth, limit,
@@ -6009,7 +6016,7 @@ static void bfs_union_same_name(cbm_store_t *store, const cbm_node_t *nodes, int
             if (dup) {
                 continue;
             }
-            if (out->visited_count >= vcap) {
+            if ((size_t)out->visited_count >= vcap) {
                 vcap = vcap ? vcap * 2 : 8;
                 out->visited = safe_realloc(out->visited, vcap * sizeof(cbm_node_hop_t));
             }
@@ -6031,7 +6038,7 @@ static void bfs_union_same_name(cbm_store_t *store, const cbm_node_t *nodes, int
             if (edup) {
                 continue;
             }
-            if (out->edge_count >= ecap) {
+            if ((size_t)out->edge_count >= ecap) {
                 ecap = ecap ? ecap * 2 : 8;
                 out->edges = safe_realloc(out->edges, ecap * sizeof(cbm_edge_info_t));
             }
@@ -7434,7 +7441,7 @@ static char **supervisor_read_suspects(const char *path, int *out_n) {
     }
     char **open_paths = NULL; /* open (S-without-D) files in first-S order */
     int open_n = 0;
-    int open_cap = 0;
+    size_t open_cap = 0;
     char line[CBM_SZ_1K];
     while (fgets(line, sizeof(line), f)) {
         size_t len = strlen(line);
@@ -7457,9 +7464,9 @@ static char **supervisor_read_suspects(const char *path, int *out_n) {
             if (already) {
                 continue;
             }
-            if (open_n == open_cap) {
-                int ncap = open_cap ? open_cap * 2 : 16;
-                char **np = (char **)realloc(open_paths, (size_t)ncap * sizeof(char *));
+            if ((size_t)open_n == open_cap) {
+                size_t ncap = open_cap ? open_cap * 2 : 16;
+                char **np = (char **)realloc(open_paths, ncap * sizeof(char *));
                 if (!np) {
                     break;
                 }
@@ -9117,7 +9124,7 @@ static const char *strip_root_prefix(const char *path, const char *root, size_t 
 static grep_match_t *collect_grep_matches(FILE *fp, const char *root_path, size_t root_len,
                                           bool has_path_filter, cbm_regex_t *path_regex,
                                           int grep_limit, int *out_count) {
-    int gm_cap = CBM_SZ_64;
+    size_t gm_cap = CBM_SZ_64;
     int gm_count = 0;
     grep_match_t *gm = malloc(gm_cap * sizeof(grep_match_t));
     char line[CBM_SZ_2K];
@@ -9188,8 +9195,8 @@ static int find_tightest_node(cbm_node_t *nodes, int count, int line) {
 }
 
 /* Add a grep hit to the search result set (merge into existing or create new). */
-static void add_to_search_results(search_result_t **sr, int *sr_count, int *sr_cap, cbm_node_t *n,
-                                  int line) {
+static void add_to_search_results(search_result_t **sr, int *sr_count, size_t *sr_cap,
+                                  cbm_node_t *n, int line) {
     for (int j = 0; j < *sr_count; j++) {
         if ((*sr)[j].node_id == n->id) {
             if ((*sr)[j].match_count < CBM_SZ_64) {
@@ -9198,10 +9205,10 @@ static void add_to_search_results(search_result_t **sr, int *sr_count, int *sr_c
             return;
         }
     }
-    if (*sr_count >= *sr_cap) {
+    if ((size_t)*sr_count >= *sr_cap) {
         *sr_cap *= PAIR_LEN;
         *sr = safe_realloc(*sr, *sr_cap * sizeof(search_result_t));
-        memset(&(*sr)[*sr_count], 0, (*sr_cap - *sr_count) * sizeof(search_result_t));
+        memset(&(*sr)[*sr_count], 0, (*sr_cap - (size_t)*sr_count) * sizeof(search_result_t));
     }
     search_result_t *r = &(*sr)[*sr_count];
     r->node_id = n->id;
@@ -9219,13 +9226,13 @@ static void add_to_search_results(search_result_t **sr, int *sr_count, int *sr_c
 
 /* Match a single grep hit to the tightest containing node, then add to sr or raw. */
 static void classify_grep_hit(grep_match_t *hit, cbm_node_t *file_nodes, int file_node_count,
-                              search_result_t **sr, int *sr_count, int *sr_cap, grep_match_t **raw,
-                              int *raw_count, int *raw_cap) {
+                              search_result_t **sr, int *sr_count, size_t *sr_cap,
+                              grep_match_t **raw, int *raw_count, size_t *raw_cap) {
     int best = find_tightest_node(file_nodes, file_node_count, hit->line);
     if (best >= 0) {
         add_to_search_results(sr, sr_count, sr_cap, &file_nodes[best], hit->line);
     } else {
-        if (*raw_count >= *raw_cap) {
+        if ((size_t)*raw_count >= *raw_cap) {
             *raw_cap = (*raw_cap == 0) ? CBM_SZ_32 : *raw_cap * PAIR_LEN;
             *raw = safe_realloc(*raw, *raw_cap * sizeof(grep_match_t));
         }
@@ -9251,8 +9258,9 @@ static void free_file_nodes(cbm_node_t *nodes, int count) {
 /* Classify all grep matches file-by-file into search results and raw hits. */
 static void classify_all_grep_hits(grep_match_t *gm, int gm_count, cbm_store_t *store,
                                    const char *project, search_result_t **sr, int *sr_count,
-                                   int *sr_cap, grep_match_t **raw, int *raw_count, int *raw_cap) {
-    qsort(gm, gm_count, sizeof(grep_match_t), (int (*)(const void *, const void *))strcmp);
+                                   size_t *sr_cap, grep_match_t **raw, int *raw_count,
+                                   size_t *raw_cap) {
+    qsort(gm, (size_t)gm_count, sizeof(grep_match_t), (int (*)(const void *, const void *))strcmp);
     int i = 0;
     while (i < gm_count) {
         const char *cur_file = gm[i].file;
@@ -9732,25 +9740,25 @@ static char *handle_search_code(cbm_mcp_server_t *srv, const char *args) {
 
     cbm_store_t *store = resolve_store(srv, project);
 
-    int sr_cap = CBM_SZ_32;
+    size_t sr_cap = CBM_SZ_32;
     int sr_count = 0;
     search_result_t *sr = calloc(sr_cap, sizeof(search_result_t));
 
-    int raw_cap = CBM_SZ_32;
+    size_t raw_cap = CBM_SZ_32;
     int raw_count = 0;
     grep_match_t *raw = malloc(raw_cap * sizeof(grep_match_t));
 
     /* Sort matches by file path for contiguous per-file processing */
-    qsort(gm, gm_count, sizeof(grep_match_t), (int (*)(const void *, const void *))strcmp);
+    qsort(gm, (size_t)gm_count, sizeof(grep_match_t), (int (*)(const void *, const void *))strcmp);
 
     classify_all_grep_hits(gm, gm_count, store, project, &sr, &sr_count, &sr_cap, &raw, &raw_count,
                            &raw_cap);
 
     /* Phase 3: batch degree query — ONE query for all results instead of 2×N */
     if (store && sr_count > 0) {
-        int64_t *ids = malloc(sr_count * sizeof(int64_t));
-        int *in_degs = malloc(sr_count * sizeof(int));
-        int *out_degs = malloc(sr_count * sizeof(int));
+        int64_t *ids = malloc((size_t)sr_count * sizeof(int64_t));
+        int *in_degs = malloc((size_t)sr_count * sizeof(int));
+        int *out_degs = malloc((size_t)sr_count * sizeof(int));
         for (int j = 0; j < sr_count; j++) {
             ids[j] = sr[j].node_id;
         }
@@ -9771,7 +9779,7 @@ static char *handle_search_code(cbm_mcp_server_t *srv, const char *args) {
         sr[j].score = compute_search_score(&sr[j]);
     }
     if (sr_count > SKIP_ONE) {
-        qsort(sr, sr_count, sizeof(search_result_t), search_result_cmp);
+        qsort(sr, (size_t)sr_count, sizeof(search_result_t), search_result_cmp);
     }
 
     /* ── Phase 4: Context assembly (extracted helper) ─────────── */
@@ -9968,7 +9976,7 @@ static bool detect_is_seedable_label(const char *lb) {
 
 static void detect_collect_seeds(cbm_store_t *store, const char *project, const char *file,
                                  const cbm_changed_hunk_t *hunks, int hunk_count, int64_t **seeds,
-                                 int *n, int *cap) {
+                                 int *n, size_t *cap) {
     cbm_node_t *nodes = NULL;
     int ncount = 0;
     cbm_store_find_nodes_by_file(store, project, file, &nodes, &ncount);
@@ -10003,9 +10011,9 @@ static void detect_collect_seeds(cbm_store_t *store, const char *project, const 
             if (scope_to_hunks && !cbm_detect_node_in_hunks(&nodes[i], hunks, hunk_count, file)) {
                 continue;
             }
-            if (*n >= *cap) {
+            if ((size_t)*n >= *cap) {
                 *cap = *cap ? *cap * 2 : 16;
-                *seeds = safe_realloc(*seeds, (size_t)*cap * sizeof(int64_t));
+                *seeds = safe_realloc(*seeds, *cap * sizeof(int64_t));
             }
             (*seeds)[(*n)++] = nodes[i].id;
         }
@@ -10284,10 +10292,10 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
      * both output encodings). */
     char **files = NULL;
     int file_count = 0;
-    int file_cap = 0;
+    size_t file_cap = 0;
     int64_t *seeds = NULL;
     int seed_count = 0;
-    int seed_cap = 0;
+    size_t seed_cap = 0;
 
     /* Hunk line ranges (unified=0 diff), used to scope seed detection to the
      * actually-changed lines instead of every definition in a changed file
@@ -10395,9 +10403,9 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
         if (dup) {
             continue;
         }
-        if (file_count >= file_cap) {
+        if ((size_t)file_count >= file_cap) {
             file_cap = file_cap ? file_cap * 2 : 16;
-            files = safe_realloc(files, (size_t)file_cap * sizeof(char *));
+            files = safe_realloc(files, file_cap * sizeof(char *));
         }
         files[file_count++] = heap_strdup(path_line);
         if (want_symbols) {
@@ -11762,6 +11770,8 @@ bool cbm_parse_file_uri(const char *uri, char *out_path, int out_size) {
         path++; /* skip the leading / */
     }
 
-    snprintf(out_path, out_size, "%s", path);
+    /* out_size is a public API parameter; the out_size <= 0 guard above makes
+     * it positive here, so the size_t conversion is safe. */
+    snprintf(out_path, (size_t)out_size, "%s", path);
     return true;
 }

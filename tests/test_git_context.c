@@ -24,6 +24,7 @@
  * normalize), not a guard.
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "test_helpers.h"
 #include "git/git_context.h"
 

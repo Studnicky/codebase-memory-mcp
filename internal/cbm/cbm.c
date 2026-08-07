@@ -23,6 +23,7 @@
 #if defined(CBM_BIND_TS_ALLOCATOR) && CBM_BIND_TS_ALLOCATOR
 #include "sqlite3.h" // sqlite3_mem_methods, sqlite3_config, SQLITE_CONFIG_MALLOC — bind sqlite to mimalloc
 #endif
+#include <limits.h> // INT_MAX
 #include <stdint.h> // uint32_t, uint64_t, int64_t
 #include <stdlib.h>
 #include <string.h>
@@ -106,6 +107,8 @@ void cbm_reset_profile(void) {
 #define GROW_ARRAY(arr, arena)                                                                   \
     do {                                                                                         \
         if ((arr)->count >= (arr)->cap) {                                                        \
+            if ((arr)->cap > INT_MAX / PAIR_LEN)                                                 \
+                return;                                                                          \
             int new_cap = (arr)->cap == 0 ? CBM_SZ_32 : (arr)->cap * PAIR_LEN;                   \
             void *new_items = cbm_arena_alloc((arena), (size_t)new_cap * sizeof(*(arr)->items)); \
             if (!new_items)                                                                      \
@@ -351,8 +354,8 @@ int cbm_init(void) {
     if (cbm_initialized) {
         return 0;
     }
-    enum { CBM_INIT_DONE = 1 };
-    cbm_initialized = CBM_INIT_DONE;
+    enum { CBM_INIT_COMPLETE = 1 };
+    cbm_initialized = CBM_INIT_COMPLETE;
     /* Defense-in-depth allocator binds (idempotent). main() calls cbm_alloc_init
      * first; this covers non-main entry points (pipeline passes call cbm_init).
      * For sqlite the SQLITE_CONFIG_MALLOC bind only takes effect if it runs
@@ -910,11 +913,19 @@ static bool cbm_span_contains_callable_def(const char *src, int src_len, uint32_
             line++;
         }
     }
-    size_t name_len = strlen(name);
-    for (int pos = span_start; pos + (int)name_len <= span_end; pos++) {
-        if (strncmp(src + pos, name, name_len) != 0 ||
+    /* This function works in int offsets throughout (matching src_len's
+     * public-API int type), so convert name's length to int once here,
+     * guarding the one place a size_t could exceed INT_MAX, instead of
+     * re-casting it at every use below. */
+    size_t name_len_sz = strlen(name);
+    if (name_len_sz > (size_t)INT_MAX) {
+        return false;
+    }
+    int name_len = (int)name_len_sz;
+    for (int pos = span_start; pos + name_len <= span_end; pos++) {
+        if (strncmp(src + pos, name, (size_t)name_len) != 0 ||
             (pos > 0 && cbm_identifier_char(src[pos - 1])) ||
-            (pos + (int)name_len < src_len && cbm_identifier_char(src[pos + name_len]))) {
+            (pos + name_len < src_len && cbm_identifier_char(src[pos + name_len]))) {
             continue;
         }
         int before = pos;
@@ -924,7 +935,7 @@ static bool cbm_span_contains_callable_def(const char *src, int src_len, uint32_
         if (before > span_start && strchr("(,=!?[.", src[before - 1])) {
             continue;
         }
-        int open = pos + (int)name_len;
+        int open = pos + name_len;
         while (open < span_end && isspace((unsigned char)src[open])) {
             open++;
         }

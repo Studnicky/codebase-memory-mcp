@@ -2,6 +2,7 @@
  * test_str_intern.c — RED phase tests for foundation/str_intern.
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "../src/foundation/str_intern.h"
 
 TEST(intern_create_free) {

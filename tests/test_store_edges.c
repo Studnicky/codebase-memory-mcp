@@ -5,6 +5,7 @@
  * TestFindEdgesByURLPath, etc.)
  */
 #include "test_framework.h"
+#include "suites.h"
 #include <store/store.h>
 #include <string.h>
 #include <stdlib.h>

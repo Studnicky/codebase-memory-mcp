@@ -8,6 +8,7 @@
 #include "../src/foundation/compat.h"
 #include "../src/foundation/dump_verify.h"
 #include "test_framework.h"
+#include "suites.h"
 
 #include <stdlib.h>
 

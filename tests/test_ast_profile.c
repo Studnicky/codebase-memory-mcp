@@ -4,6 +4,7 @@
  * Covers: to_str, from_str round-trip, to_vector, edge cases.
  */
 #include "test_framework.h"
+#include "suites.h"
 #include <semantic/ast_profile.h>
 
 #include <string.h>

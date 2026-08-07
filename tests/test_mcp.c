@@ -5,6 +5,7 @@
  */
 #include "../src/foundation/compat.h"
 #include <sqlite3.h>
+#include "../src/foundation/build_version.h"
 #include "../src/foundation/compat_fs.h" /* cbm_unlink / cbm_rmdir */
 #include "../src/foundation/constants.h"
 #include "../src/foundation/log.h"
@@ -12,6 +13,7 @@
 #include "../src/foundation/subprocess.h"
 #include "../src/mcp/compact_out.h"
 #include "test_framework.h"
+#include "suites.h"
 #include "test_helpers.h"
 #include <cli/cli.h>
 #include <mcp/index_supervisor.h> /* spawn-count hook — #845 in-process guard */
@@ -725,7 +727,7 @@ TEST(jsonrpc_format_error) {
  * ══════════════════════════════════════════════════════════════════ */
 
 TEST(mcp_initialize_response) {
-    cbm_cli_set_version("9.8.7-test");
+    cbm_build_version_set("9.8.7-test");
 
     /* Default (no params): returns latest supported version */
     char *json = cbm_mcp_initialize_response(NULL);
@@ -758,7 +760,7 @@ TEST(mcp_initialize_response) {
     ASSERT_NOT_NULL(json);
     ASSERT_NOT_NULL(strstr(json, "2025-11-25"));
     free(json);
-    cbm_cli_set_version("dev");
+    cbm_build_version_set("dev");
     PASS();
 }
 

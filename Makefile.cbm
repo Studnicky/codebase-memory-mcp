@@ -47,12 +47,46 @@ endif
 # build. Build-time entropy is how one identical source tree produced a new hash
 # on every compile (see the local patch in vendored/mimalloc/src/options.c) —
 # once removed, it must not creep back through a new call site.
+# Strict typing gate. C's defaults let a value silently change width, sign or
+# representation across an assignment or call, which is the class of defect that
+# bare int64_t identifiers and hand-rolled numeric parsing hide best. These
+# warnings surface every such site.
+#
+# Every one of them is fatal under -Werror. The tree compiles clean with no
+# exemptions, so there is no count to carry and nothing to stage: a new
+# conversion, qualifier drop or misalignment fails the build where it is
+# written. Do not reintroduce a -Wno-error= line to land a change — the warning
+# is the finding, and silencing it here hides it everywhere at once.
+#
+# A cast is not a fix for -Wsign-conversion. Widening an int capacity to size_t
+# at the malloc call leaves `cap *= 2` as signed overflow, which is undefined
+# and which the compiler may assume cannot happen; the cast then launders the
+# result into an allocation size, and no warning remains to point at it. Fix
+# the declaration, or bound the value before the multiply.
+#
+# -Wwrite-strings is deliberately absent: it retypes string literals as const
+# rather than reporting a conversion, so it produces pointer-qualifier errors
+# across existing call signatures instead of a countable warning set.
+CFLAGS_STRICT = -Wconversion -Wsign-conversion -Wshadow -Wcast-qual -Wcast-align \
+                -Wstrict-prototypes -Wmissing-prototypes -Wdouble-promotion \
+                -Wpointer-arith -Wredundant-decls -Wundef
+
+# -Wdate-time: with -Werror, any use of __DATE__/__TIME__/__TIMESTAMP__ fails the
+# build. Build-time entropy is how one identical source tree produced a new hash
+# on every compile (see the local patch in vendored/mimalloc/src/options.c) —
+# once removed, it must not creep back through a new call site.
 CFLAGS_COMMON = -std=c11 -D_DEFAULT_SOURCE -D_GNU_SOURCE -Wall -Wextra -Werror \
-                -Wno-unused-parameter -Wno-sign-compare -Wdate-time \
+                -Wno-unused-parameter -Wdate-time \
+                $(CFLAGS_STRICT) \
                 $(GCC_ONLY_FLAGS) \
                 -Isrc -Ivendored -Ivendored/sqlite3 \
                 -Ivendored/mimalloc/include \
-                -I$(CBM_DIR) -I$(TS_INCLUDE)
+                -I$(CBM_DIR) -I$(TS_INCLUDE) \
+                -isystem $(CBM_DIR)/vendored/verstable
+# verstable.h is vendored third-party code, consumed as-is via the angle-bracket
+# include form below (same convention as mimalloc/sqlite3/tre/zstd) — its
+# diagnostics are not this project's to fix, so it is on the system-header
+# search path (narrowly scoped to its own directory) rather than the quoted one.
 
 CXXFLAGS_COMMON = -std=c++14 -Wall -Wextra -Werror \
                   -Wno-unused-parameter \
@@ -195,6 +229,8 @@ FOUNDATION_SRCS = \
     src/foundation/compat.c \
     src/foundation/compat_thread.c \
     src/foundation/compat_fs.c \
+    src/foundation/worker_pool.c \
+    src/foundation/build_version.c \
     src/foundation/compat_regex.c \
     src/foundation/mem.c \
     src/foundation/diagnostics.c \
@@ -283,11 +319,16 @@ DAEMON_SRCS = \
     src/daemon/version_cohort.c \
     src/daemon/service.c \
     src/daemon/runtime.c \
-    src/daemon/application.c \
-    src/daemon/frontend.c \
-    src/daemon/host.c \
     src/daemon/bootstrap.c \
     src/daemon/ipc.c
+
+# Composition root: wires the adapters (cli, mcp, store, ui, watcher) onto
+# the daemon client protocol. The only module allowed to depend sideways
+# into other adapters.
+HOST_SRCS = \
+    src/host/application.c \
+    src/host/frontend.c \
+    src/host/host.c
 
 # Discover module (new)
 DISCOVER_SRCS = \
@@ -308,7 +349,6 @@ PIPELINE_SRCS = \
     src/pipeline/registry.c \
     src/pipeline/pipeline.c \
     src/pipeline/pipeline_incremental.c \
-    src/pipeline/worker_pool.c \
     src/pipeline/pass_parallel.c \
     src/pipeline/pass_definitions.c \
     src/pipeline/pass_calls.c \
@@ -425,7 +465,7 @@ TRE_CFLAGS = -std=c11 -g -O1 -w -Ivendored/tre
 YYJSON_SRC = vendored/yyjson/yyjson.c
 
 # All production sources
-PROD_SRCS = $(FOUNDATION_SRCS) $(STORE_SRCS) $(CYPHER_SRCS) $(MCP_SRCS) $(DAEMON_SRCS) $(DISCOVER_SRCS) $(GRAPH_BUFFER_SRCS) $(PIPELINE_SRCS) $(SIMHASH_SRCS) $(SEMANTIC_SRCS) $(TRACES_SRCS) $(WATCHER_SRCS) $(GIT_SRCS) $(CLI_SRCS) $(UI_SRCS) $(YYJSON_SRC)
+PROD_SRCS = $(FOUNDATION_SRCS) $(STORE_SRCS) $(CYPHER_SRCS) $(MCP_SRCS) $(DAEMON_SRCS) $(HOST_SRCS) $(DISCOVER_SRCS) $(GRAPH_BUFFER_SRCS) $(PIPELINE_SRCS) $(SIMHASH_SRCS) $(SEMANTIC_SRCS) $(TRACES_SRCS) $(WATCHER_SRCS) $(GIT_SRCS) $(CLI_SRCS) $(UI_SRCS) $(YYJSON_SRC)
 EXISTING_C_SRCS = $(EXTRACTION_SRCS) $(LSP_SRCS) $(TS_RUNTIME_SRC) \
                   $(GRAMMAR_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS) $(SQLITE_WRITER_SRC)
 
@@ -445,8 +485,12 @@ PROJECT_HDRS = $(wildcard src/*.h src/*/*.h $(CBM_DIR)/*.h $(CBM_DIR)/lsp/*.h te
 
 # ── Test sources ─────────────────────────────────────────────────
 
-TEST_FOUNDATION_SRCS = \
-    tests/test_main.c \
+# Foundation suites without an entry point. Two binaries run them: the full
+# test-runner via TEST_FOUNDATION_SRCS below, and the foundation-only
+# test-foundation target, which supplies tests/test_foundation_main.c instead.
+# Keeping the suites separate from the main is what lets each binary link
+# exactly one entry point.
+TEST_FOUNDATION_SUITE_SRCS = \
     tests/test_arena.c \
     tests/test_hash_table.c \
     tests/test_dyn_array.c \
@@ -459,6 +503,8 @@ TEST_FOUNDATION_SRCS = \
     tests/test_subprocess.c \
     tests/test_private_file_lock.c \
     tests/test_lock_registry.c
+
+TEST_FOUNDATION_SRCS = tests/test_main.c $(TEST_FOUNDATION_SUITE_SRCS)
 
 TEST_EXTRACTION_SRCS = \
     tests/test_extraction.c \
@@ -685,8 +731,16 @@ $(BUILD_DIR):
 
 # ── Foundation-only test (fast, no extraction) ───────────────────
 
-$(BUILD_DIR)/test-foundation: $(TEST_FOUNDATION_SRCS) $(FOUNDATION_SRCS) $(PROJECT_HDRS) | $(BUILD_DIR)
-	$(CC) $(CFLAGS_TEST) -o $@ $(TEST_FOUNDATION_SRCS) $(FOUNDATION_SRCS) $(LDFLAGS_TEST)
+# foundation/slab_alloc.c binds tree-sitter's allocator in cbm_slab_install(),
+# so the runtime object is on the link line even though this target runs no
+# extraction. It is the same object the other test targets build, so it costs
+# nothing extra here.
+$(BUILD_DIR)/test-foundation: tests/test_foundation_main.c $(TEST_FOUNDATION_SUITE_SRCS) \
+		$(FOUNDATION_SRCS) $(TS_RUNTIME_OBJ_TEST) $(MIMALLOC_OBJ_TEST) \
+		$(PROJECT_HDRS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS_TEST) -Itests -o $@ tests/test_foundation_main.c \
+		$(TEST_FOUNDATION_SUITE_SRCS) $(FOUNDATION_SRCS) \
+		$(TS_RUNTIME_OBJ_TEST) $(MIMALLOC_OBJ_TEST) $(LDFLAGS_TEST)
 
 test-foundation: $(BUILD_DIR)/test-foundation
 	cd $(CURDIR) && $(BUILD_DIR)/test-foundation
@@ -1040,7 +1094,7 @@ SYSROOT = $(shell xcrun --show-sdk-path 2>/dev/null)
 SYSROOT_FLAG = $(if $(SYSROOT),-isysroot $(SYSROOT),)
 
 # Our source files (excluding vendored, grammars, tree-sitter runtime)
-LINT_SRCS = $(FOUNDATION_SRCS) $(STORE_SRCS) $(CYPHER_SRCS) $(MCP_SRCS) $(DAEMON_SRCS) \
+LINT_SRCS = $(FOUNDATION_SRCS) $(STORE_SRCS) $(CYPHER_SRCS) $(MCP_SRCS) $(DAEMON_SRCS) $(HOST_SRCS) \
             $(DISCOVER_SRCS) $(GRAPH_BUFFER_SRCS) $(PIPELINE_SRCS) $(SIMHASH_SRCS) $(SEMANTIC_SRCS) \
             $(TRACES_SRCS) $(WATCHER_SRCS) $(CLI_SRCS) $(EXTRACTION_SRCS) $(AC_LZ4_SRCS) \
             $(ZSTD_SRCS) $(SQLITE_WRITER_SRC) $(MAIN_SRC)

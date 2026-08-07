@@ -222,4 +222,11 @@ static inline void th_cleanup(const char *path) {
     }
 }
 
+/* ── MCP / index-supervisor probes ────────────────────────────── */
+
+/* Defined in test_mcp.c — standalone in-process probe entry point invoked
+ * via test_main.c's --idxfailclosed-supervisor-start-check subprocess mode. */
+extern int mcp_test_idxfailclosed_supervisor_start_check(const char *repo_dir,
+                                                         const char *cache_dir);
+
 #endif /* TEST_HELPERS_H */

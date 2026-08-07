@@ -6,6 +6,7 @@
  * verifying definitions, calls, and imports are correctly extracted.
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "cbm.h"
 #include "../src/foundation/compat.h" /* cbm_clock_gettime (wide-flat scaling guard) */
 #include "../src/foundation/compat_fs.h"

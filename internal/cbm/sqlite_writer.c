@@ -299,8 +299,8 @@ static void put_u32(uint8_t *buf, uint32_t val) {
 
 typedef struct {
     uint8_t *data;
-    int len;
-    int cap;
+    size_t len;
+    size_t cap;
 } DynBuf;
 
 static void dynbuf_init(DynBuf *b) {
@@ -309,17 +309,17 @@ static void dynbuf_init(DynBuf *b) {
     b->cap = 0;
 }
 
-static bool dynbuf_ensure(DynBuf *b, int needed) {
+static bool dynbuf_ensure(DynBuf *b, size_t needed) {
     if (b->len + needed <= b->cap) {
         return true;
     }
-    int newcap = b->cap == 0 ? INITIAL_PAGE_CAP : b->cap;
+    size_t newcap = b->cap == 0 ? INITIAL_PAGE_CAP : b->cap;
     while (newcap < b->len + needed) {
         newcap *= GROWTH_FACTOR;
     }
     uint8_t *p = (uint8_t *)realloc(b->data, newcap);
     if (!p) {
-        (void)fprintf(stderr, "cbm_write_db: dynbuf realloc failed size=%d\n", newcap);
+        (void)fprintf(stderr, "cbm_write_db: dynbuf realloc failed size=%zu\n", newcap);
         return false;
     }
     b->data = p;
@@ -334,11 +334,12 @@ static bool dynbuf_append(DynBuf *b, const void *data, int len) {
     if (!data) {
         return false;
     }
-    if (!dynbuf_ensure(b, len)) {
+    size_t ulen = (size_t)len;
+    if (!dynbuf_ensure(b, ulen)) {
         return false;
     }
-    memcpy(b->data + b->len, data, len);
-    b->len += len;
+    memcpy(b->data + b->len, data, ulen);
+    b->len += ulen;
     return true;
 }
 
@@ -410,27 +411,31 @@ static void rec_add_blob(RecordBuilder *r, const uint8_t *data, int len) {
 // Caller must free the returned buffer.
 static uint8_t *rec_finalize(RecordBuilder *r, int *out_len) {
     *out_len = 0;
-    int header_content_len = r->header.len;
-    int header_len_varint_len = varint_len(header_content_len + varint_len(header_content_len));
+    // A record's header/body are the serial-type varints and column values for
+    // a single row — always small relative to SIZE_MAX/INT_MAX, so narrowing
+    // back to the int-based varint/malloc API below is safe.
+    size_t header_content_len = r->header.len;
+    int header_len_varint_len =
+        varint_len((int64_t)header_content_len + varint_len((int64_t)header_content_len));
     // The header size varint includes itself, so we may need to iterate
-    int total_header = header_len_varint_len + header_content_len;
+    size_t total_header = (size_t)header_len_varint_len + header_content_len;
     // Check if the header_len varint changes size when it includes itself
-    int recalc = varint_len(total_header);
+    int recalc = varint_len((int64_t)total_header);
     if (recalc != header_len_varint_len) {
         header_len_varint_len = recalc;
-        total_header = header_len_varint_len + header_content_len;
+        total_header = (size_t)header_len_varint_len + header_content_len;
     }
 
-    int total = total_header + r->body.len;
+    size_t total = total_header + r->body.len;
     uint8_t *buf = (uint8_t *)malloc(total);
     if (!buf) {
         return NULL;
     }
-    int pos = put_varint(buf, total_header);
+    int pos = put_varint(buf, (int64_t)total_header);
     memcpy(buf + pos, r->header.data, header_content_len);
-    pos += header_content_len;
+    pos += (int)header_content_len;
     memcpy(buf + pos, r->body.data, r->body.len);
-    *out_len = total;
+    *out_len = (int)total;
     return buf;
 }
 
@@ -459,7 +464,7 @@ typedef struct {
     // Completed leaf pages for building interior nodes
     PageRef *leaves;
     int leaf_count;
-    int leaf_cap;
+    size_t leaf_cap; // capacity only — never a sentinel, doubles without signed-overflow risk
 } PageBuilder;
 
 static void pb_init(PageBuilder *pb, FILE *fp, uint32_t start_page, bool is_index) {
@@ -508,10 +513,10 @@ static void pb_flush_leaf(PageBuilder *pb) {
     (void)fwrite(pb->page, SKIP_ONE, CBM_PAGE_SIZE, pb->fp);
 
     // Record this leaf for interior page building
-    if (pb->leaf_count >= pb->leaf_cap) {
-        int old_cap = pb->leaf_cap;
+    if ((size_t)pb->leaf_count >= pb->leaf_cap) {
+        size_t old_cap = pb->leaf_cap;
         pb->leaf_cap = old_cap == 0 ? INITIAL_LEAF_CAP : old_cap * GROWTH_FACTOR;
-        void *tmp = realloc(pb->leaves, (size_t)pb->leaf_cap * sizeof(PageRef));
+        void *tmp = realloc(pb->leaves, pb->leaf_cap * sizeof(PageRef));
         if (!tmp) {
             /* Leave a CONSISTENT empty state: leaf_count stale at >=1 with a
              * NULL leaves array walked pb_finalize_* straight into
@@ -526,7 +531,7 @@ static void pb_flush_leaf(PageBuilder *pb) {
         }
         pb->leaves = (PageRef *)tmp;
         /* Zero-init new slots */
-        memset(&pb->leaves[old_cap], 0, ((size_t)pb->leaf_cap - (size_t)old_cap) * sizeof(PageRef));
+        memset(&pb->leaves[old_cap], 0, (pb->leaf_cap - old_cap) * sizeof(PageRef));
     }
     pb->leaves[pb->leaf_count].page_num = page_num;
     // max_key is set by caller before flush
@@ -554,7 +559,9 @@ static bool pb_cell_fits(PageBuilder *pb, int cell_len) {
 static void pb_add_cell(PageBuilder *pb, const uint8_t *cell, int cell_len) {
     // Write cell content (grows down)
     pb->content_offset -= cell_len;
-    memcpy(pb->page + pb->content_offset, cell, cell_len);
+    // cell_len is caller-checked against pb_cell_fits() before this call, so it
+    // never exceeds CBM_PAGE_SIZE and is always non-negative.
+    memcpy(pb->page + pb->content_offset, cell, (size_t)cell_len);
 
     // Write cell pointer (grows up)
     put_u16(pb->page + pb->ptr_offset, (uint16_t)pb->content_offset);
@@ -586,10 +593,12 @@ static int build_interior_cell(const PageRef *child, bool is_index, uint8_t *cel
         put_u32(cell_buf, child->page_num);
         return BTREE_PTR_SIZE + put_varint(cell_buf + BTREE_PTR_SIZE, child->max_key);
     }
+    // sep_cell_len is itself a record/index-payload length (bounded well under
+    // INDEX_OVERFLOW_MAX_LOCAL), so clen is always small and non-negative.
     int clen = BTREE_PTR_SIZE + child->sep_cell_len;
-    uint8_t *data = (uint8_t *)malloc(clen);
+    uint8_t *data = (uint8_t *)malloc((size_t)clen);
     put_u32(data, child->page_num);
-    memcpy(data + 4, child->sep_cell, child->sep_cell_len);
+    memcpy(data + 4, child->sep_cell, (size_t)child->sep_cell_len);
     *out_heap = data;
     return clen;
 }
@@ -599,7 +608,7 @@ static int build_interior_cell(const PageRef *child, bool is_index, uint8_t *cel
 static int write_interior_page(PageBuilder *pb, uint8_t *page, int cell_count, int content_offset,
                                uint32_t right_child_page, const PageRef *children,
                                int right_child_idx, bool is_index, PageRef **parents,
-                               int parent_count, int *parent_cap) {
+                               int parent_count, size_t *parent_cap) {
     pb->next_page = cbm_skip_pending_byte(pb->next_page);
     uint32_t pnum = pb->next_page++;
     page[0] = is_index ? INTERIOR_INDEX_FLAG : INTERIOR_TABLE_FLAG;
@@ -612,8 +621,8 @@ static int write_interior_page(PageBuilder *pb, uint8_t *page, int cell_count, i
     (void)fseek(pb->fp, (long)(pnum - SKIP_ONE) * CBM_PAGE_SIZE, SEEK_SET);
     (void)fwrite(page, SKIP_ONE, CBM_PAGE_SIZE, pb->fp);
 
-    if (parent_count >= *parent_cap) {
-        int old_pcap = *parent_cap;
+    if ((size_t)parent_count >= *parent_cap) {
+        size_t old_pcap = *parent_cap;
         *parent_cap = old_pcap == 0 ? INITIAL_PARENT_CAP : old_pcap * GROWTH_FACTOR;
         PageRef *tmp = (PageRef *)realloc(*parents, *parent_cap * sizeof(PageRef));
         if (!tmp) {
@@ -622,15 +631,16 @@ static int write_interior_page(PageBuilder *pb, uint8_t *page, int cell_count, i
             return CBM_NOT_FOUND;
         }
         *parents = tmp;
-        memset(&(*parents)[old_pcap], 0,
-               ((size_t)*parent_cap - (size_t)old_pcap) * sizeof(PageRef));
+        memset(&(*parents)[old_pcap], 0, (*parent_cap - old_pcap) * sizeof(PageRef));
     }
     (*parents)[parent_count].page_num = pnum;
     (*parents)[parent_count].max_key = children[right_child_idx].max_key;
     if (is_index && children[right_child_idx].sep_cell) {
+        // sep_cell_len is an index-payload length (see build_interior_cell), always
+        // small and non-negative.
         int slen = children[right_child_idx].sep_cell_len;
-        (*parents)[parent_count].sep_cell = (uint8_t *)malloc(slen);
-        memcpy((*parents)[parent_count].sep_cell, children[right_child_idx].sep_cell, slen);
+        (*parents)[parent_count].sep_cell = (uint8_t *)malloc((size_t)slen);
+        memcpy((*parents)[parent_count].sep_cell, children[right_child_idx].sep_cell, (size_t)slen);
         (*parents)[parent_count].sep_cell_len = slen;
     } else {
         (*parents)[parent_count].sep_cell = NULL;
@@ -667,7 +677,8 @@ static void fill_interior_page(uint8_t *page, const PageRef *children, int child
         }
 
         *content_offset -= clen;
-        memcpy(page + *content_offset, cell_data, clen);
+        // clen is bounded by CBM_PAGE_SIZE and checked against available space above.
+        memcpy(page + *content_offset, cell_data, (size_t)clen);
         put_u16(page + *ptr_offset, (uint16_t)*content_offset);
         *ptr_offset += CELL_PTR_SIZE;
         (*cell_count)++;
@@ -690,7 +701,7 @@ static uint32_t pb_build_interior(PageBuilder *pb, bool is_index) {
     while (child_count > SKIP_ONE && children) {
         PageRef *parents = NULL;
         int parent_count = 0;
-        int parent_cap = 0;
+        size_t parent_cap = 0;
 
         int i = 0;
         while (i < child_count) {
@@ -797,8 +808,12 @@ static uint8_t *build_token_vec_record(const CBMDumpTokenVec *tv, int *out_len) 
     rec_add_text(&r, tv->project);
     rec_add_text(&r, tv->token);
     rec_add_blob(&r, tv->vector, tv->vector_len);
-    /* Store IDF as integer × 1000 for fixed-point (avoid float in record) */
-    enum { IDF_FIXED_POINT_SCALE = 1000 };
+    /*
+     * Store IDF as integer x 1000 for fixed-point (avoid float in record).
+     * The scale factor is declared `float`, not an enum member, since its
+     * only use is float arithmetic against tv->idf.
+     */
+    static const float IDF_FIXED_POINT_SCALE = 1000.0f;
     rec_add_int(&r, (int64_t)(tv->idf * IDF_FIXED_POINT_SCALE));
 
     uint8_t *data = rec_finalize(&r, out_len);
@@ -829,14 +844,15 @@ static uint8_t *build_table_cell(int64_t rowid, const uint8_t *payload, int payl
     int rl = varint_len(payload_len);
     int kl = varint_len(rowid);
     int total = rl + kl + payload_len;
-    uint8_t *cell = (uint8_t *)malloc(total);
+    // payload_len is a record byte length, always non-negative.
+    uint8_t *cell = (uint8_t *)malloc((size_t)total);
     if (!cell) {
         return NULL;
     }
     int pos = 0;
     pos += put_varint(cell + pos, payload_len);
     pos += put_varint(cell + pos, rowid);
-    memcpy(cell + pos, payload, payload_len);
+    memcpy(cell + pos, payload, (size_t)payload_len);
     *out_cell_len = pos + payload_len;
     return cell;
 }
@@ -852,14 +868,16 @@ static uint8_t *build_table_cell_overflow(int64_t rowid, const uint8_t *payload,
     int kl = varint_len(rowid);
     // cell = varint(total_payload_len) + varint(rowid) + payload[0..local_len) + uint32(overflow)
     int total = rl + kl + local_len + BTREE_PTR_SIZE;
-    uint8_t *cell = (uint8_t *)malloc(total);
+    // local_len is clamped between TABLE_OVERFLOW_MIN_LOCAL/MAX_LOCAL by the
+    // caller, always non-negative.
+    uint8_t *cell = (uint8_t *)malloc((size_t)total);
     if (!cell) {
         return NULL;
     }
     int pos = 0;
     pos += put_varint(cell + pos, total_payload_len);
     pos += put_varint(cell + pos, rowid);
-    memcpy(cell + pos, payload, local_len);
+    memcpy(cell + pos, payload, (size_t)local_len);
     pos += local_len;
     put_u32(cell + pos, overflow_page);
     pos += BTREE_PTR_SIZE;
@@ -900,7 +918,9 @@ static uint32_t write_overflow_pages(FILE *fp, uint32_t *next_page, const uint8_
         uint8_t page[CBM_PAGE_SIZE];
         memset(page, 0, CBM_PAGE_SIZE);
         put_u32(page, 0); // next-page pointer — 0 for now, backpatched on next iteration
-        memcpy(page + BTREE_PTR_SIZE, data + offset, chunk);
+        // chunk is clamped to per_page (<= CBM_PAGE_SIZE) above and the loop guard
+        // (offset < data_len) keeps it non-negative.
+        memcpy(page + BTREE_PTR_SIZE, data + offset, (size_t)chunk);
 
         long page_offset = (long)(pnum - SKIP_ONE) * CBM_PAGE_SIZE;
         prev_next_ptr_offset = page_offset;
@@ -935,14 +955,15 @@ static uint8_t *build_index_entry_2text_rowid(const char *col1, const char *col2
     // Index cell: varint(payload_len) + payload
     int vl = varint_len(payload_len);
     int total = vl + payload_len;
-    uint8_t *cell = (uint8_t *)malloc(total);
+    // payload_len is a record byte length, always non-negative.
+    uint8_t *cell = (uint8_t *)malloc((size_t)total);
     if (!cell) {
         free(payload);
         *out_len = 0;
         return NULL;
     }
     int pos = put_varint(cell, payload_len);
-    memcpy(cell + pos, payload, payload_len);
+    memcpy(cell + pos, payload, (size_t)payload_len);
     free(payload);
     *out_len = total;
     return cell;
@@ -966,14 +987,15 @@ static uint8_t *build_index_entry_int_text_rowid(int64_t val, const char *text, 
 
     int vl = varint_len(payload_len);
     int total = vl + payload_len;
-    uint8_t *cell = (uint8_t *)malloc(total);
+    // payload_len is a record byte length, always non-negative.
+    uint8_t *cell = (uint8_t *)malloc((size_t)total);
     if (!cell) {
         free(payload);
         *out_len = 0;
         return NULL;
     }
     int pos = put_varint(cell, payload_len);
-    memcpy(cell + pos, payload, payload_len);
+    memcpy(cell + pos, payload, (size_t)payload_len);
     free(payload);
     *out_len = total;
     return cell;
@@ -998,14 +1020,15 @@ static uint8_t *build_index_entry_text_int_text_rowid(const char *t1, int64_t va
 
     int vl = varint_len(payload_len);
     int total = vl + payload_len;
-    uint8_t *cell = (uint8_t *)malloc(total);
+    // payload_len is a record byte length, always non-negative.
+    uint8_t *cell = (uint8_t *)malloc((size_t)total);
     if (!cell) {
         free(payload);
         *out_len = 0;
         return NULL;
     }
     int pos = put_varint(cell, payload_len);
-    memcpy(cell + pos, payload, payload_len);
+    memcpy(cell + pos, payload, (size_t)payload_len);
     free(payload);
     *out_len = total;
     return cell;
@@ -1033,14 +1056,15 @@ static uint8_t *build_index_entry_unique_2int_2text_rowid(int64_t v1, int64_t v2
 
     int vlen = varint_len(payload_len);
     int total = vlen + payload_len;
-    uint8_t *cell = (uint8_t *)malloc(total);
+    // payload_len is a record byte length, always non-negative.
+    uint8_t *cell = (uint8_t *)malloc((size_t)total);
     if (!cell) {
         free(payload);
         *out_len = 0;
         return NULL;
     }
     int pos = put_varint(cell, payload_len);
-    memcpy(cell + pos, payload, payload_len);
+    memcpy(cell + pos, payload, (size_t)payload_len);
     free(payload);
     *out_len = total;
     return cell;
@@ -1051,11 +1075,11 @@ static uint8_t *build_index_entry_unique_2int_2text_rowid(int64_t v1, int64_t v2
 // Ensure leaves array has capacity for one more entry.
 // Returns false on allocation failure.
 static bool pb_ensure_leaf_cap(PageBuilder *pb) {
-    if (pb->leaf_count < pb->leaf_cap) {
+    if ((size_t)pb->leaf_count < pb->leaf_cap) {
         return true;
     }
     pb->leaf_cap = pb->leaf_cap == 0 ? INITIAL_LEAF_CAP : pb->leaf_cap * GROWTH_FACTOR;
-    void *tmp = realloc(pb->leaves, (size_t)pb->leaf_cap * sizeof(PageRef));
+    void *tmp = realloc(pb->leaves, pb->leaf_cap * sizeof(PageRef));
     if (!tmp) {
         /* Same consistent-empty contract as pb_flush_leaf's growth path. */
         free(pb->leaves);
@@ -1245,8 +1269,10 @@ static bool pb_promote_and_flush(PageBuilder *pb, uint8_t **cells, int *cell_len
         return false;
     }
     pb->leaves[pb->leaf_count].max_key = 0;
-    pb->leaves[pb->leaf_count].sep_cell = (uint8_t *)malloc(cell_lens[prev_idx]);
-    memcpy(pb->leaves[pb->leaf_count].sep_cell, cells[prev_idx], cell_lens[prev_idx]);
+    // Promoted cells already fit on a page (pb_cell_fits gated their addition),
+    // so cell_lens[prev_idx] is always small and non-negative.
+    pb->leaves[pb->leaf_count].sep_cell = (uint8_t *)malloc((size_t)cell_lens[prev_idx]);
+    memcpy(pb->leaves[pb->leaf_count].sep_cell, cells[prev_idx], (size_t)cell_lens[prev_idx]);
     pb->leaves[pb->leaf_count].sep_cell_len = cell_lens[prev_idx];
 
     // Un-add the last cell — it's promoted to the interior separator.
@@ -1318,8 +1344,9 @@ static uint32_t write_index_btree(FILE *fp, uint32_t *next_page, uint8_t **cells
         }
         pb.leaves[pb.leaf_count].max_key = 0;
         int last = count - SKIP_ONE;
-        pb.leaves[pb.leaf_count].sep_cell = (uint8_t *)malloc(cell_lens[last]);
-        memcpy(pb.leaves[pb.leaf_count].sep_cell, cells[last], cell_lens[last]);
+        // Same as above: cells already added via pb_add_cell fit on a page.
+        pb.leaves[pb.leaf_count].sep_cell = (uint8_t *)malloc((size_t)cell_lens[last]);
+        memcpy(pb.leaves[pb.leaf_count].sep_cell, cells[last], (size_t)cell_lens[last]);
         pb.leaves[pb.leaf_count].sep_cell_len = cell_lens[last];
         pb_flush_leaf(&pb);
     }
@@ -1384,16 +1411,18 @@ static inline const char *safe_str(const char *s) {
 // Allocate permutation array [0, 1, ..., n-1], sort with comparator.
 // Returns NULL on allocation failure.
 static int *make_sorted_perm(int n, int (*cmp)(const void *, const void *)) {
-    int *perm = (int *)malloc(n * sizeof(int));
+    // Callers (parallel_sort_indexes) only invoke this for SortJob.count > 0.
+    size_t un = (size_t)n;
+    int *perm = (int *)malloc(un * sizeof(int));
     if (!perm) {
         (void)fprintf(stderr, "cbm_write_db: perm malloc failed n=%d size=%zu\n", n,
-                      (size_t)n * sizeof(int));
+                      un * sizeof(int));
         return NULL;
     }
     for (int i = 0; i < n; i++) {
         perm[i] = i;
     }
-    qsort(perm, n, sizeof(int), cmp);
+    qsort(perm, un, sizeof(int), cmp);
     return perm;
 }
 
@@ -1612,14 +1641,15 @@ static uint8_t *ecell_url_path(const CBMDumpEdge *e, int *out_len) {
     rec_free(&r);
     int vlen = varint_len(payload_len);
     int total = vlen + payload_len;
-    uint8_t *cell = (uint8_t *)malloc(total);
+    // payload_len is a record byte length, always non-negative.
+    uint8_t *cell = (uint8_t *)malloc((size_t)total);
     if (!cell) {
         free(payload);
         *out_len = 0;
         return NULL;
     }
     int pos = put_varint(cell, payload_len);
-    memcpy(cell + pos, payload, payload_len);
+    memcpy(cell + pos, payload, (size_t)payload_len);
     free(payload);
     *out_len = total;
     return cell;
@@ -1634,8 +1664,9 @@ static uint32_t build_edge_index_sorted(FILE *fp, uint32_t *next_page, CBMDumpEd
     if (!perm) {
         return 0;
     }
-    uint8_t **idx_cells = (uint8_t **)malloc(edge_count * sizeof(uint8_t *));
-    int *idx_lens = (int *)malloc(edge_count * sizeof(int));
+    // edge_count > 0 is checked above.
+    uint8_t **idx_cells = (uint8_t **)malloc((size_t)edge_count * sizeof(uint8_t *));
+    int *idx_lens = (int *)malloc((size_t)edge_count * sizeof(int));
     if (!idx_cells || !idx_lens) {
         free(perm);
         free(idx_cells);
@@ -1689,8 +1720,9 @@ static uint32_t build_node_index_sorted(FILE *fp, uint32_t *next_page, CBMDumpNo
     if (!perm) {
         return 0;
     }
-    uint8_t **idx_cells = (uint8_t **)malloc(node_count * sizeof(uint8_t *));
-    int *idx_lens = (int *)malloc(node_count * sizeof(int));
+    // node_count > 0 is checked above.
+    uint8_t **idx_cells = (uint8_t **)malloc((size_t)node_count * sizeof(uint8_t *));
+    int *idx_lens = (int *)malloc((size_t)node_count * sizeof(int));
     if (!idx_cells || !idx_lens) {
         free(perm);
         free(idx_cells);
@@ -1914,11 +1946,23 @@ static void write_sqlite_file_header(uint8_t *page1, uint32_t total_pages) {
     put_u32(page1 + HDR_OFF_SQLITE_VERSION, SQLITE_VERSION);
 }
 
+/* Release an owned const uint8_t* built by build_master_record(). Reads the
+ * pointer value out via memcpy instead of a qualifier-discarding cast — same
+ * ownership-transfer pattern as safe_str_free() in foundation/platform.h. */
+static void free_master_record(const uint8_t *p) {
+    void *owned;
+    memcpy(&owned, &p, sizeof(owned));
+    free(owned);
+}
+
 /* Build master records, write page 1 B-tree + file header. */
 static int write_master_page1(FILE *fp, MasterEntry *master, int master_count, uint32_t next_page) {
-    const uint8_t **master_records = (const uint8_t **)malloc(master_count * sizeof(uint8_t *));
-    int *master_lens = (int *)malloc(master_count * sizeof(int));
-    int64_t *master_rowids = (int64_t *)malloc(master_count * sizeof(int64_t));
+    // master_count is sizeof(master)/sizeof(master[0]) at the call site — a
+    // small, fixed, compile-time schema table count.
+    size_t umc = (size_t)master_count;
+    const uint8_t **master_records = (const uint8_t **)malloc(umc * sizeof(uint8_t *));
+    int *master_lens = (int *)malloc(umc * sizeof(int));
+    int64_t *master_rowids = (int64_t *)malloc(umc * sizeof(int64_t));
     for (int i = 0; i < master_count; i++) {
         master_rowids[i] = i + SKIP_ONE;
         master_records[i] = build_master_record(&master[i], &master_lens[i]);
@@ -1940,7 +1984,7 @@ static int write_master_page1(FILE *fp, MasterEntry *master, int master_count, u
         if (!cell || cell_len > available) {
             free(cell);
             for (int j = 0; j < master_count; j++) {
-                free((void *)master_records[j]);
+                free_master_record(master_records[j]);
             }
             free(master_records);
             free(master_lens);
@@ -1948,7 +1992,9 @@ static int write_master_page1(FILE *fp, MasterEntry *master, int master_count, u
             return ERR_MASTER_OVERFLOW;
         }
         content_off -= cell_len;
-        memcpy(page1 + content_off, cell, cell_len);
+        // cell_len is checked against available space above, bounding it within
+        // CBM_PAGE_SIZE and non-negative.
+        memcpy(page1 + content_off, cell, (size_t)cell_len);
         put_u16(page1 + ptr_off, (uint16_t)content_off);
         ptr_off += CELL_PTR_SIZE;
         mcell_count++;
@@ -1966,7 +2012,7 @@ static int write_master_page1(FILE *fp, MasterEntry *master, int master_count, u
     (void)fwrite(page1, SKIP_ONE, CBM_PAGE_SIZE, fp);
 
     for (int i = 0; i < master_count; i++) {
-        free((void *)master_records[i]);
+        free_master_record(master_records[i]);
     }
     free(master_records);
     free(master_lens);
@@ -2164,9 +2210,10 @@ static int write_db_after_nodes(write_db_ctx_t *w, uint32_t nodes_root) {
         rec_free(&r);
         int vl = varint_len(plen);
         int total = vl + plen;
-        uint8_t *cell = (uint8_t *)malloc(total);
+        // plen is a record byte length, always non-negative.
+        uint8_t *cell = (uint8_t *)malloc((size_t)total);
         int pos = put_varint(cell, plen);
-        memcpy(cell + pos, payload, plen);
+        memcpy(cell + pos, payload, (size_t)plen);
         free(payload);
         uint8_t *cells_arr[] = {cell};
         int lens_arr[] = {total};

@@ -52,6 +52,7 @@
  */
 
 #include "test_framework.h"
+#include "suites.h"
 #include "repro_harness.h"
 #include "pipeline/pass_cross_repo.h"
 

@@ -872,4 +872,37 @@ int cbm_store_count_vectors(cbm_store_t *s, const char *project);
  * Returns CBM_STORE_OK on success. */
 int cbm_store_exec(cbm_store_t *s, const char *sql);
 
+/* ── Config store (persistent key-value, backed by _config.db) ──── */
+
+typedef struct cbm_config cbm_config_t;
+
+/* Open the config store in the given cache directory.
+ * Creates _config.db if it doesn't exist. Returns NULL on error. */
+cbm_config_t *cbm_config_open(const char *cache_dir);
+
+/* Close the config store. */
+void cbm_config_close(cbm_config_t *cfg);
+
+/* Get a config value. Returns default_val if key not found. Database-backed
+ * results remain valid until the next call on the same thread. */
+const char *cbm_config_get(cbm_config_t *cfg, const char *key, const char *default_val);
+
+/* Get a config value as bool. "true"/"1"/"on" → true. */
+bool cbm_config_get_bool(cbm_config_t *cfg, const char *key, bool default_val);
+
+/* Get a config value as int. Returns default_val if not found or invalid. */
+int cbm_config_get_int(cbm_config_t *cfg, const char *key, int default_val);
+
+/* Set a config value. Returns 0 on success. */
+int cbm_config_set(cbm_config_t *cfg, const char *key, const char *value);
+
+/* Delete a config key. Returns 0 on success. */
+int cbm_config_delete(cbm_config_t *cfg, const char *key);
+
+/* Well-known config keys */
+#define CBM_CONFIG_AUTO_INDEX "auto_index"
+#define CBM_CONFIG_AUTO_INDEX_LIMIT "auto_index_limit"
+#define CBM_CONFIG_AUTO_WATCH "auto_watch"
+#define CBM_CONFIG_UI_LANG "ui-lang"
+
 #endif /* CBM_STORE_H */

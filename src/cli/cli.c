@@ -24,6 +24,7 @@
 #include "cli/client_adapter.h"
 #include "mcp/mcp.h" // cbm_mcp_tool_input_schema — CLI flag parser + per-tool --help
 #include "mcp/index_supervisor.h"
+#include "store/store.h" // cbm_config_* — persistent key-value config store
 
 /* CLI buffer size constants. */
 enum {
@@ -55,15 +56,11 @@ enum {
     CLI_INDENT_24 = 24,
     CLI_FIELD_1040 = 1040,
     CLI_MB_10 = 10,
-    BYTE_SHIFT = 8,    /* bits per byte for multi-byte reads */
-    SQL_NUL_TERM = -1, /* sqlite3 length = -1 means NUL-terminated */
-    SQL_PARAM_1 = 1,   /* sqlite3_bind parameter index 1 */
-    SQL_PARAM_2 = 2,
+    BYTE_SHIFT = 8,   /* bits per byte for multi-byte reads */
     SEMVER_PARTS = 3, /* major.minor.patch */
     DB_EXT_LEN = 3,   /* strlen(".db") */
     MIN_ARGC_CMD = 3,
-    /* minimum argc for subcommand with arg */ /* sqlite3_bind parameter index 2 */ /* 10 MB cap
-                                                                                       factor */
+    /* minimum argc for subcommand with arg */ /* 10 MB cap factor */
     CLI_MB_FACTOR = CLI_BUF_1K * CLI_BUF_1K,
     NUM_RETRIES = 5,
     NUM_DIRS = 4,
@@ -110,6 +107,11 @@ static int cbm_powershell_quote_word(const char *value, char *out, size_t out_si
 #include <sys/stat.h> // mode_t, S_IXUSR
 #include <time.h>
 #include <wchar.h>
+/* ZLIB_CONST retypes z_stream.next_in as `const Bytef *`, which is what it
+ * has always meant — inflate() never writes through it. Without this the
+ * field is non-const and every input pointer needs its qualifier removed
+ * to assign it. Must precede <zlib.h>. */
+#define ZLIB_CONST
 #include <zlib.h> // MAX_WBITS
 #ifdef _WIN32
 #include <io.h>
@@ -118,17 +120,6 @@ static int cbm_powershell_quote_word(const char *value, char *out, size_t out_si
 
 /* yyjson for JSON read-modify-write */
 #include "yyjson/yyjson.h"
-
-/* SQLITE_TRANSIENT equivalent as a typed function pointer (avoids int-to-ptr cast).
- * sqlite3.h defines SQLITE_TRANSIENT as ((sqlite3_destructor_type)-1).
- * We replicate the same bit pattern via memcpy to satisfy performance-no-int-to-ptr. */
-static void (*cbm_sqlite_transient_fn(void))(void *) {
-    uintptr_t bits = (uintptr_t)CLI_ERR;
-    void (*fp)(void *) = NULL;
-    memcpy(&fp, &bits, sizeof(fp));
-    return fp;
-}
-#define cbm_sqlite_transient (cbm_sqlite_transient_fn())
 
 /* ── Constants ────────────────────────────────────────────────── */
 
@@ -748,20 +739,6 @@ static int cli_activation_guard(cbm_daemon_runtime_activation_action_t action,
 #define TAR_BLOCK_SIZE CBM_SZ_512 /* tar record alignment */
 #define TAR_BLOCK_MASK 511        /* TAR_BLOCK_SIZE - 1 */
 
-/* ── Version ──────────────────────────────────────────────────── */
-
-static const char *cli_version = "dev";
-
-void cbm_cli_set_version(const char *ver) {
-    if (ver) {
-        cli_version = ver;
-    }
-}
-
-const char *cbm_cli_get_version(void) {
-    return cli_version;
-}
-
 /* ── Version comparison ───────────────────────────────────────── */
 
 /* Parse semver major.minor.patch into array. Returns number of parts parsed. */
@@ -932,7 +909,7 @@ const char *cbm_find_cli(const char *name, const char *home_dir) {
 #else
     paths[4][0] = '\0';
 #endif
-    for (int i = 0; i < NUM_RETRIES; i++) {
+    for (int i = 0; i < NUM_PATHS; i++) {
         if (paths[i][0] && is_executable(paths[i])) {
             snprintf(buf, sizeof(buf), "%s", paths[i]);
             return buf;
@@ -941,13 +918,12 @@ const char *cbm_find_cli(const char *name, const char *home_dir) {
     return "";
 }
 
-/* Agent scans are also used for dry-run plans against an explicit/synthetic
- * home. In that mode, machine-global /usr/local and Homebrew fallbacks would
- * leak the host's agents into the result. Keep those fallbacks for a real-home
- * scan while still honoring the supplied PATH and home-local bin dirs. */
-static bool cbm_agent_cli_exists(const char *name, const char *home_dir) {
-    const char *actual_home = cbm_get_home_dir();
-    if (actual_home && home_dir && strcmp(actual_home, home_dir) == 0) {
+/* Checks PATH plus home-local bin dirs for both modes; CBM_SCAN_REAL_HOME
+ * additionally consults machine-global /usr/local and Homebrew fallbacks via
+ * cbm_find_cli. CBM_SCAN_SYNTHETIC stays confined to PATH and home-local bin
+ * dirs so a dry-run/plan against a synthetic home never reflects the host. */
+static bool cbm_agent_cli_exists(const char *name, const char *home_dir, cbm_scan_mode_t mode) {
+    if (mode == CBM_SCAN_REAL_HOME) {
         return cbm_find_cli(name, home_dir)[0] != '\0';
     }
 
@@ -1090,8 +1066,13 @@ static int cli_activation_transaction_commit_validated(cbm_activation_transactio
     if (!transaction) {
         return CLI_ERR;
     }
+    /* The commit callback's opaque userdata parameter is non-const by
+     * convention; cli_binary_fingerprint_validator only reads through it.
+     * memcpy the pointer value rather than cast away const. */
+    void *validator_opaque;
+    memcpy(&validator_opaque, &validator, sizeof(validator_opaque));
     cbm_activation_transaction_status_t status = cbm_activation_transaction_commit(
-        transaction, validator ? cli_binary_fingerprint_validator : NULL, (void *)validator);
+        transaction, validator ? cli_binary_fingerprint_validator : NULL, validator_opaque);
     if (status != CBM_ACTIVATION_TRANSACTION_OK) {
         return CLI_ERR;
     }
@@ -2534,7 +2515,7 @@ static int cbm_resolve_released_hook_command(const char *script_name, char *out,
     return written > 0 && (size_t)written < out_sz ? CLI_OK : CLI_ERR;
 }
 
-cbm_detected_agents_t cbm_detect_agents(const char *home_dir) {
+cbm_detected_agents_t cbm_detect_agents(const char *home_dir, cbm_scan_mode_t mode) {
     cbm_detected_agents_t agents;
     memset(&agents, 0, sizeof(agents));
     if (!home_dir || !home_dir[0]) {
@@ -2550,16 +2531,16 @@ cbm_detected_agents_t cbm_detect_agents(const char *home_dir) {
     agents.codex = path[0] != '\0' && dir_exists(path);
 
     snprintf(path, sizeof(path), "%s/.gemini/antigravity-cli", home_dir);
-    agents.antigravity = dir_exists(path) || cbm_agent_cli_exists("antigravity", home_dir);
+    agents.antigravity = dir_exists(path) || cbm_agent_cli_exists("antigravity", home_dir, mode);
 
     snprintf(path, sizeof(path), "%s/.gemini/settings.json", home_dir);
-    agents.gemini = cbm_file_exists(path) || cbm_agent_cli_exists("gemini", home_dir);
+    agents.gemini = cbm_file_exists(path) || cbm_agent_cli_exists("gemini", home_dir, mode);
 
     cbm_zed_config_dir(home_dir, path, sizeof(path));
     agents.zed = dir_exists(path);
 
     cbm_opencode_config_path(home_dir, path, sizeof(path));
-    agents.opencode = cbm_file_exists(path) || cbm_agent_cli_exists("opencode", home_dir);
+    agents.opencode = cbm_file_exists(path) || cbm_agent_cli_exists("opencode", home_dir, mode);
     if (!agents.opencode) {
         snprintf(path, sizeof(path), "%s/.config/opencode", home_dir);
         agents.opencode = dir_exists(path);
@@ -2571,7 +2552,7 @@ cbm_detected_agents_t cbm_detect_agents(const char *home_dir) {
         agents.opencode = config_dir && config_dir[0] && dir_exists(config_dir);
     }
 
-    agents.aider = cbm_agent_cli_exists("aider", home_dir);
+    agents.aider = cbm_agent_cli_exists("aider", home_dir, mode);
 
 #ifdef __APPLE__
     snprintf(path, sizeof(path),
@@ -2584,7 +2565,8 @@ cbm_detected_agents_t cbm_detect_agents(const char *home_dir) {
 #endif
     agents.kilocode = dir_exists(path);
     snprintf(path, sizeof(path), "%s/.config/kilo", home_dir);
-    agents.kilocode = agents.kilocode || dir_exists(path) || cbm_agent_cli_exists("kilo", home_dir);
+    agents.kilocode =
+        agents.kilocode || dir_exists(path) || cbm_agent_cli_exists("kilo", home_dir, mode);
 
 #ifdef __APPLE__
     snprintf(path, sizeof(path), "%s/Library/Application Support/Code/User", home_dir);
@@ -2603,7 +2585,7 @@ cbm_detected_agents_t cbm_detect_agents(const char *home_dir) {
     agents.windsurf = dir_exists(path);
 
     snprintf(path, sizeof(path), "%s/.augment", home_dir);
-    agents.augment = dir_exists(path) || cbm_agent_cli_exists("auggie", home_dir);
+    agents.augment = dir_exists(path) || cbm_agent_cli_exists("auggie", home_dir, mode);
 
     char openclaw_config[CLI_BUF_1K];
     char openclaw_state[CLI_BUF_1K];
@@ -2613,21 +2595,22 @@ cbm_detected_agents_t cbm_detect_agents(const char *home_dir) {
         cbm_openclaw_state_dir(home_dir, openclaw_state, sizeof(openclaw_state));
     agents.openclaw = (has_openclaw_config && cbm_file_exists(openclaw_config)) ||
                       (has_openclaw_state && dir_exists(openclaw_state)) ||
-                      cbm_agent_cli_exists("openclaw", home_dir);
+                      cbm_agent_cli_exists("openclaw", home_dir, mode);
 
     cbm_kiro_home_dir(home_dir, path, sizeof(path));
-    agents.kiro = path[0] && (dir_exists(path) || cbm_agent_cli_exists("kiro-cli", home_dir) ||
-                              cbm_agent_cli_exists("kiro", home_dir));
+    agents.kiro =
+        path[0] && (dir_exists(path) || cbm_agent_cli_exists("kiro-cli", home_dir, mode) ||
+                    cbm_agent_cli_exists("kiro", home_dir, mode));
 
     /* Junie (JetBrains): ~/.junie/ */
     snprintf(path, sizeof(path), "%s/.junie", home_dir);
     agents.junie = dir_exists(path);
 
     cbm_hermes_home_dir(home_dir, path, sizeof(path));
-    agents.hermes = path[0] && (dir_exists(path) || cbm_agent_cli_exists("hermes", home_dir));
+    agents.hermes = path[0] && (dir_exists(path) || cbm_agent_cli_exists("hermes", home_dir, mode));
 
     snprintf(path, sizeof(path), "%s/.openhands", home_dir);
-    agents.openhands = dir_exists(path) || cbm_agent_cli_exists("openhands", home_dir);
+    agents.openhands = dir_exists(path) || cbm_agent_cli_exists("openhands", home_dir, mode);
 
     char cline_root[CLI_BUF_1K];
     char cline_data[CLI_BUF_1K];
@@ -2635,7 +2618,7 @@ cbm_detected_agents_t cbm_detect_agents(const char *home_dir) {
     cbm_cline_data_dir(home_dir, cline_data, sizeof(cline_data));
     agents.cline = (cline_root[0] && dir_exists(cline_root)) ||
                    (cline_data[0] && dir_exists(cline_data)) ||
-                   cbm_agent_cli_exists("cline", home_dir);
+                   cbm_agent_cli_exists("cline", home_dir, mode);
 
     snprintf(path, sizeof(path), "%s/.warp", home_dir);
     agents.warp = dir_exists(path);
@@ -2643,12 +2626,12 @@ cbm_detected_agents_t cbm_detect_agents(const char *home_dir) {
     snprintf(path, sizeof(path), "%s/.config/warp-terminal", home_dir);
     agents.warp = agents.warp || dir_exists(path);
 #endif
-    agents.warp = agents.warp || cbm_agent_cli_exists("oz", home_dir) ||
-                  cbm_agent_cli_exists("oz-preview", home_dir) ||
-                  cbm_agent_cli_exists("warp-cli", home_dir);
+    agents.warp = agents.warp || cbm_agent_cli_exists("oz", home_dir, mode) ||
+                  cbm_agent_cli_exists("oz-preview", home_dir, mode) ||
+                  cbm_agent_cli_exists("warp-cli", home_dir, mode);
 
     cbm_qwen_home_dir(home_dir, path, sizeof(path));
-    agents.qwen = path[0] && (dir_exists(path) || cbm_agent_cli_exists("qwen", home_dir));
+    agents.qwen = path[0] && (dir_exists(path) || cbm_agent_cli_exists("qwen", home_dir, mode));
 
     cbm_copilot_config_dir(home_dir, path, sizeof(path));
     char copilot_mcp[CLI_BUF_1K];
@@ -2659,23 +2642,23 @@ cbm_detected_agents_t cbm_detect_agents(const char *home_dir) {
     /* VS Code uses ~/.copilot for shared skills, agents, and hooks. Those
      * durable files are not proof that the standalone Copilot CLI is present. */
     agents.copilot_cli = cbm_file_exists(copilot_mcp) || cbm_file_exists(copilot_instructions) ||
-                         cbm_agent_cli_exists("copilot", home_dir);
+                         cbm_agent_cli_exists("copilot", home_dir, mode);
 
     snprintf(path, sizeof(path), "%s/.factory", home_dir);
-    agents.factory_droid = dir_exists(path) || cbm_agent_cli_exists("droid", home_dir);
+    agents.factory_droid = dir_exists(path) || cbm_agent_cli_exists("droid", home_dir, mode);
 
     cbm_crush_config_path(home_dir, path, sizeof(path));
-    agents.crush = cbm_file_exists(path) || cbm_agent_cli_exists("crush", home_dir);
+    agents.crush = cbm_file_exists(path) || cbm_agent_cli_exists("crush", home_dir, mode);
     if (!agents.crush) {
         snprintf(path, sizeof(path), "%s/.config/crush", home_dir);
         agents.crush = dir_exists(path);
     }
 
     cbm_goose_config_dir(home_dir, path, sizeof(path));
-    agents.goose = dir_exists(path) || cbm_agent_cli_exists("goose", home_dir);
+    agents.goose = dir_exists(path) || cbm_agent_cli_exists("goose", home_dir, mode);
 
     cbm_vibe_config_dir(home_dir, path, sizeof(path));
-    agents.mistral_vibe = dir_exists(path) || cbm_agent_cli_exists("vibe", home_dir);
+    agents.mistral_vibe = dir_exists(path) || cbm_agent_cli_exists("vibe", home_dir, mode);
 
     return agents;
 }
@@ -5986,9 +5969,7 @@ static int cli_ensure_windows_user_path(const char *bin_dir, bool dry_run) {
  * *out_total receives the decompressed size. Caller must free the result. */
 static unsigned char *gzip_decompress(const unsigned char *data, int data_len, size_t *out_total) {
     z_stream strm = {0};
-    unsigned char *mutable_data;
-    memcpy(&mutable_data, &data, sizeof(data));
-    strm.next_in = mutable_data;
+    strm.next_in = data;
     strm.avail_in = (unsigned int)data_len;
 
     if (inflateInit2(&strm, 16 + MAX_WBITS) != Z_OK) {
@@ -6180,7 +6161,7 @@ static unsigned char *zip_extract_entry(const unsigned char *file_data, uint16_t
             return NULL;
         }
         z_stream strm = {0};
-        strm.next_in = (unsigned char *)file_data;
+        strm.next_in = file_data;
         strm.avail_in = (uInt)comp_size;
         strm.next_out = out;
         strm.avail_out = (uInt)uncomp_size;
@@ -6317,148 +6298,6 @@ int cbm_remove_indexes(const char *home_dir) {
     }
     cbm_closedir(d);
     return count;
-}
-
-/* ── Config store (persistent key-value in _config.db) ─────────── */
-
-#include <sqlite3.h>
-
-struct cbm_config {
-    sqlite3 *db;
-};
-
-cbm_config_t *cbm_config_open(const char *cache_dir) {
-    if (!cache_dir) {
-        return NULL;
-    }
-
-    char dbpath[CLI_BUF_1K];
-    snprintf(dbpath, sizeof(dbpath), "%s/_config.db", cache_dir);
-
-    /* Ensure directory exists */
-    mkdirp(cache_dir, DIR_PERMS);
-
-    sqlite3 *db = NULL;
-    if (sqlite3_open(dbpath, &db) != SQLITE_OK) {
-        if (db) {
-            sqlite3_close(db);
-        }
-        return NULL;
-    }
-
-    /* Create table if not exists */
-    const char *sql = "CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT)";
-    char *err_msg = NULL;
-    if (sqlite3_exec(db, sql, NULL, NULL, &err_msg) != SQLITE_OK) {
-        sqlite3_free(err_msg);
-        sqlite3_close(db);
-        return NULL;
-    }
-
-    cbm_config_t *cfg = calloc(CBM_ALLOC_ONE, sizeof(*cfg));
-    if (!cfg) {
-        sqlite3_close(db);
-        return NULL;
-    }
-    cfg->db = db;
-    return cfg;
-}
-
-void cbm_config_close(cbm_config_t *cfg) {
-    if (!cfg) {
-        return;
-    }
-    if (cfg->db) {
-        sqlite3_close(cfg->db);
-    }
-    free(cfg);
-}
-
-const char *cbm_config_get(cbm_config_t *cfg, const char *key, const char *default_val) {
-    static CBM_TLS char result_buf[CLI_BUF_4K];
-    if (!cfg || !key) {
-        return default_val;
-    }
-
-    sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(cfg->db, "SELECT value FROM config WHERE key = ?", SQL_NUL_TERM, &stmt,
-                           NULL) != SQLITE_OK) {
-        return default_val;
-    }
-    sqlite3_bind_text(stmt, SQL_PARAM_1, key, SQL_NUL_TERM, cbm_sqlite_transient);
-
-    const char *result = default_val;
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
-        const char *val = (const char *)sqlite3_column_text(stmt, 0);
-        if (val) {
-            snprintf(result_buf, sizeof(result_buf), "%s", val);
-            result = result_buf;
-        }
-    }
-    sqlite3_finalize(stmt);
-    return result;
-}
-
-bool cbm_config_get_bool(cbm_config_t *cfg, const char *key, bool default_val) {
-    const char *val = cbm_config_get(cfg, key, NULL);
-    if (!val) {
-        return default_val;
-    }
-    if (strcmp(val, "true") == 0 || strcmp(val, "1") == 0 || strcmp(val, "on") == 0) {
-        return true;
-    }
-    if (strcmp(val, "false") == 0 || strcmp(val, "0") == 0 || strcmp(val, "off") == 0) {
-        return false;
-    }
-    return default_val;
-}
-
-int cbm_config_get_int(cbm_config_t *cfg, const char *key, int default_val) {
-    const char *val = cbm_config_get(cfg, key, NULL);
-    if (!val) {
-        return default_val;
-    }
-    char *endptr;
-    long v = strtol(val, &endptr, CLI_STRTOL_BASE);
-    if (endptr == val || *endptr != '\0') {
-        return default_val;
-    }
-    return (int)v;
-}
-
-int cbm_config_set(cbm_config_t *cfg, const char *key, const char *value) {
-    if (!cfg || !key || !value) {
-        return CLI_ERR;
-    }
-
-    sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(cfg->db, "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
-                           SQL_NUL_TERM, &stmt, NULL) != SQLITE_OK) {
-        return CLI_ERR;
-    }
-    sqlite3_bind_text(stmt, SQL_PARAM_1, key, SQL_NUL_TERM, cbm_sqlite_transient);
-    sqlite3_bind_text(stmt, SQL_PARAM_2, value, SQL_NUL_TERM, cbm_sqlite_transient);
-
-    int rc = sqlite3_step(stmt) == SQLITE_DONE ? 0 : CLI_ERR;
-    sqlite3_finalize(stmt);
-    return rc;
-}
-
-int cbm_config_delete(cbm_config_t *cfg, const char *key) {
-    if (!cfg || !key) {
-        return CLI_ERR;
-    }
-
-    sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(cfg->db, "DELETE FROM config WHERE key = ?", SQL_NUL_TERM, &stmt,
-                           NULL) != SQLITE_OK) {
-        return CLI_ERR;
-    }
-    sqlite3_bind_text(stmt, SQL_PARAM_1, key, SQL_NUL_TERM, cbm_sqlite_transient);
-
-    int rc = sqlite3_step(stmt) == SQLITE_DONE ? 0 : CLI_ERR;
-    sqlite3_finalize(stmt);
-    return rc;
 }
 
 /* ── Config CLI subcommand ────────────────────────────────────── */
@@ -7645,13 +7484,15 @@ static bool cbm_agent_registry_path_exists(const char *path, const void *context
 
 static bool cbm_agent_registry_command_exists(const char *command, const void *context) {
     const cbm_agent_registry_context_t *registry = context;
-    return registry && cbm_agent_cli_exists(command, registry->options.home_dir);
+    return registry &&
+           cbm_agent_cli_exists(command, registry->options.home_dir, registry->options.scan_mode);
 }
 
-static void cbm_init_agent_registry_context(const char *home,
+static void cbm_init_agent_registry_context(const char *home, cbm_scan_mode_t mode,
                                             cbm_agent_registry_context_t *registry) {
     memset(registry, 0, sizeof(*registry));
     registry->options.home_dir = home;
+    registry->options.scan_mode = mode;
     registry->options.xdg_config_home = cbm_agent_registry_env_path(
         "XDG_CONFIG_HOME", home, registry->xdg_config_home, sizeof(registry->xdg_config_home));
     registry->options.appdata_dir = cbm_agent_registry_env_path(
@@ -7681,9 +7522,12 @@ static void cbm_init_agent_registry_context(const char *home,
     registry->options.probe_context = registry;
 }
 
+/* Only reached from print_detected_agents, which itself only runs when
+ * g_install_plan is NULL (an actual install/uninstall pass, never a plan
+ * build) — always a real-machine scan. */
 static void print_detected_registry_agents(const char *home, bool *any) {
     cbm_agent_registry_context_t registry;
-    cbm_init_agent_registry_context(home, &registry);
+    cbm_init_agent_registry_context(home, CBM_SCAN_REAL_HOME, &registry);
     for (size_t index = 0U; index < cbm_agent_client_count(); index++) {
         const cbm_agent_client_profile_t *profile = cbm_agent_client_at(index);
         if (profile && cbm_agent_client_detect(profile->id, &registry.options)) {
@@ -8037,9 +7881,10 @@ static void install_pochi_durable_context(const char *home, bool force, bool dry
 }
 
 static void install_agent_client_registry(const char *home, const char *binary_path,
-                                          bool inherit_claude_session, bool force, bool dry_run) {
+                                          bool inherit_claude_session, bool force, bool dry_run,
+                                          cbm_scan_mode_t mode) {
     cbm_agent_registry_context_t registry;
-    cbm_init_agent_registry_context(home, &registry);
+    cbm_init_agent_registry_context(home, mode, &registry);
     for (size_t index = 0U; index < cbm_agent_client_count(); index++) {
         const cbm_agent_client_profile_t *profile = cbm_agent_client_at(index);
         if (!profile || !cbm_agent_client_detect(profile->id, &registry.options)) {
@@ -8879,7 +8724,12 @@ static void install_additional_agent_configs(const cbm_detected_agents_t *agents
 
 int cbm_install_agent_configs(const char *home, const char *binary_path, bool force, bool dry_run) {
     g_agent_install_errors = 0;
-    cbm_detected_agents_t agents = cbm_detect_agents(home);
+    /* g_install_plan != NULL means this pass is building the record-only
+     * agent.install.plan.v1 receipt (see cbm_build_install_plan_json_options)
+     * rather than touching a real machine: confine detection to PATH and
+     * home-local bin dirs so the plan never reflects host-only state. */
+    cbm_scan_mode_t mode = g_install_plan ? CBM_SCAN_SYNTHETIC : CBM_SCAN_REAL_HOME;
+    cbm_detected_agents_t agents = cbm_detect_agents(home, mode);
     if (!g_install_plan) {
         print_detected_agents(&agents, home);
     }
@@ -8892,7 +8742,7 @@ int cbm_install_agent_configs(const char *home, const char *binary_path, bool fo
     install_additional_agent_configs(&agents, home, binary_path, force, dry_run);
     bool inherit_claude_session =
         agents.claude_code && !dry_run && cbm_has_complete_claude_session_hooks(home);
-    install_agent_client_registry(home, binary_path, inherit_claude_session, force, dry_run);
+    install_agent_client_registry(home, binary_path, inherit_claude_session, force, dry_run, mode);
     return g_agent_install_errors == 0 ? CLI_OK : CLI_ERR;
 }
 
@@ -9057,7 +8907,10 @@ static char *cbm_build_install_plan_json_options(const char *home, const char *b
         g_install_plan = NULL;
     }
 
-    cbm_detected_agents_t det = cbm_detect_agents(home);
+    /* The receipt describes a hypothetical install; it must never reflect
+     * this host's global install locations, or a plan built on one machine
+     * would misrepresent another. */
+    cbm_detected_agents_t det = cbm_detect_agents(home, CBM_SCAN_SYNTHETIC);
     struct {
         bool flag;
         const char *name;
@@ -9101,7 +8954,7 @@ static char *cbm_build_install_plan_json_options(const char *home, const char *b
         }
     }
     cbm_agent_registry_context_t registry;
-    cbm_init_agent_registry_context(home, &registry);
+    cbm_init_agent_registry_context(home, CBM_SCAN_SYNTHETIC, &registry);
     for (size_t index = 0U; index < cbm_agent_client_count(); index++) {
         const cbm_agent_client_profile_t *profile = cbm_agent_client_at(index);
         if (profile && cbm_agent_client_detect(profile->id, &registry.options)) {
@@ -10048,7 +9901,9 @@ static void uninstall_pochi_durable_context(const char *home, bool dry_run) {
 
 static void uninstall_agent_client_registry(const char *home, bool dry_run) {
     cbm_agent_registry_context_t registry;
-    cbm_init_agent_registry_context(home, &registry);
+    /* Reached only from cbm_cmd_uninstall, which resolves home via
+     * cbm_get_home_dir() — always a real-machine scan. */
+    cbm_init_agent_registry_context(home, CBM_SCAN_REAL_HOME, &registry);
     char binary_path[CLI_BUF_1K];
     cbm_agent_installed_binary_path(home, binary_path, sizeof(binary_path));
     for (size_t index = 0U; index < cbm_agent_client_count(); index++) {
@@ -10845,7 +10700,7 @@ int cbm_cmd_uninstall(int argc, char **argv) {
     printf("codebase-memory-mcp uninstall\n\n");
 
     g_agent_uninstall_errors = 0;
-    cbm_detected_agents_t agents = cbm_detect_agents(home);
+    cbm_detected_agents_t agents = cbm_detect_agents(home, CBM_SCAN_REAL_HOME);
 
     /* Confirm index removal outside the startup lock, but defer the mutation
      * until the final guarded activation. Dry-run never removes indexes. */
@@ -11142,7 +10997,7 @@ static int extract_and_install_binary(extract_install_args_t args) {
  * download, no extract-and-exec. Retained for the C suite, which still
  * covers the flow through the activation test seam. */
 /* Build the download URL for the update command. */
-static void build_update_url(char *url, int url_sz, const char *os, const char *arch,
+static void build_update_url(char *url, size_t url_sz, const char *os, const char *arch,
                              const char *ext, bool want_ui) {
     char base_url_buf[CLI_BUF_512];
     const char *base_url =

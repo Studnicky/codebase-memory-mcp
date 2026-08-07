@@ -27,6 +27,7 @@
  * the gap is dominated by ctor-synthetic 0.50 markers and BCL long tail).
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "cbm.h"
 #include "lsp/cs_lsp.h"
 #include <stdlib.h>
@@ -205,7 +206,7 @@ TEST(cslsp_bench_resolution_ratio) {
     int resolved = r->resolved_calls.count;
     int high_conf = 0;
     for (int i = 0; i < r->resolved_calls.count; i++) {
-        if (r->resolved_calls.items[i].confidence >= 0.90f) high_conf++;
+        if (r->resolved_calls.items[i].confidence >= 0.90) high_conf++;
     }
     int loc = 0;
     for (const char *p = bench_source; *p; p++) {

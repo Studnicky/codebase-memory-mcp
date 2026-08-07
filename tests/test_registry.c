@@ -5,6 +5,7 @@
  * resolution strategies, and qualified name computation.
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "pipeline/pipeline.h"
 
 #include <stdlib.h>
@@ -218,7 +219,7 @@ TEST(registry_find_by_name) {
     cbm_registry_add(r, "main", "proj.srv.main", "Function");
     cbm_registry_add(r, "helper", "proj.util.helper", "Function");
 
-    const char **out = NULL;
+    char *const *out = NULL;
     int count = 0;
     cbm_registry_find_by_name(r, "main", &out, &count);
     ASSERT_EQ(count, 2);
@@ -239,7 +240,7 @@ TEST(registry_no_duplicates) {
     cbm_registry_add(r, "main", "proj.cmd.main", "Function"); /* duplicate */
     ASSERT_EQ(cbm_registry_size(r), 1);
 
-    const char **out = NULL;
+    char *const *out = NULL;
     int count = 0;
     cbm_registry_find_by_name(r, "main", &out, &count);
     ASSERT_EQ(count, 1); /* no duplicate in byName list */

@@ -2,6 +2,7 @@
  * test_dyn_array.c — RED phase tests for foundation/dyn_array.
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "../src/foundation/dyn_array.h"
 #include <stdint.h>
 

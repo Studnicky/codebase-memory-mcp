@@ -25,6 +25,7 @@
  */
 
 #include "test_framework.h"
+#include "suites.h"
 
 #include "arena.h"
 #include "cbm.h"

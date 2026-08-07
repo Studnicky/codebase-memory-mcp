@@ -23,6 +23,7 @@
  */
 
 #include "test_framework.h"
+#include "suites.h"
 #include "cbm.h"
 #include "lsp/java_lsp.h"
 
@@ -44,7 +45,7 @@ static CBMFileResult *extract_java_at(const char *source, const char *rel_path) 
 static int find_resolved(const CBMFileResult *r, const char *callerSub, const char *calleeSub) {
     for (int i = 0; i < r->resolved_calls.count; i++) {
         const CBMResolvedCall *rc = &r->resolved_calls.items[i];
-        if (rc->confidence < 0.5f) continue;
+        if (rc->confidence < 0.5) continue;
         if (rc->caller_qn && strstr(rc->caller_qn, callerSub) && rc->callee_qn &&
             strstr(rc->callee_qn, calleeSub)) {
             return i;
@@ -71,7 +72,7 @@ static int require_resolved(const CBMFileResult *r, const char *callerSub, const
 static int count_resolved(const CBMFileResult *r) {
     int n = 0;
     for (int i = 0; i < r->resolved_calls.count; i++) {
-        if (r->resolved_calls.items[i].confidence >= 0.5f) n++;
+        if (r->resolved_calls.items[i].confidence >= 0.5) n++;
     }
     return n;
 }
@@ -1136,7 +1137,7 @@ TEST(jlsp_unknown_variable_unresolved) {
      * least one entry exists. */
     int diag = 0;
     for (int i = 0; i < r->resolved_calls.count; i++) {
-        if (r->resolved_calls.items[i].confidence == 0.0f) diag++;
+        if (r->resolved_calls.items[i].confidence == 0.0) diag++;
     }
     ASSERT_GTE(diag, 1);
     cbm_free_result(r);
@@ -1225,7 +1226,7 @@ TEST(jlsp_cross_file_basic) {
 
     int found = 0;
     for (int i = 0; i < out.count; i++) {
-        if (out.items[i].confidence < 0.5f) continue;
+        if (out.items[i].confidence < 0.5) continue;
         if (out.items[i].callee_qn && strstr(out.items[i].callee_qn, "Greeter.greet")) {
             found = 1;
             break;
@@ -1334,7 +1335,7 @@ TEST(jlsp_stringbuilder_append_chain) {
     int appends = 0;
     for (int i = 0; i < r->resolved_calls.count; i++) {
         const CBMResolvedCall *rc = &r->resolved_calls.items[i];
-        if (rc->confidence >= 0.5f && rc->callee_qn && strstr(rc->callee_qn, "StringBuilder.append")) {
+        if (rc->confidence >= 0.5 && rc->callee_qn && strstr(rc->callee_qn, "StringBuilder.append")) {
             appends++;
         }
     }
@@ -1394,7 +1395,7 @@ TEST(jlsp_deeply_nested_block) {
     int length_calls = 0;
     for (int i = 0; i < r->resolved_calls.count; i++) {
         const CBMResolvedCall *rc = &r->resolved_calls.items[i];
-        if (rc->confidence >= 0.5f && rc->callee_qn && strstr(rc->callee_qn, "String.length")) {
+        if (rc->confidence >= 0.5 && rc->callee_qn && strstr(rc->callee_qn, "String.length")) {
             length_calls++;
         }
     }
@@ -1793,7 +1794,7 @@ TEST(jlsp_real_corpus_parity_90_percent) {
     /* `count_resolved` returns confidence ≥ 0.5 entries — tighten to 0.85+ */
     int strict = 0;
     for (int i = 0; i < r->resolved_calls.count; i++) {
-        if (r->resolved_calls.items[i].confidence >= 0.85f) strict++;
+        if (r->resolved_calls.items[i].confidence >= 0.85) strict++;
     }
     printf("\n  [parity] tree-sitter calls=%d, resolved≥0.5=%d, resolved≥0.85=%d\n",
            total_calls, resolved_high, strict);

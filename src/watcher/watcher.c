@@ -140,7 +140,10 @@ static int64_t now_ns(void) {
 /* ── Adaptive interval ──────────────────────────────────────────── */
 
 int cbm_watcher_poll_interval_ms(int file_count) {
-    int ms = POLL_BASE_MS + ((file_count / POLL_FILE_STEP) * CBM_MSEC_PER_SEC);
+    /* Negative counts don't occur in practice, but the guard makes the
+     * unsigned cast below provably safe rather than merely assumed. */
+    size_t count = file_count > 0 ? (size_t)file_count : 0;
+    int ms = POLL_BASE_MS + (int)((count / POLL_FILE_STEP) * CBM_MSEC_PER_SEC);
     if (ms > POLL_MAX_MS) {
         ms = POLL_MAX_MS;
     }
@@ -1330,8 +1333,8 @@ static void poll_project(const char *key, void *val, void *ud) {
 /* Callback to snapshot project state pointers into an array. */
 typedef struct {
     project_state_t **items;
-    int count;
-    int cap;
+    size_t count;
+    size_t cap;
 } snapshot_ctx_t;
 
 static void snapshot_project(const char *key, void *val, void *ud) {
@@ -1358,7 +1361,7 @@ int cbm_watcher_poll_once(cbm_watcher_t *w) {
     }
     w->pending_free_count = 0;
 
-    int n = cbm_ht_count(w->projects);
+    size_t n = cbm_ht_count(w->projects);
     if (n == 0) {
         cbm_mutex_unlock(&w->projects_lock);
         return 0;
@@ -1377,7 +1380,7 @@ int cbm_watcher_poll_once(cbm_watcher_t *w) {
         .now = now_ns(),
         .reindexed = 0,
     };
-    for (int i = 0; i < sc.count; i++) {
+    for (size_t i = 0; i < sc.count; i++) {
         poll_project(NULL, snap[i], &ctx);
     }
     free(snap);

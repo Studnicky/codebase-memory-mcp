@@ -122,8 +122,8 @@ cbm_compile_flags_t *cbm_extract_flags(const char **args, int argc, const char *
     if (!f) {
         return NULL;
     }
-    f->include_paths = calloc(argc, sizeof(char *));
-    f->defines = calloc(argc, sizeof(char *));
+    f->include_paths = calloc((size_t)argc, sizeof(char *));
+    f->defines = calloc((size_t)argc, sizeof(char *));
 
     for (int i = 0; i < argc; i++) {
         if (try_include_flag(f, args, argc, &i, directory)) {
@@ -260,8 +260,8 @@ int cbm_parse_compile_commands(const char *json_data, const char *repo_path, cha
         return 0;
     }
 
-    char **paths = calloc(arr_len, sizeof(char *));
-    cbm_compile_flags_t **flags = calloc(arr_len, sizeof(cbm_compile_flags_t *));
+    char **paths = calloc((size_t)arr_len, sizeof(char *));
+    cbm_compile_flags_t **flags = calloc((size_t)arr_len, sizeof(cbm_compile_flags_t *));
     int count = 0;
 
     yyjson_val *entry;

@@ -16,10 +16,10 @@
  */
 #include "cbm.h"
 #include "store/store.h" // cbm_alloc_init — bind 3rd-party allocators to mimalloc before any sqlite/git init
-#include "daemon/application.h"
+#include "host/application.h"
 #include "daemon/bootstrap.h"
-#include "daemon/frontend.h"
-#include "daemon/host.h"
+#include "host/frontend.h"
+#include "host/host.h"
 #include "daemon/ipc.h"
 #include "daemon/project_lock.h"
 #include "daemon/version_cohort.h"
@@ -27,6 +27,7 @@
 #include "mcp/index_supervisor.h"
 #include "cli/cli.h"
 #include "cli/progress_sink.h"
+#include "foundation/build_version.h"
 #include "foundation/constants.h"
 
 enum {
@@ -1050,7 +1051,7 @@ static char **cbm_win_utf8_argv(int *out_argc) {
 
 static bool main_resolve_executable(const char *argv0, char out[MAIN_PATH_CAP]) {
     char resolved[MAIN_PATH_CAP];
-    return cbm_http_server_resolve_binary_path(argv0, resolved, sizeof(resolved)) &&
+    return cbm_resolve_executable_path(argv0, resolved, sizeof(resolved)) &&
            cbm_canonical_path(resolved, out, MAIN_PATH_CAP);
 }
 
@@ -1358,10 +1359,9 @@ static char *main_local_cli_daemon_execute(const char *tool_name, const char *ar
     cbm_daemon_ipc_endpoint_t *endpoint = cbm_daemon_bootstrap_endpoint_new(NULL);
     char executable_path[MAIN_PATH_CAP] = {0};
     cbm_daemon_build_identity_t identity;
-    bool prepared =
-        endpoint &&
-        cbm_http_server_resolve_binary_path(NULL, executable_path, sizeof(executable_path)) &&
-        main_build_identity(&identity) == MAIN_BUILD_IDENTITY_OK;
+    bool prepared = endpoint &&
+                    cbm_resolve_executable_path(NULL, executable_path, sizeof(executable_path)) &&
+                    main_build_identity(&identity) == MAIN_BUILD_IDENTITY_OK;
     if (!prepared) {
         (void)fprintf(stderr, "error: daemon-backed CLI coordination could not be prepared\n");
         cbm_daemon_ipc_endpoint_free(endpoint);
@@ -1807,7 +1807,7 @@ int main(int argc, char **argv) {
     }
 #endif
 
-    cbm_cli_set_version(CBM_VERSION);
+    cbm_build_version_set(CBM_VERSION);
     cbm_profile_init();
     cbm_log_init_from_env();
 

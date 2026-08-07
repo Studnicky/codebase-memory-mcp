@@ -63,6 +63,7 @@
  */
 
 #include "test_framework.h"
+#include "suites.h"
 #include <cypher/cypher.h>
 #include <store/store.h>
 #include <string.h>

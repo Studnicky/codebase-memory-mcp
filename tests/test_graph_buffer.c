@@ -5,8 +5,10 @@
  * lookup, dedup, delete, and dump to SQLite.
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "graph_buffer/graph_buffer.h"
 #include "store/store.h"
+#include "foundation/constants.h"
 #include <string.h>
 
 /* ── Node operations ───────────────────────────────────────────── */
@@ -27,7 +29,8 @@ TEST(gbuf_free_null) {
 
 TEST(gbuf_upsert_node) {
     cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
-    int64_t id = cbm_gbuf_upsert_node(gb, "Function", "main", "pkg.main", "main.go", 1, 10, "{}");
+    int64_t id = cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "Function", "main", "pkg.main", "main.go", 1, 10, "{}"));
     ASSERT_GT(id, 0);
     ASSERT_EQ(cbm_gbuf_node_count(gb), 1);
 
@@ -39,7 +42,7 @@ TEST(gbuf_upsert_node) {
     ASSERT_STR_EQ(n->file_path, "main.go");
     ASSERT_EQ(n->start_line, 1);
     ASSERT_EQ(n->end_line, 10);
-    ASSERT_EQ(n->id, id);
+    ASSERT_EQ(n->id.v, id);
 
     cbm_gbuf_free(gb);
     PASS();
@@ -47,10 +50,11 @@ TEST(gbuf_upsert_node) {
 
 TEST(gbuf_upsert_updates) {
     cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
-    int64_t id1 = cbm_gbuf_upsert_node(gb, "Function", "main", "pkg.main", "main.go", 1, 10, "{}");
+    int64_t id1 = cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "Function", "main", "pkg.main", "main.go", 1, 10, "{}"));
     /* Upsert same QN with different fields */
-    int64_t id2 = cbm_gbuf_upsert_node(gb, "Method", "main", "pkg.main", "main.go", 5, 20,
-                                       "{\"key\":\"val\"}");
+    int64_t id2 = cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Method", "main", "pkg.main",
+                                                         "main.go", 5, 20, "{\"key\":\"val\"}"));
     ASSERT_EQ(id1, id2);                   /* same temp ID */
     ASSERT_EQ(cbm_gbuf_node_count(gb), 1); /* still one node */
 
@@ -65,14 +69,15 @@ TEST(gbuf_upsert_updates) {
 
 TEST(gbuf_find_by_id) {
     cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
-    int64_t id = cbm_gbuf_upsert_node(gb, "Function", "foo", "pkg.foo", "foo.go", 1, 5, "{}");
+    int64_t id = cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "Function", "foo", "pkg.foo", "foo.go", 1, 5, "{}"));
 
-    const cbm_gbuf_node_t *n = cbm_gbuf_find_by_id(gb, id);
+    const cbm_gbuf_node_t *n = cbm_gbuf_find_by_id(gb, cbm_node_id(id));
     ASSERT_NOT_NULL(n);
     ASSERT_STR_EQ(n->name, "foo");
 
     /* Not found */
-    ASSERT_NULL(cbm_gbuf_find_by_id(gb, 999));
+    ASSERT_NULL(cbm_gbuf_find_by_id(gb, cbm_node_id(999)));
 
     cbm_gbuf_free(gb);
     PASS();
@@ -80,9 +85,9 @@ TEST(gbuf_find_by_id) {
 
 TEST(gbuf_find_by_label) {
     cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
-    cbm_gbuf_upsert_node(gb, "Function", "foo", "pkg.foo", "f.go", 1, 5, "{}");
-    cbm_gbuf_upsert_node(gb, "Function", "bar", "pkg.bar", "f.go", 6, 10, "{}");
-    cbm_gbuf_upsert_node(gb, "Class", "Baz", "pkg.Baz", "f.go", 11, 20, "{}");
+    cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "foo", "pkg.foo", "f.go", 1, 5, "{}"));
+    cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "bar", "pkg.bar", "f.go", 6, 10, "{}"));
+    cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Class", "Baz", "pkg.Baz", "f.go", 11, 20, "{}"));
 
     const cbm_gbuf_node_t **nodes = NULL;
     int count = 0;
@@ -104,8 +109,8 @@ TEST(gbuf_find_by_label) {
 
 TEST(gbuf_find_by_name) {
     cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
-    cbm_gbuf_upsert_node(gb, "Function", "main", "a.main", "a.go", 1, 5, "{}");
-    cbm_gbuf_upsert_node(gb, "Function", "main", "b.main", "b.go", 1, 5, "{}");
+    cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "main", "a.main", "a.go", 1, 5, "{}"));
+    cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "main", "b.main", "b.go", 1, 5, "{}"));
 
     const cbm_gbuf_node_t **nodes = NULL;
     int count = 0;
@@ -119,12 +124,16 @@ TEST(gbuf_find_by_name) {
 
 TEST(gbuf_delete_by_label) {
     cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
-    int64_t f1 = cbm_gbuf_upsert_node(gb, "Function", "foo", "pkg.foo", "f.go", 1, 5, "{}");
-    int64_t f2 = cbm_gbuf_upsert_node(gb, "Function", "bar", "pkg.bar", "f.go", 6, 10, "{}");
-    cbm_gbuf_upsert_node(gb, "Class", "Baz", "pkg.Baz", "f.go", 11, 20, "{}");
+    int64_t f1 = cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "Function", "foo", "pkg.foo", "f.go", 1, 5, "{}"));
+    int64_t f2 = cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "Function", "bar", "pkg.bar", "f.go", 6, 10, "{}"));
+    cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Class", "Baz", "pkg.Baz", "f.go", 11, 20, "{}"));
 
     /* Add edge between functions */
-    cbm_gbuf_insert_edge(gb, f1, f2, "CALLS", "{}");
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(f1), .target = cbm_node_id(f2)}, "CALLS",
+        "{}"));
     ASSERT_EQ(cbm_gbuf_edge_count(gb), 1);
 
     /* Delete all functions — should cascade-delete the CALLS edge */
@@ -144,10 +153,14 @@ TEST(gbuf_delete_by_label) {
 
 TEST(gbuf_insert_edge) {
     cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
-    int64_t n1 = cbm_gbuf_upsert_node(gb, "Function", "a", "pkg.a", "f.go", 1, 5, "{}");
-    int64_t n2 = cbm_gbuf_upsert_node(gb, "Function", "b", "pkg.b", "f.go", 6, 10, "{}");
+    int64_t n1 =
+        cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "a", "pkg.a", "f.go", 1, 5, "{}"));
+    int64_t n2 =
+        cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "b", "pkg.b", "f.go", 6, 10, "{}"));
 
-    int64_t eid = cbm_gbuf_insert_edge(gb, n1, n2, "CALLS", "{}");
+    int64_t eid = cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(n1), .target = cbm_node_id(n2)}, "CALLS",
+        "{}"));
     ASSERT_GT(eid, 0);
     ASSERT_EQ(cbm_gbuf_edge_count(gb), 1);
 
@@ -157,18 +170,138 @@ TEST(gbuf_insert_edge) {
 
 TEST(gbuf_edge_dedup) {
     cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
-    int64_t n1 = cbm_gbuf_upsert_node(gb, "Function", "a", "pkg.a", "f.go", 1, 5, "{}");
-    int64_t n2 = cbm_gbuf_upsert_node(gb, "Function", "b", "pkg.b", "f.go", 6, 10, "{}");
+    int64_t n1 =
+        cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "a", "pkg.a", "f.go", 1, 5, "{}"));
+    int64_t n2 =
+        cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "b", "pkg.b", "f.go", 6, 10, "{}"));
 
-    int64_t eid1 = cbm_gbuf_insert_edge(gb, n1, n2, "CALLS", "{}");
-    int64_t eid2 = cbm_gbuf_insert_edge(gb, n1, n2, "CALLS", "{\"weight\":5}");
+    int64_t eid1 = cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(n1), .target = cbm_node_id(n2)}, "CALLS",
+        "{}"));
+    int64_t eid2 = cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(n1), .target = cbm_node_id(n2)}, "CALLS",
+        "{\"weight\":5}"));
     ASSERT_EQ(eid1, eid2); /* same edge, deduped */
     ASSERT_EQ(cbm_gbuf_edge_count(gb), 1);
 
     /* Different type = different edge */
-    int64_t eid3 = cbm_gbuf_insert_edge(gb, n1, n2, "IMPORTS", "{}");
+    int64_t eid3 = cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(n1), .target = cbm_node_id(n2)}, "IMPORTS",
+        "{}"));
     ASSERT_NEQ(eid1, eid3);
     ASSERT_EQ(cbm_gbuf_edge_count(gb), 2);
+
+    cbm_gbuf_free(gb);
+    PASS();
+}
+
+/* Properties on a deduped edge must not depend on arrival order.
+ *
+ * confidence/strategy/via are not part of the edge key, and the same logical
+ * CALLS edge is legitimately minted by two strategies (LSP resolution and
+ * registry-textual matching) carrying different values. Per-worker edge buffers
+ * merge in worker-slot order, so an arrival-order-dependent merge makes the
+ * stored attributes a function of thread scheduling. Insert the same pair of
+ * blobs in both orders; the stored properties must match. */
+TEST(gbuf_edge_props_merge_is_order_independent) {
+    const char *lsp = "{\"callee\":\"f\",\"confidence\":0.95,\"strategy\":\"lsp\"}";
+    const char *txt = "{\"callee\":\"f\",\"confidence\":0.40,\"strategy\":\"registry\"}";
+
+    cbm_gbuf_t *fwd = cbm_gbuf_new("test", "/tmp");
+    int64_t a1 =
+        cbm_node_id_value(cbm_gbuf_upsert_node(fwd, "Function", "a", "pkg.a", "f.go", 1, 5, "{}"));
+    int64_t b1 =
+        cbm_node_id_value(cbm_gbuf_upsert_node(fwd, "Function", "b", "pkg.b", "f.go", 6, 10, "{}"));
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        fwd, (cbm_edge_endpoints_t){.source = cbm_node_id(a1), .target = cbm_node_id(b1)}, "CALLS",
+        lsp));
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        fwd, (cbm_edge_endpoints_t){.source = cbm_node_id(a1), .target = cbm_node_id(b1)}, "CALLS",
+        txt));
+
+    cbm_gbuf_t *rev = cbm_gbuf_new("test", "/tmp");
+    int64_t a2 =
+        cbm_node_id_value(cbm_gbuf_upsert_node(rev, "Function", "a", "pkg.a", "f.go", 1, 5, "{}"));
+    int64_t b2 =
+        cbm_node_id_value(cbm_gbuf_upsert_node(rev, "Function", "b", "pkg.b", "f.go", 6, 10, "{}"));
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        rev, (cbm_edge_endpoints_t){.source = cbm_node_id(a2), .target = cbm_node_id(b2)}, "CALLS",
+        txt));
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        rev, (cbm_edge_endpoints_t){.source = cbm_node_id(a2), .target = cbm_node_id(b2)}, "CALLS",
+        lsp));
+
+    const cbm_gbuf_edge_t **fe = NULL;
+    const cbm_gbuf_edge_t **re = NULL;
+    int fc = 0;
+    int rc = 0;
+    cbm_gbuf_find_edges_by_type(fwd, "CALLS", &fe, &fc);
+    cbm_gbuf_find_edges_by_type(rev, "CALLS", &re, &rc);
+    ASSERT_EQ(fc, 1);
+    ASSERT_EQ(rc, 1);
+    char fwd_props[CBM_SZ_256];
+    char rev_props[CBM_SZ_256];
+    cbm_gbuf_edge_props_json(fe[0], fwd_props, sizeof(fwd_props));
+    cbm_gbuf_edge_props_json(re[0], rev_props, sizeof(rev_props));
+    ASSERT_STR_EQ(fwd_props, rev_props);
+
+    cbm_gbuf_free(fwd);
+    cbm_gbuf_free(rev);
+    PASS();
+}
+
+/* The order-independent winner is also the semantically right one: a
+ * higher-confidence discovery outranks a lower-confidence one regardless of
+ * which arrived first. */
+TEST(gbuf_edge_props_merge_prefers_higher_confidence) {
+    const char *lsp = "{\"callee\":\"f\",\"confidence\":0.95,\"strategy\":\"lsp\"}";
+    const char *txt = "{\"callee\":\"f\",\"confidence\":0.40,\"strategy\":\"registry\"}";
+
+    cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
+    int64_t a =
+        cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "a", "pkg.a", "f.go", 1, 5, "{}"));
+    int64_t b =
+        cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "b", "pkg.b", "f.go", 6, 10, "{}"));
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(a), .target = cbm_node_id(b)}, "CALLS",
+        lsp));
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(a), .target = cbm_node_id(b)}, "CALLS",
+        txt)); /* lower confidence, arrives last */
+
+    const cbm_gbuf_edge_t **edges = NULL;
+    int count = 0;
+    cbm_gbuf_find_edges_by_type(gb, "CALLS", &edges, &count);
+    ASSERT_EQ(count, 1);
+    const char *strategy = cbm_gbuf_edge_prop_string(edges[0], "strategy");
+    ASSERT_TRUE(strategy && strcmp(strategy, "lsp") == 0);
+
+    cbm_gbuf_free(gb);
+    PASS();
+}
+
+/* An empty incoming blob must never displace real stored properties. */
+TEST(gbuf_edge_props_merge_keeps_existing_on_empty) {
+    const char *lsp = "{\"callee\":\"f\",\"confidence\":0.95,\"strategy\":\"lsp\"}";
+
+    cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
+    int64_t a =
+        cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "a", "pkg.a", "f.go", 1, 5, "{}"));
+    int64_t b =
+        cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "b", "pkg.b", "f.go", 6, 10, "{}"));
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(a), .target = cbm_node_id(b)}, "CALLS",
+        lsp));
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(a), .target = cbm_node_id(b)}, "CALLS",
+        "{}"));
+
+    const cbm_gbuf_edge_t **edges = NULL;
+    int count = 0;
+    cbm_gbuf_find_edges_by_type(gb, "CALLS", &edges, &count);
+    ASSERT_EQ(count, 1);
+    const char *strategy = cbm_gbuf_edge_prop_string(edges[0], "strategy");
+    ASSERT_TRUE(strategy && strcmp(strategy, "lsp") == 0);
 
     cbm_gbuf_free(gb);
     PASS();
@@ -181,12 +314,17 @@ TEST(gbuf_edge_dedup) {
  * must still dedup to one edge. */
 TEST(gbuf_imports_multi_symbol_dedup) {
     cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
-    int64_t consumer =
-        cbm_gbuf_upsert_node(gb, "File", "consumer.ts", "pkg.consumer", "consumer.ts", 1, 1, "{}");
-    int64_t lib = cbm_gbuf_upsert_node(gb, "File", "lib.ts", "pkg.lib", "lib.ts", 1, 1, "{}");
+    int64_t consumer = cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "File", "consumer.ts", "pkg.consumer", "consumer.ts", 1, 1, "{}"));
+    int64_t lib = cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "File", "lib.ts", "pkg.lib", "lib.ts", 1, 1, "{}"));
 
-    int64_t eid_a = cbm_gbuf_insert_edge(gb, consumer, lib, "IMPORTS", "{\"local_name\":\"A\"}");
-    int64_t eid_b = cbm_gbuf_insert_edge(gb, consumer, lib, "IMPORTS", "{\"local_name\":\"B\"}");
+    int64_t eid_a = cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(consumer), .target = cbm_node_id(lib)},
+        "IMPORTS", "{\"local_name\":\"A\"}"));
+    int64_t eid_b = cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(consumer), .target = cbm_node_id(lib)},
+        "IMPORTS", "{\"local_name\":\"B\"}"));
     ASSERT_GT(eid_a, 0);
     ASSERT_GT(eid_b, 0);
     ASSERT_NEQ(eid_a, eid_b); /* distinct symbols -> distinct edges */
@@ -194,16 +332,21 @@ TEST(gbuf_imports_multi_symbol_dedup) {
 
     const cbm_gbuf_edge_t **edges = NULL;
     int count = 0;
-    cbm_gbuf_find_edges_by_source_type(gb, consumer, "IMPORTS", &edges, &count);
+    cbm_gbuf_find_edges_by_source_type(gb, cbm_node_id(consumer), "IMPORTS", &edges, &count);
     ASSERT_EQ(count, 2);
-    ASSERT_TRUE(strstr(edges[0]->properties_json, "\"local_name\":\"A\"") != NULL ||
-                strstr(edges[1]->properties_json, "\"local_name\":\"A\"") != NULL);
-    ASSERT_TRUE(strstr(edges[0]->properties_json, "\"local_name\":\"B\"") != NULL ||
-                strstr(edges[1]->properties_json, "\"local_name\":\"B\"") != NULL);
+    ASSERT_TRUE((cbm_gbuf_edge_prop_string(edges[0], "local_name") &&
+                 strcmp(cbm_gbuf_edge_prop_string(edges[0], "local_name"), "A") == 0) ||
+                (cbm_gbuf_edge_prop_string(edges[1], "local_name") &&
+                 strcmp(cbm_gbuf_edge_prop_string(edges[1], "local_name"), "A") == 0));
+    ASSERT_TRUE((cbm_gbuf_edge_prop_string(edges[0], "local_name") &&
+                 strcmp(cbm_gbuf_edge_prop_string(edges[0], "local_name"), "B") == 0) ||
+                (cbm_gbuf_edge_prop_string(edges[1], "local_name") &&
+                 strcmp(cbm_gbuf_edge_prop_string(edges[1], "local_name"), "B") == 0));
 
     /* Re-inserting the same symbol (idempotent re-index) still dedups. */
-    int64_t eid_a_again =
-        cbm_gbuf_insert_edge(gb, consumer, lib, "IMPORTS", "{\"local_name\":\"A\"}");
+    int64_t eid_a_again = cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(consumer), .target = cbm_node_id(lib)},
+        "IMPORTS", "{\"local_name\":\"A\"}"));
     ASSERT_EQ(eid_a_again, eid_a);
     ASSERT_EQ(cbm_gbuf_edge_count(gb), 2);
 
@@ -218,9 +361,10 @@ TEST(gbuf_imports_multi_symbol_dedup) {
  * name still dedups to the same edge. */
 TEST(gbuf_imports_long_local_name_no_collision) {
     cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
-    int64_t consumer =
-        cbm_gbuf_upsert_node(gb, "File", "consumer.ts", "pkg.consumer", "consumer.ts", 1, 1, "{}");
-    int64_t lib = cbm_gbuf_upsert_node(gb, "File", "lib.ts", "pkg.lib", "lib.ts", 1, 1, "{}");
+    int64_t consumer = cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "File", "consumer.ts", "pkg.consumer", "consumer.ts", 1, 1, "{}"));
+    int64_t lib = cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "File", "lib.ts", "pkg.lib", "lib.ts", 1, 1, "{}"));
 
     /* 300-char shared prefix, distinct 4-char tails — a truncated verbatim
      * key keeps only the shared prefix and would merge the two edges. */
@@ -237,15 +381,21 @@ TEST(gbuf_imports_long_local_name_no_collision) {
     snprintf(props_a, sizeof(props_a), "{\"local_name\":\"%s\"}", name_a);
     snprintf(props_b, sizeof(props_b), "{\"local_name\":\"%s\"}", name_b);
 
-    int64_t eid_a = cbm_gbuf_insert_edge(gb, consumer, lib, "IMPORTS", props_a);
-    int64_t eid_b = cbm_gbuf_insert_edge(gb, consumer, lib, "IMPORTS", props_b);
+    int64_t eid_a = cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(consumer), .target = cbm_node_id(lib)},
+        "IMPORTS", props_a));
+    int64_t eid_b = cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(consumer), .target = cbm_node_id(lib)},
+        "IMPORTS", props_b));
     ASSERT_GT(eid_a, 0);
     ASSERT_GT(eid_b, 0);
     ASSERT_NEQ(eid_a, eid_b); /* prefix-sharing long names stay distinct */
     ASSERT_EQ(cbm_gbuf_edge_count(gb), 2);
 
     /* Hash re-keying is deterministic: same long name dedups. */
-    int64_t eid_a_again = cbm_gbuf_insert_edge(gb, consumer, lib, "IMPORTS", props_a);
+    int64_t eid_a_again = cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(consumer), .target = cbm_node_id(lib)},
+        "IMPORTS", props_a));
     ASSERT_EQ(eid_a_again, eid_a);
     ASSERT_EQ(cbm_gbuf_edge_count(gb), 2);
 
@@ -255,23 +405,32 @@ TEST(gbuf_imports_long_local_name_no_collision) {
 
 TEST(gbuf_find_edges_by_source_type) {
     cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
-    int64_t a = cbm_gbuf_upsert_node(gb, "Function", "a", "pkg.a", "f.go", 1, 5, "{}");
-    int64_t b = cbm_gbuf_upsert_node(gb, "Function", "b", "pkg.b", "f.go", 6, 10, "{}");
-    int64_t c = cbm_gbuf_upsert_node(gb, "Function", "c", "pkg.c", "f.go", 11, 15, "{}");
+    int64_t a =
+        cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "a", "pkg.a", "f.go", 1, 5, "{}"));
+    int64_t b =
+        cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "b", "pkg.b", "f.go", 6, 10, "{}"));
+    int64_t c =
+        cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "c", "pkg.c", "f.go", 11, 15, "{}"));
 
-    cbm_gbuf_insert_edge(gb, a, b, "CALLS", "{}");
-    cbm_gbuf_insert_edge(gb, a, c, "CALLS", "{}");
-    cbm_gbuf_insert_edge(gb, a, b, "IMPORTS", "{}");
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(a), .target = cbm_node_id(b)}, "CALLS",
+        "{}"));
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(a), .target = cbm_node_id(c)}, "CALLS",
+        "{}"));
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(a), .target = cbm_node_id(b)}, "IMPORTS",
+        "{}"));
 
     const cbm_gbuf_edge_t **edges = NULL;
     int count = 0;
-    cbm_gbuf_find_edges_by_source_type(gb, a, "CALLS", &edges, &count);
+    cbm_gbuf_find_edges_by_source_type(gb, cbm_node_id(a), "CALLS", &edges, &count);
     ASSERT_EQ(count, 2);
 
-    cbm_gbuf_find_edges_by_source_type(gb, a, "IMPORTS", &edges, &count);
+    cbm_gbuf_find_edges_by_source_type(gb, cbm_node_id(a), "IMPORTS", &edges, &count);
     ASSERT_EQ(count, 1);
 
-    cbm_gbuf_find_edges_by_source_type(gb, b, "CALLS", &edges, &count);
+    cbm_gbuf_find_edges_by_source_type(gb, cbm_node_id(b), "CALLS", &edges, &count);
     ASSERT_EQ(count, 0);
 
     cbm_gbuf_free(gb);
@@ -280,17 +439,21 @@ TEST(gbuf_find_edges_by_source_type) {
 
 TEST(gbuf_find_edges_by_target_type) {
     cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
-    int64_t a = cbm_gbuf_upsert_node(gb, "Function", "a", "pkg.a", "f.go", 1, 5, "{}");
-    int64_t b = cbm_gbuf_upsert_node(gb, "Function", "b", "pkg.b", "f.go", 6, 10, "{}");
+    int64_t a =
+        cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "a", "pkg.a", "f.go", 1, 5, "{}"));
+    int64_t b =
+        cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "b", "pkg.b", "f.go", 6, 10, "{}"));
 
-    cbm_gbuf_insert_edge(gb, a, b, "CALLS", "{}");
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(a), .target = cbm_node_id(b)}, "CALLS",
+        "{}"));
 
     const cbm_gbuf_edge_t **edges = NULL;
     int count = 0;
-    cbm_gbuf_find_edges_by_target_type(gb, b, "CALLS", &edges, &count);
+    cbm_gbuf_find_edges_by_target_type(gb, cbm_node_id(b), "CALLS", &edges, &count);
     ASSERT_EQ(count, 1);
 
-    cbm_gbuf_find_edges_by_target_type(gb, a, "CALLS", &edges, &count);
+    cbm_gbuf_find_edges_by_target_type(gb, cbm_node_id(a), "CALLS", &edges, &count);
     ASSERT_EQ(count, 0);
 
     cbm_gbuf_free(gb);
@@ -299,11 +462,17 @@ TEST(gbuf_find_edges_by_target_type) {
 
 TEST(gbuf_find_edges_by_type) {
     cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
-    int64_t a = cbm_gbuf_upsert_node(gb, "Function", "a", "pkg.a", "f.go", 1, 5, "{}");
-    int64_t b = cbm_gbuf_upsert_node(gb, "Function", "b", "pkg.b", "f.go", 6, 10, "{}");
+    int64_t a =
+        cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "a", "pkg.a", "f.go", 1, 5, "{}"));
+    int64_t b =
+        cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "b", "pkg.b", "f.go", 6, 10, "{}"));
 
-    cbm_gbuf_insert_edge(gb, a, b, "CALLS", "{}");
-    cbm_gbuf_insert_edge(gb, b, a, "CALLS", "{}");
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(a), .target = cbm_node_id(b)}, "CALLS",
+        "{}"));
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(b), .target = cbm_node_id(a)}, "CALLS",
+        "{}"));
 
     const cbm_gbuf_edge_t **edges = NULL;
     int count = 0;
@@ -319,11 +488,17 @@ TEST(gbuf_find_edges_by_type) {
 
 TEST(gbuf_delete_edges_by_type) {
     cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
-    int64_t a = cbm_gbuf_upsert_node(gb, "Function", "a", "pkg.a", "f.go", 1, 5, "{}");
-    int64_t b = cbm_gbuf_upsert_node(gb, "Function", "b", "pkg.b", "f.go", 6, 10, "{}");
+    int64_t a =
+        cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "a", "pkg.a", "f.go", 1, 5, "{}"));
+    int64_t b =
+        cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "b", "pkg.b", "f.go", 6, 10, "{}"));
 
-    cbm_gbuf_insert_edge(gb, a, b, "CALLS", "{}");
-    cbm_gbuf_insert_edge(gb, a, b, "IMPORTS", "{}");
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(a), .target = cbm_node_id(b)}, "CALLS",
+        "{}"));
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(a), .target = cbm_node_id(b)}, "IMPORTS",
+        "{}"));
     ASSERT_EQ(cbm_gbuf_edge_count(gb), 2);
 
     cbm_gbuf_delete_edges_by_type(gb, "CALLS");
@@ -337,13 +512,22 @@ TEST(gbuf_delete_edges_by_type) {
 
 TEST(gbuf_edge_count_by_type) {
     cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
-    int64_t a = cbm_gbuf_upsert_node(gb, "Function", "a", "pkg.a", "f.go", 1, 5, "{}");
-    int64_t b = cbm_gbuf_upsert_node(gb, "Function", "b", "pkg.b", "f.go", 6, 10, "{}");
-    int64_t c = cbm_gbuf_upsert_node(gb, "Function", "c", "pkg.c", "f.go", 11, 15, "{}");
+    int64_t a =
+        cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "a", "pkg.a", "f.go", 1, 5, "{}"));
+    int64_t b =
+        cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "b", "pkg.b", "f.go", 6, 10, "{}"));
+    int64_t c =
+        cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "c", "pkg.c", "f.go", 11, 15, "{}"));
 
-    cbm_gbuf_insert_edge(gb, a, b, "CALLS", "{}");
-    cbm_gbuf_insert_edge(gb, a, c, "CALLS", "{}");
-    cbm_gbuf_insert_edge(gb, b, c, "IMPORTS", "{}");
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(a), .target = cbm_node_id(b)}, "CALLS",
+        "{}"));
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(a), .target = cbm_node_id(c)}, "CALLS",
+        "{}"));
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(b), .target = cbm_node_id(c)}, "IMPORTS",
+        "{}"));
 
     ASSERT_EQ(cbm_gbuf_edge_count_by_type(gb, "CALLS"), 2);
     ASSERT_EQ(cbm_gbuf_edge_count_by_type(gb, "IMPORTS"), 1);
@@ -370,11 +554,13 @@ TEST(gbuf_dump_empty) {
 TEST(gbuf_flush_to_store) {
     /* Create a buffer with some data */
     cbm_gbuf_t *gb = cbm_gbuf_new("test-proj", "/tmp/repo");
-    int64_t n1 = cbm_gbuf_upsert_node(gb, "Function", "main", "test-proj::main.go::main", "main.go",
-                                      1, 10, "{}");
-    int64_t n2 = cbm_gbuf_upsert_node(gb, "Function", "helper", "test-proj::helper.go::helper",
-                                      "helper.go", 1, 5, "{}");
-    cbm_gbuf_insert_edge(gb, n1, n2, "CALLS", "{}");
+    int64_t n1 = cbm_node_id_value(cbm_gbuf_upsert_node(
+        gb, "Function", "main", "test-proj::main.go::main", "main.go", 1, 10, "{}"));
+    int64_t n2 = cbm_node_id_value(cbm_gbuf_upsert_node(
+        gb, "Function", "helper", "test-proj::helper.go::helper", "helper.go", 1, 5, "{}"));
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(n1), .target = cbm_node_id(n2)}, "CALLS",
+        "{}"));
 
     /* Open an in-memory store and flush */
     cbm_store_t *store = cbm_store_open_memory();
@@ -403,7 +589,8 @@ TEST(gbuf_many_nodes) {
         char name[32], qn[64];
         snprintf(name, sizeof(name), "func_%d", i);
         snprintf(qn, sizeof(qn), "pkg.func_%d", i);
-        int64_t id = cbm_gbuf_upsert_node(gb, "Function", name, qn, "f.go", i, i + 5, "{}");
+        int64_t id = cbm_node_id_value(
+            cbm_gbuf_upsert_node(gb, "Function", name, qn, "f.go", i, i + 5, "{}"));
         ASSERT_GT(id, 0);
     }
     ASSERT_EQ(cbm_gbuf_node_count(gb), 1000);
@@ -422,7 +609,8 @@ TEST(gbuf_many_nodes) {
 TEST(gbuf_upsert_null_qn) {
     cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
     /* NULL qualified_name → returns 0 (error), no node inserted */
-    int64_t id = cbm_gbuf_upsert_node(gb, "Function", "foo", NULL, "f.go", 1, 5, "{}");
+    int64_t id =
+        cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "foo", NULL, "f.go", 1, 5, "{}"));
     ASSERT_EQ(id, 0);
     ASSERT_EQ(cbm_gbuf_node_count(gb), 0);
     cbm_gbuf_free(gb);
@@ -432,7 +620,8 @@ TEST(gbuf_upsert_null_qn) {
 TEST(gbuf_upsert_empty_qn) {
     cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
     /* Empty string QN is valid — it's a non-NULL key */
-    int64_t id = cbm_gbuf_upsert_node(gb, "Function", "anon", "", "f.go", 1, 5, "{}");
+    int64_t id =
+        cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "anon", "", "f.go", 1, 5, "{}"));
     ASSERT_GT(id, 0);
     ASSERT_EQ(cbm_gbuf_node_count(gb), 1);
 
@@ -446,10 +635,10 @@ TEST(gbuf_upsert_empty_qn) {
 
 TEST(gbuf_upsert_same_qn_updates_all_fields) {
     cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
-    int64_t id1 = cbm_gbuf_upsert_node(gb, "Function", "old_name", "pkg.fn", "old.go", 1, 10,
-                                       "{\"k\":\"v1\"}");
-    int64_t id2 = cbm_gbuf_upsert_node(gb, "Method", "new_name", "pkg.fn", "new.go", 20, 30,
-                                       "{\"k\":\"v2\"}");
+    int64_t id1 = cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "old_name", "pkg.fn",
+                                                         "old.go", 1, 10, "{\"k\":\"v1\"}"));
+    int64_t id2 = cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Method", "new_name", "pkg.fn",
+                                                         "new.go", 20, 30, "{\"k\":\"v2\"}"));
     ASSERT_EQ(id1, id2);
     ASSERT_EQ(cbm_gbuf_node_count(gb), 1);
 
@@ -474,7 +663,8 @@ TEST(gbuf_upsert_long_qn) {
     memset(long_qn, 'a', 1200);
     long_qn[1200] = '\0';
 
-    int64_t id = cbm_gbuf_upsert_node(gb, "Function", "long", long_qn, "f.go", 1, 5, "{}");
+    int64_t id = cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "Function", "long", long_qn, "f.go", 1, 5, "{}"));
     ASSERT_GT(id, 0);
 
     const cbm_gbuf_node_t *n = cbm_gbuf_find_by_qn(gb, long_qn);
@@ -487,7 +677,7 @@ TEST(gbuf_upsert_long_qn) {
 
 TEST(gbuf_find_by_qn_missing) {
     cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
-    cbm_gbuf_upsert_node(gb, "Function", "foo", "pkg.foo", "f.go", 1, 5, "{}");
+    cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "foo", "pkg.foo", "f.go", 1, 5, "{}"));
 
     ASSERT_NULL(cbm_gbuf_find_by_qn(gb, "does.not.exist"));
     ASSERT_NULL(cbm_gbuf_find_by_qn(gb, ""));
@@ -499,12 +689,12 @@ TEST(gbuf_find_by_qn_missing) {
 
 TEST(gbuf_find_by_id_missing) {
     cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
-    cbm_gbuf_upsert_node(gb, "Function", "foo", "pkg.foo", "f.go", 1, 5, "{}");
+    cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "foo", "pkg.foo", "f.go", 1, 5, "{}"));
 
-    ASSERT_NULL(cbm_gbuf_find_by_id(gb, 0));
-    ASSERT_NULL(cbm_gbuf_find_by_id(gb, -1));
-    ASSERT_NULL(cbm_gbuf_find_by_id(gb, 999));
-    ASSERT_NULL(cbm_gbuf_find_by_id(gb, INT64_MAX));
+    ASSERT_NULL(cbm_gbuf_find_by_id(gb, cbm_node_id(0)));
+    ASSERT_NULL(cbm_gbuf_find_by_id(gb, cbm_node_id(-1)));
+    ASSERT_NULL(cbm_gbuf_find_by_id(gb, cbm_node_id(999)));
+    ASSERT_NULL(cbm_gbuf_find_by_id(gb, cbm_node_id(INT64_MAX)));
 
     cbm_gbuf_free(gb);
     PASS();
@@ -512,7 +702,7 @@ TEST(gbuf_find_by_id_missing) {
 
 TEST(gbuf_find_by_label_no_matches) {
     cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
-    cbm_gbuf_upsert_node(gb, "Function", "foo", "pkg.foo", "f.go", 1, 5, "{}");
+    cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "foo", "pkg.foo", "f.go", 1, 5, "{}"));
 
     const cbm_gbuf_node_t **nodes = NULL;
     int count = 0;
@@ -526,10 +716,10 @@ TEST(gbuf_find_by_label_no_matches) {
 
 TEST(gbuf_find_by_name_multiple) {
     cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
-    cbm_gbuf_upsert_node(gb, "Function", "init", "a.init", "a.go", 1, 5, "{}");
-    cbm_gbuf_upsert_node(gb, "Function", "init", "b.init", "b.go", 1, 5, "{}");
-    cbm_gbuf_upsert_node(gb, "Method", "init", "c.S.init", "c.go", 1, 5, "{}");
-    cbm_gbuf_upsert_node(gb, "Function", "other", "d.other", "d.go", 1, 5, "{}");
+    cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "init", "a.init", "a.go", 1, 5, "{}"));
+    cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "init", "b.init", "b.go", 1, 5, "{}"));
+    cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Method", "init", "c.S.init", "c.go", 1, 5, "{}"));
+    cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "other", "d.other", "d.go", 1, 5, "{}"));
 
     const cbm_gbuf_node_t **nodes = NULL;
     int count = 0;
@@ -551,14 +741,23 @@ TEST(gbuf_find_by_name_multiple) {
 
 TEST(gbuf_delete_by_label_cascades_edges) {
     cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
-    int64_t f = cbm_gbuf_upsert_node(gb, "Function", "fn", "pkg.fn", "f.go", 1, 5, "{}");
-    int64_t c = cbm_gbuf_upsert_node(gb, "Class", "Cls", "pkg.Cls", "f.go", 10, 20, "{}");
-    int64_t m = cbm_gbuf_upsert_node(gb, "Method", "meth", "pkg.Cls.meth", "f.go", 12, 18, "{}");
+    int64_t f =
+        cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "fn", "pkg.fn", "f.go", 1, 5, "{}"));
+    int64_t c = cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "Class", "Cls", "pkg.Cls", "f.go", 10, 20, "{}"));
+    int64_t m = cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "Method", "meth", "pkg.Cls.meth", "f.go", 12, 18, "{}"));
 
     /* Edges: fn→Cls, fn→meth, meth→fn */
-    cbm_gbuf_insert_edge(gb, f, c, "CALLS", "{}");
-    cbm_gbuf_insert_edge(gb, f, m, "CALLS", "{}");
-    cbm_gbuf_insert_edge(gb, m, f, "CALLS", "{}");
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(f), .target = cbm_node_id(c)}, "CALLS",
+        "{}"));
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(f), .target = cbm_node_id(m)}, "CALLS",
+        "{}"));
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(m), .target = cbm_node_id(f)}, "CALLS",
+        "{}"));
     ASSERT_EQ(cbm_gbuf_edge_count(gb), 3);
 
     /* Delete all Class nodes — should remove fn→Cls edge only */
@@ -569,7 +768,7 @@ TEST(gbuf_delete_by_label_cascades_edges) {
     /* Verify edge source/target type lookups are consistent after cascade */
     const cbm_gbuf_edge_t **edges = NULL;
     int ecount = 0;
-    cbm_gbuf_find_edges_by_source_type(gb, f, "CALLS", &edges, &ecount);
+    cbm_gbuf_find_edges_by_source_type(gb, cbm_node_id(f), "CALLS", &edges, &ecount);
     ASSERT_EQ(ecount, 1); /* only fn→meth remains */
 
     cbm_gbuf_free(gb);
@@ -590,7 +789,8 @@ TEST(gbuf_upsert_100_nodes_stress) {
         char name[32], qn[64];
         snprintf(name, sizeof(name), "f%d", i);
         snprintf(qn, sizeof(qn), "pkg.f%d", i);
-        int64_t id = cbm_gbuf_upsert_node(gb, "Function", name, qn, "f.go", i, i + 1, "{}");
+        int64_t id = cbm_node_id_value(
+            cbm_gbuf_upsert_node(gb, "Function", name, qn, "f.go", i, i + 1, "{}"));
         ASSERT_GT(id, 0);
     }
     ASSERT_EQ(cbm_gbuf_node_count(gb), 100);
@@ -612,7 +812,9 @@ TEST(gbuf_edge_nonexistent_endpoints) {
     cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
     /* Edges with non-existent source/target IDs are accepted (no FK validation
      * in the buffer — validation happens at flush time when remapping IDs) */
-    int64_t eid = cbm_gbuf_insert_edge(gb, 9999, 8888, "CALLS", "{}");
+    int64_t eid = cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(9999), .target = cbm_node_id(8888)},
+        "CALLS", "{}"));
     ASSERT_GT(eid, 0);
     ASSERT_EQ(cbm_gbuf_edge_count(gb), 1);
     cbm_gbuf_free(gb);
@@ -621,20 +823,28 @@ TEST(gbuf_edge_nonexistent_endpoints) {
 
 TEST(gbuf_edge_dedup_merges_properties) {
     cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
-    int64_t a = cbm_gbuf_upsert_node(gb, "Function", "a", "pkg.a", "f.go", 1, 5, "{}");
-    int64_t b = cbm_gbuf_upsert_node(gb, "Function", "b", "pkg.b", "f.go", 6, 10, "{}");
+    int64_t a =
+        cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "a", "pkg.a", "f.go", 1, 5, "{}"));
+    int64_t b =
+        cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "b", "pkg.b", "f.go", 6, 10, "{}"));
 
-    int64_t eid1 = cbm_gbuf_insert_edge(gb, a, b, "CALLS", "{\"weight\":1}");
-    int64_t eid2 = cbm_gbuf_insert_edge(gb, a, b, "CALLS", "{\"weight\":5}");
+    int64_t eid1 = cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(a), .target = cbm_node_id(b)}, "CALLS",
+        "{\"weight\":1}"));
+    int64_t eid2 = cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(a), .target = cbm_node_id(b)}, "CALLS",
+        "{\"weight\":5}"));
     ASSERT_EQ(eid1, eid2);
     ASSERT_EQ(cbm_gbuf_edge_count(gb), 1);
 
     /* Verify second insert's properties win (merge = replace) */
     const cbm_gbuf_edge_t **edges = NULL;
     int count = 0;
-    cbm_gbuf_find_edges_by_source_type(gb, a, "CALLS", &edges, &count);
+    cbm_gbuf_find_edges_by_source_type(gb, cbm_node_id(a), "CALLS", &edges, &count);
     ASSERT_EQ(count, 1);
-    ASSERT_STR_EQ(edges[0]->properties_json, "{\"weight\":5}");
+    char props_buf[CBM_SZ_256];
+    cbm_gbuf_edge_props_json(edges[0], props_buf, sizeof(props_buf));
+    ASSERT_STR_EQ(props_buf, "{\"weight\":5}");
 
     cbm_gbuf_free(gb);
     PASS();
@@ -659,14 +869,25 @@ TEST(gbuf_edge_count_by_type_missing) {
 
 TEST(gbuf_delete_edges_preserves_other_types) {
     cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
-    int64_t a = cbm_gbuf_upsert_node(gb, "Function", "a", "pkg.a", "f.go", 1, 5, "{}");
-    int64_t b = cbm_gbuf_upsert_node(gb, "Function", "b", "pkg.b", "f.go", 6, 10, "{}");
-    int64_t c = cbm_gbuf_upsert_node(gb, "Function", "c", "pkg.c", "f.go", 11, 15, "{}");
+    int64_t a =
+        cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "a", "pkg.a", "f.go", 1, 5, "{}"));
+    int64_t b =
+        cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "b", "pkg.b", "f.go", 6, 10, "{}"));
+    int64_t c =
+        cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "c", "pkg.c", "f.go", 11, 15, "{}"));
 
-    cbm_gbuf_insert_edge(gb, a, b, "CALLS", "{}");
-    cbm_gbuf_insert_edge(gb, b, c, "CALLS", "{}");
-    cbm_gbuf_insert_edge(gb, a, b, "IMPORTS", "{}");
-    cbm_gbuf_insert_edge(gb, a, c, "HTTP_CALLS", "{}");
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(a), .target = cbm_node_id(b)}, "CALLS",
+        "{}"));
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(b), .target = cbm_node_id(c)}, "CALLS",
+        "{}"));
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(a), .target = cbm_node_id(b)}, "IMPORTS",
+        "{}"));
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(a), .target = cbm_node_id(c)},
+        "HTTP_CALLS", "{}"));
     ASSERT_EQ(cbm_gbuf_edge_count(gb), 4);
 
     cbm_gbuf_delete_edges_by_type(gb, "CALLS");
@@ -678,9 +899,9 @@ TEST(gbuf_delete_edges_preserves_other_types) {
     /* Verify secondary indexes are consistent after rebuild */
     const cbm_gbuf_edge_t **edges = NULL;
     int count = 0;
-    cbm_gbuf_find_edges_by_source_type(gb, a, "IMPORTS", &edges, &count);
+    cbm_gbuf_find_edges_by_source_type(gb, cbm_node_id(a), "IMPORTS", &edges, &count);
     ASSERT_EQ(count, 1);
-    cbm_gbuf_find_edges_by_target_type(gb, c, "HTTP_CALLS", &edges, &count);
+    cbm_gbuf_find_edges_by_target_type(gb, cbm_node_id(c), "HTTP_CALLS", &edges, &count);
     ASSERT_EQ(count, 1);
 
     cbm_gbuf_free(gb);
@@ -689,21 +910,28 @@ TEST(gbuf_delete_edges_preserves_other_types) {
 
 TEST(gbuf_find_edges_by_target_type_multiple) {
     cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
-    int64_t a = cbm_gbuf_upsert_node(gb, "Function", "a", "pkg.a", "f.go", 1, 5, "{}");
-    int64_t b = cbm_gbuf_upsert_node(gb, "Function", "b", "pkg.b", "f.go", 6, 10, "{}");
-    int64_t c = cbm_gbuf_upsert_node(gb, "Function", "c", "pkg.c", "f.go", 11, 15, "{}");
+    int64_t a =
+        cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "a", "pkg.a", "f.go", 1, 5, "{}"));
+    int64_t b =
+        cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "b", "pkg.b", "f.go", 6, 10, "{}"));
+    int64_t c =
+        cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "c", "pkg.c", "f.go", 11, 15, "{}"));
 
     /* Both a and c call b */
-    cbm_gbuf_insert_edge(gb, a, b, "CALLS", "{}");
-    cbm_gbuf_insert_edge(gb, c, b, "CALLS", "{}");
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(a), .target = cbm_node_id(b)}, "CALLS",
+        "{}"));
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(c), .target = cbm_node_id(b)}, "CALLS",
+        "{}"));
 
     const cbm_gbuf_edge_t **edges = NULL;
     int count = 0;
-    cbm_gbuf_find_edges_by_target_type(gb, b, "CALLS", &edges, &count);
+    cbm_gbuf_find_edges_by_target_type(gb, cbm_node_id(b), "CALLS", &edges, &count);
     ASSERT_EQ(count, 2);
 
     /* No IMPORTS edges targeting b */
-    cbm_gbuf_find_edges_by_target_type(gb, b, "IMPORTS", &edges, &count);
+    cbm_gbuf_find_edges_by_target_type(gb, cbm_node_id(b), "IMPORTS", &edges, &count);
     ASSERT_EQ(count, 0);
 
     cbm_gbuf_free(gb);
@@ -717,13 +945,16 @@ TEST(gbuf_merge_overlapping_qns) {
     cbm_gbuf_t *src = cbm_gbuf_new("test", "/tmp");
 
     /* dst has node with QN "pkg.fn" */
-    cbm_gbuf_upsert_node(dst, "Function", "fn_old", "pkg.fn", "old.go", 1, 10,
-                         "{\"from\":\"dst\"}");
-    cbm_gbuf_upsert_node(dst, "Function", "unique_dst", "pkg.unique_dst", "u.go", 1, 5, "{}");
+    cbm_node_id_value(cbm_gbuf_upsert_node(dst, "Function", "fn_old", "pkg.fn", "old.go", 1, 10,
+                                           "{\"from\":\"dst\"}"));
+    cbm_node_id_value(
+        cbm_gbuf_upsert_node(dst, "Function", "unique_dst", "pkg.unique_dst", "u.go", 1, 5, "{}"));
 
     /* src has same QN with different fields — src should win */
-    cbm_gbuf_upsert_node(src, "Method", "fn_new", "pkg.fn", "new.go", 20, 30, "{\"from\":\"src\"}");
-    cbm_gbuf_upsert_node(src, "Function", "unique_src", "pkg.unique_src", "s.go", 1, 5, "{}");
+    cbm_node_id_value(cbm_gbuf_upsert_node(src, "Method", "fn_new", "pkg.fn", "new.go", 20, 30,
+                                           "{\"from\":\"src\"}"));
+    cbm_node_id_value(
+        cbm_gbuf_upsert_node(src, "Function", "unique_src", "pkg.unique_src", "s.go", 1, 5, "{}"));
 
     int rc = cbm_gbuf_merge(dst, src);
     ASSERT_EQ(rc, 0);
@@ -754,18 +985,24 @@ TEST(gbuf_merge_edge_dedup) {
     cbm_gbuf_t *dst = cbm_gbuf_new_shared_ids("test", "/tmp", &shared);
     cbm_gbuf_t *src = cbm_gbuf_new_shared_ids("test", "/tmp", &shared);
 
-    int64_t a = cbm_gbuf_upsert_node(dst, "Function", "a", "pkg.a", "f.go", 1, 5, "{}");
-    int64_t b = cbm_gbuf_upsert_node(dst, "Function", "b", "pkg.b", "f.go", 6, 10, "{}");
-    cbm_gbuf_insert_edge(dst, a, b, "CALLS", "{}");
+    int64_t a =
+        cbm_node_id_value(cbm_gbuf_upsert_node(dst, "Function", "a", "pkg.a", "f.go", 1, 5, "{}"));
+    int64_t b =
+        cbm_node_id_value(cbm_gbuf_upsert_node(dst, "Function", "b", "pkg.b", "f.go", 6, 10, "{}"));
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        dst, (cbm_edge_endpoints_t){.source = cbm_node_id(a), .target = cbm_node_id(b)}, "CALLS",
+        "{}"));
 
     /* src has same nodes (by QN) and same edge */
-    cbm_gbuf_upsert_node(src, "Function", "a", "pkg.a", "f.go", 1, 5, "{}");
-    cbm_gbuf_upsert_node(src, "Function", "b", "pkg.b", "f.go", 6, 10, "{}");
+    cbm_node_id_value(cbm_gbuf_upsert_node(src, "Function", "a", "pkg.a", "f.go", 1, 5, "{}"));
+    cbm_node_id_value(cbm_gbuf_upsert_node(src, "Function", "b", "pkg.b", "f.go", 6, 10, "{}"));
     /* This edge's src/target IDs differ from dst's, but after merge remap
      * it becomes the same (src, tgt, type) tuple → deduped */
-    int64_t sa = cbm_gbuf_find_by_qn(src, "pkg.a")->id;
-    int64_t sb = cbm_gbuf_find_by_qn(src, "pkg.b")->id;
-    cbm_gbuf_insert_edge(src, sa, sb, "CALLS", "{}");
+    int64_t sa = cbm_gbuf_find_by_qn(src, "pkg.a")->id.v;
+    int64_t sb = cbm_gbuf_find_by_qn(src, "pkg.b")->id.v;
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        src, (cbm_edge_endpoints_t){.source = cbm_node_id(sa), .target = cbm_node_id(sb)}, "CALLS",
+        "{}"));
 
     int rc = cbm_gbuf_merge(dst, src);
     ASSERT_EQ(rc, 0);
@@ -782,8 +1019,8 @@ TEST(gbuf_merge_empty_src_into_populated_dst) {
     cbm_gbuf_t *dst = cbm_gbuf_new("test", "/tmp");
     cbm_gbuf_t *src = cbm_gbuf_new("test", "/tmp");
 
-    cbm_gbuf_upsert_node(dst, "Function", "foo", "pkg.foo", "f.go", 1, 5, "{}");
-    cbm_gbuf_upsert_node(dst, "Function", "bar", "pkg.bar", "f.go", 6, 10, "{}");
+    cbm_node_id_value(cbm_gbuf_upsert_node(dst, "Function", "foo", "pkg.foo", "f.go", 1, 5, "{}"));
+    cbm_node_id_value(cbm_gbuf_upsert_node(dst, "Function", "bar", "pkg.bar", "f.go", 6, 10, "{}"));
 
     int rc = cbm_gbuf_merge(dst, src);
     ASSERT_EQ(rc, 0);
@@ -798,9 +1035,13 @@ TEST(gbuf_merge_populated_src_into_empty_dst) {
     cbm_gbuf_t *dst = cbm_gbuf_new("test", "/tmp");
     cbm_gbuf_t *src = cbm_gbuf_new("test", "/tmp");
 
-    int64_t a = cbm_gbuf_upsert_node(src, "Function", "foo", "pkg.foo", "f.go", 1, 5, "{}");
-    int64_t b = cbm_gbuf_upsert_node(src, "Function", "bar", "pkg.bar", "f.go", 6, 10, "{}");
-    cbm_gbuf_insert_edge(src, a, b, "CALLS", "{}");
+    int64_t a = cbm_node_id_value(
+        cbm_gbuf_upsert_node(src, "Function", "foo", "pkg.foo", "f.go", 1, 5, "{}"));
+    int64_t b = cbm_node_id_value(
+        cbm_gbuf_upsert_node(src, "Function", "bar", "pkg.bar", "f.go", 6, 10, "{}"));
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        src, (cbm_edge_endpoints_t){.source = cbm_node_id(a), .target = cbm_node_id(b)}, "CALLS",
+        "{}"));
 
     int rc = cbm_gbuf_merge(dst, src);
     ASSERT_EQ(rc, 0);
@@ -841,11 +1082,18 @@ TEST(gbuf_flush_to_store_null) {
 
 TEST(gbuf_flush_verify_store_data) {
     cbm_gbuf_t *gb = cbm_gbuf_new("proj", "/tmp/repo");
-    int64_t n1 = cbm_gbuf_upsert_node(gb, "Function", "alpha", "proj::alpha", "a.go", 1, 10, "{}");
-    int64_t n2 = cbm_gbuf_upsert_node(gb, "Class", "Beta", "proj::Beta", "b.go", 1, 20, "{}");
-    int64_t n3 = cbm_gbuf_upsert_node(gb, "Function", "gamma", "proj::gamma", "c.go", 1, 5, "{}");
-    cbm_gbuf_insert_edge(gb, n1, n2, "CALLS", "{}");
-    cbm_gbuf_insert_edge(gb, n1, n3, "IMPORTS", "{}");
+    int64_t n1 = cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "Function", "alpha", "proj::alpha", "a.go", 1, 10, "{}"));
+    int64_t n2 = cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "Class", "Beta", "proj::Beta", "b.go", 1, 20, "{}"));
+    int64_t n3 = cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "Function", "gamma", "proj::gamma", "c.go", 1, 5, "{}"));
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(n1), .target = cbm_node_id(n2)}, "CALLS",
+        "{}"));
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(n1), .target = cbm_node_id(n3)}, "IMPORTS",
+        "{}"));
 
     cbm_store_t *store = cbm_store_open_memory();
     ASSERT_NOT_NULL(store);
@@ -877,7 +1125,8 @@ TEST(gbuf_flush_verify_store_data) {
 TEST(gbuf_merge_into_store_preserves) {
     /* First, flush initial data via flush_to_store */
     cbm_gbuf_t *gb1 = cbm_gbuf_new("proj", "/tmp/repo");
-    cbm_gbuf_upsert_node(gb1, "Function", "existing", "proj::existing", "e.go", 1, 10, "{}");
+    cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb1, "Function", "existing", "proj::existing", "e.go", 1, 10, "{}"));
 
     cbm_store_t *store = cbm_store_open_memory();
     ASSERT_NOT_NULL(store);
@@ -888,7 +1137,8 @@ TEST(gbuf_merge_into_store_preserves) {
 
     /* Now merge_into_store with new data — should NOT delete existing */
     cbm_gbuf_t *gb2 = cbm_gbuf_new("proj", "/tmp/repo");
-    cbm_gbuf_upsert_node(gb2, "Function", "newone", "proj::newone", "n.go", 1, 5, "{}");
+    cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb2, "Function", "newone", "proj::newone", "n.go", 1, 5, "{}"));
 
     rc = cbm_gbuf_merge_into_store(gb2, store);
     ASSERT_EQ(rc, 0);
@@ -918,10 +1168,14 @@ TEST(gbuf_shared_ids_unique) {
     cbm_gbuf_t *gb1 = cbm_gbuf_new_shared_ids("test", "/tmp", &shared);
     cbm_gbuf_t *gb2 = cbm_gbuf_new_shared_ids("test", "/tmp", &shared);
 
-    int64_t id1 = cbm_gbuf_upsert_node(gb1, "Function", "a", "pkg.a", "f.go", 1, 5, "{}");
-    int64_t id2 = cbm_gbuf_upsert_node(gb2, "Function", "b", "pkg.b", "f.go", 6, 10, "{}");
-    int64_t id3 = cbm_gbuf_upsert_node(gb1, "Function", "c", "pkg.c", "f.go", 11, 15, "{}");
-    int64_t id4 = cbm_gbuf_upsert_node(gb2, "Function", "d", "pkg.d", "f.go", 16, 20, "{}");
+    int64_t id1 =
+        cbm_node_id_value(cbm_gbuf_upsert_node(gb1, "Function", "a", "pkg.a", "f.go", 1, 5, "{}"));
+    int64_t id2 =
+        cbm_node_id_value(cbm_gbuf_upsert_node(gb2, "Function", "b", "pkg.b", "f.go", 6, 10, "{}"));
+    int64_t id3 = cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb1, "Function", "c", "pkg.c", "f.go", 11, 15, "{}"));
+    int64_t id4 = cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb2, "Function", "d", "pkg.d", "f.go", 16, 20, "{}"));
 
     /* All IDs must be unique */
     ASSERT_NEQ(id1, id2);
@@ -946,7 +1200,8 @@ TEST(gbuf_shared_ids_null_fallback) {
     /* NULL id_source → behaves like cbm_gbuf_new() */
     cbm_gbuf_t *gb = cbm_gbuf_new_shared_ids("test", "/tmp", NULL);
     ASSERT_NOT_NULL(gb);
-    int64_t id = cbm_gbuf_upsert_node(gb, "Function", "a", "pkg.a", "f.go", 1, 5, "{}");
+    int64_t id =
+        cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "a", "pkg.a", "f.go", 1, 5, "{}"));
     ASSERT_EQ(id, 1);
     cbm_gbuf_free(gb);
     PASS();
@@ -959,7 +1214,7 @@ TEST(gbuf_next_id_set_next_id_roundtrip) {
     ASSERT_EQ(cbm_gbuf_next_id(gb), 1);
 
     /* Insert a node, next_id advances */
-    cbm_gbuf_upsert_node(gb, "Function", "a", "pkg.a", "f.go", 1, 5, "{}");
+    cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "a", "pkg.a", "f.go", 1, 5, "{}"));
     ASSERT_EQ(cbm_gbuf_next_id(gb), 2);
 
     /* Set next_id to an arbitrary value */
@@ -967,7 +1222,8 @@ TEST(gbuf_next_id_set_next_id_roundtrip) {
     ASSERT_EQ(cbm_gbuf_next_id(gb), 100);
 
     /* Next insert uses the new base */
-    int64_t id = cbm_gbuf_upsert_node(gb, "Function", "b", "pkg.b", "f.go", 6, 10, "{}");
+    int64_t id =
+        cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "b", "pkg.b", "f.go", 6, 10, "{}"));
     ASSERT_EQ(id, 100);
     ASSERT_EQ(cbm_gbuf_next_id(gb), 101);
 
@@ -987,12 +1243,17 @@ TEST(gbuf_next_id_null_safe) {
 
 TEST(gbuf_flush_skips_orphan_edges) {
     cbm_gbuf_t *gb = cbm_gbuf_new("proj", "/tmp/repo");
-    int64_t n1 = cbm_gbuf_upsert_node(gb, "Function", "real", "proj::real", "f.go", 1, 5, "{}");
+    int64_t n1 = cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "Function", "real", "proj::real", "f.go", 1, 5, "{}"));
 
     /* Valid edge */
-    cbm_gbuf_insert_edge(gb, n1, n1, "CALLS", "{}");
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(n1), .target = cbm_node_id(n1)}, "CALLS",
+        "{}"));
     /* Orphan edge — target ID 9999 does not map to any node */
-    cbm_gbuf_insert_edge(gb, n1, 9999, "CALLS", "{}");
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(n1), .target = cbm_node_id(9999)}, "CALLS",
+        "{}"));
 
     cbm_store_t *store = cbm_store_open_memory();
     ASSERT_NOT_NULL(store);
@@ -1022,6 +1283,9 @@ SUITE(graph_buffer) {
     RUN_TEST(gbuf_delete_by_label);
     RUN_TEST(gbuf_insert_edge);
     RUN_TEST(gbuf_edge_dedup);
+    RUN_TEST(gbuf_edge_props_merge_is_order_independent);
+    RUN_TEST(gbuf_edge_props_merge_prefers_higher_confidence);
+    RUN_TEST(gbuf_edge_props_merge_keeps_existing_on_empty);
     RUN_TEST(gbuf_imports_multi_symbol_dedup);
     RUN_TEST(gbuf_imports_long_local_name_no_collision);
     RUN_TEST(gbuf_find_edges_by_source_type);

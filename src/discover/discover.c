@@ -18,13 +18,12 @@
 #include "foundation/win_utf8.h"
 #endif
 #include <ctype.h>
+#include <limits.h> // INT_MAX
 #include <stdint.h> // int64_t
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h> // strdup
 #include <sys/stat.h>
-
-int cbm_gitignore_match_result(const cbm_gitignore_t *gi, const char *rel_path, bool is_dir);
 
 /* ── Hardcoded always-skip directories ──────────────────────────── */
 
@@ -409,9 +408,9 @@ bool cbm_matches_fast_pattern(const char *filename, cbm_index_mode_t mode) {
 
 typedef struct {
     cbm_file_info_t *files;
-    int count;
-    int capacity;
-    int max_files;
+    size_t count;
+    size_t capacity;
+    int max_files; /* -1 = unlimited; sentinel, so stays signed */
     uint64_t deadline_ms;
     bool count_only;
     bool collect_excluded;
@@ -421,17 +420,17 @@ typedef struct {
      * which subtrees were dropped (#411). strdup'd; freed by the caller via
      * cbm_discover_free_excluded or internally when not requested. */
     char **excluded;
-    int excluded_count;
-    int excluded_cap;
+    size_t excluded_count;
+    size_t excluded_cap;
     /* Individual files dropped by ignore rules (#963 "purposely not
      * indexed"). Collected only when requested (collect_ignored); stored
      * entries are capped at CBM_DISCOVER_IGNORED_CAP while ignored_total
      * keeps counting so truncation is explicit. */
     bool collect_ignored;
     cbm_ignored_file_t *ignored;
-    int ignored_count;
-    int ignored_cap;
-    int ignored_total;
+    size_t ignored_count;
+    size_t ignored_cap;
+    size_t ignored_total;
 } file_list_t;
 
 static bool file_list_should_stop(file_list_t *fl) {
@@ -449,7 +448,7 @@ static void file_list_add_excluded(file_list_t *fl, const char *rel_path) {
         return;
     }
     if (fl->excluded_count >= fl->excluded_cap) {
-        int new_cap = fl->excluded_cap ? fl->excluded_cap * PAIR_LEN : CBM_SZ_64;
+        size_t new_cap = fl->excluded_cap ? fl->excluded_cap * PAIR_LEN : CBM_SZ_64;
         char **grown = realloc(fl->excluded, new_cap * sizeof(char *));
         if (!grown) {
             fl->failed = true;
@@ -475,7 +474,7 @@ static void file_list_add_ignored(file_list_t *fl, const char *rel_path, const c
         return; /* counted above — truncation stays visible via the total */
     }
     if (fl->ignored_count >= fl->ignored_cap) {
-        int new_cap = fl->ignored_cap ? fl->ignored_cap * PAIR_LEN : CBM_SZ_64;
+        size_t new_cap = fl->ignored_cap ? fl->ignored_cap * PAIR_LEN : CBM_SZ_64;
         cbm_ignored_file_t *grown = realloc(fl->ignored, new_cap * sizeof(cbm_ignored_file_t));
         if (!grown) {
             fl->failed = true;
@@ -499,7 +498,8 @@ static void file_list_add_ignored(file_list_t *fl, const char *rel_path, const c
 
 static void fl_add(file_list_t *fl, const char *abs_path, const char *rel_path, CBMLanguage lang,
                    int64_t size) {
-    if (fl->max_files >= 0 && fl->count >= fl->max_files) {
+    /* max_files >= 0 is checked first, so the cast to size_t is safe. */
+    if (fl->max_files >= 0 && fl->count >= (size_t)fl->max_files) {
         fl->limit_exceeded = true;
         return;
     }
@@ -508,7 +508,7 @@ static void fl_add(file_list_t *fl, const char *abs_path, const char *rel_path, 
         return;
     }
     if (fl->count >= fl->capacity) {
-        int new_cap = fl->capacity ? fl->capacity * PAIR_LEN : CBM_SZ_256;
+        size_t new_cap = fl->capacity ? fl->capacity * PAIR_LEN : CBM_SZ_256;
         cbm_file_info_t *new_files = realloc(fl->files, new_cap * sizeof(cbm_file_info_t));
         if (!new_files) {
             fl->failed = true;
@@ -1171,47 +1171,57 @@ static cbm_discover_status_t discover_impl(const char *repo_path, const cbm_disc
     cbm_gitignore_free(global_gi);
     cbm_gitignore_free(cbmignore);
 
+    /* The public ABI reports counts as int. Exceeding INT_MAX entries isn't
+     * reachable in practice (the array alone would be tens of gigabytes),
+     * but route it through the existing failure path instead of silently
+     * truncating a size_t count down to a wrapped/negative int. */
+    if (fl.count > (size_t)INT_MAX || fl.excluded_count > (size_t)INT_MAX ||
+        fl.ignored_count > (size_t)INT_MAX || fl.ignored_total > (size_t)INT_MAX) {
+        fl.failed = true;
+    }
+
     if (count_only) {
-        cbm_discover_free(fl.files, fl.count);
-        cbm_discover_free_excluded(fl.excluded, fl.excluded_count);
-        cbm_discover_free_ignored(fl.ignored, fl.ignored_count);
-        *count = fl.count;
+        cbm_discover_free(fl.files, (int)fl.count);
+        cbm_discover_free_excluded(fl.excluded, (int)fl.excluded_count);
+        cbm_discover_free_ignored(fl.ignored, (int)fl.ignored_count);
         if (fl.failed) {
+            *count = 0;
             return CBM_DISCOVER_ERROR;
         }
+        *count = (int)fl.count;
         return fl.limit_exceeded ? CBM_DISCOVER_LIMIT_EXCEEDED : CBM_DISCOVER_OK;
     }
     if (fl.failed) {
-        cbm_discover_free(fl.files, fl.count);
-        cbm_discover_free_excluded(fl.excluded, fl.excluded_count);
-        cbm_discover_free_ignored(fl.ignored, fl.ignored_count);
+        cbm_discover_free(fl.files, (int)fl.count);
+        cbm_discover_free_excluded(fl.excluded, (int)fl.excluded_count);
+        cbm_discover_free_ignored(fl.ignored, (int)fl.ignored_count);
         return CBM_DISCOVER_ERROR;
     }
 
     *out = fl.files;
-    *count = fl.count;
+    *count = (int)fl.count;
 
     /* Hand the excluded-dir list to the caller, or free it if not requested. */
     if (excluded_out) {
         *excluded_out = fl.excluded;
         if (excluded_count_out) {
-            *excluded_count_out = fl.excluded_count;
+            *excluded_count_out = (int)fl.excluded_count;
         }
     } else {
-        cbm_discover_free_excluded(fl.excluded, fl.excluded_count);
+        cbm_discover_free_excluded(fl.excluded, (int)fl.excluded_count);
     }
 
     /* Same handoff for the ignored-file list (#963). */
     if (ignored_out) {
         *ignored_out = fl.ignored;
         if (ignored_count_out) {
-            *ignored_count_out = fl.ignored_count;
+            *ignored_count_out = (int)fl.ignored_count;
         }
         if (ignored_total_out) {
-            *ignored_total_out = fl.ignored_total;
+            *ignored_total_out = (int)fl.ignored_total;
         }
     } else {
-        cbm_discover_free_ignored(fl.ignored, fl.ignored_count);
+        cbm_discover_free_ignored(fl.ignored, (int)fl.ignored_count);
     }
     return CBM_DISCOVER_OK;
 }

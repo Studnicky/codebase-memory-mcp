@@ -84,9 +84,6 @@ void cbm_ui_log_append(const char *line);
 /* Set the binary path for subprocess spawning (call from main). */
 void cbm_http_server_set_binary_path(const char *path);
 
-/* Resolve argv[0] into an executable path suitable for subprocess spawning. */
-bool cbm_http_server_resolve_binary_path(const char *argv0, char *out, size_t outsz);
-
 /* Pure git-remote URL helpers used by GET /api/repo-info. Exposed for tests. */
 
 /* Normalize a git remote (scp-style / ssh:// / https://) to a canonical

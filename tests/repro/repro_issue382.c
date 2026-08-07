@@ -70,6 +70,7 @@
  */
 
 #include "test_framework.h"
+#include "suites.h"
 #include "cbm.h"
 
 /* Convenience: extract one file, return result (caller frees). */

@@ -85,7 +85,7 @@ static const CBMType *perl_eval_function_call_type(PerlLSPContext *ctx, TSNode n
 static const CBMType *perl_eval_method_call_type(PerlLSPContext *ctx, TSNode node);
 static const CBMType *perl_eval_new_type(PerlLSPContext *ctx, TSNode node);
 static void perl_emit_resolved(PerlLSPContext *ctx, const char *callee_qn, const char *strategy,
-                               float confidence, TSNode site);
+                               double confidence, TSNode site);
 static void perl_resolve_direct_coderef_arguments(PerlLSPContext *ctx, TSNode call);
 
 /* ── helpers ────────────────────────────────────────────────────── */
@@ -626,7 +626,7 @@ static const CBMType *perl_eval_method_call_type(PerlLSPContext *ctx, TSNode nod
 /* ── emit ───────────────────────────────────────────────────────── */
 
 static void perl_emit_resolved(PerlLSPContext *ctx, const char *callee_qn, const char *strategy,
-                               float confidence, TSNode site) {
+                               double confidence, TSNode site) {
     if (!ctx->resolved_calls || !callee_qn || !ctx->enclosing_func_qn)
         return;
     CBMResolvedCall rc = {0};

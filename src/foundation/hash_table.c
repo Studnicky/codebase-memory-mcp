@@ -32,7 +32,7 @@
 #define VAL_TY void *
 #define HASH_FN vt_hash_string
 #define CMPR_FN vt_cmpr_string
-#include "../../internal/cbm/vendored/verstable/verstable.h"
+#include <verstable.h>
 
 /* The opaque CBMHashTable struct holds the Verstable instance + a
  * count cache (Verstable's _size traversal is O(buckets) so we keep
@@ -41,7 +41,7 @@ struct CBMHashTable {
     cbm_vt vt;
 };
 
-CBMHashTable *cbm_ht_create(uint32_t initial_capacity) {
+CBMHashTable *cbm_ht_create(size_t initial_capacity) {
     CBMHashTable *ht = (CBMHashTable *)calloc(CBM_ALLOC_ONE, sizeof(*ht));
     if (!ht)
         return NULL;
@@ -49,7 +49,7 @@ CBMHashTable *cbm_ht_create(uint32_t initial_capacity) {
     if (initial_capacity > 0) {
         /* Reserve enough buckets for the requested entries. Verstable
          * computes the minimum bucket count internally. */
-        if (!cbm_vt_reserve(&ht->vt, (size_t)initial_capacity)) {
+        if (!cbm_vt_reserve(&ht->vt, initial_capacity)) {
             cbm_vt_cleanup(&ht->vt);
             free(ht);
             return NULL;

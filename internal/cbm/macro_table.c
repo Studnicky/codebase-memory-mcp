@@ -107,8 +107,8 @@ void cbm_parse_inc_file(CBMMacroTable *t, CBMArena *arena, const char *content) 
                 goto next_line;
 
             char name[256];
-            int nlen = (int)(p - name_start);
-            if (nlen >= (int)sizeof(name))
+            size_t nlen = (size_t)(p - name_start);
+            if (nlen >= sizeof(name))
                 goto next_line;
             memcpy(name, name_start, nlen);
             name[nlen] = '\0';
@@ -128,7 +128,7 @@ void cbm_parse_inc_file(CBMMacroTable *t, CBMArena *arena, const char *content) 
                     const char *pn_start = p;
                     while (*p && *p != ',' && *p != ')' && p < end)
                         p++;
-                    int plen = (int)(p - pn_start);
+                    size_t plen = (size_t)(p - pn_start);
                     while (plen > 0 && (pn_start[plen - 1] == ' ' || pn_start[plen - 1] == '\t'))
                         plen--;
                     if (plen > 0 && param_count < CBM_MACRO_MAX_PARAMS) {
@@ -146,7 +146,8 @@ void cbm_parse_inc_file(CBMMacroTable *t, CBMArena *arena, const char *content) 
 
             while (*p == ' ' || *p == '\t')
                 p++;
-            int explen = (int)(end - p);
+            /* p never advances past end above, so end - p is never negative. */
+            size_t explen = (size_t)(end - p);
             while (explen > 0 &&
                    (p[explen - 1] == '\r' || p[explen - 1] == ' ' || p[explen - 1] == '\t'))
                 explen--;
@@ -180,13 +181,13 @@ char *cbm_macro_expand(CBMArena *arena, const CBMMacroEntry *entry, const char *
             for (int i = 0; i < entry->param_count && i < CBM_MACRO_MAX_PARAMS; i++) {
                 if (!entry->param_names[i])
                     continue;
-                int pnlen = (int)strlen(entry->param_names[i]);
+                size_t pnlen = strlen(entry->param_names[i]);
                 if (strncasecmp(p, entry->param_names[i], pnlen) == 0) {
                     const char *arg = (args && i < arg_count) ? args[i] : "";
-                    int alen = (int)strlen(arg);
-                    if (out + alen < (int)sizeof(buf) - 1) {
+                    size_t alen = strlen(arg);
+                    if ((size_t)out + alen < sizeof(buf) - 1) {
                         memcpy(buf + out, arg, alen);
-                        out += alen;
+                        out += (int)alen;
                     }
                     p += pnlen;
                     matched = true;

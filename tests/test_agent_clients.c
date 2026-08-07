@@ -1,5 +1,6 @@
 /* test_agent_clients.c — Agent-client registry, resolution, and owned MCP edits. */
 #include "test_framework.h"
+#include "suites.h"
 #include "test_helpers.h"
 
 #include <cli/agent_clients.h>

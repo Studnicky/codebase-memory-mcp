@@ -4,6 +4,7 @@
  * RED phase: Tests define expected filtering behavior for the discover module.
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "test_helpers.h"
 #include "discover/discover.h"
 #include "foundation/platform.h"

@@ -1284,7 +1284,7 @@ static const CBMType *eval_member_call_type(PHPLSPContext *ctx, TSNode call_node
 /* ── emit ───────────────────────────────────────────────────────── */
 
 static void emit_resolved_reason_kind(PHPLSPContext *ctx, const char *callee_qn,
-                                      const char *strategy, float confidence, const char *reason,
+                                      const char *strategy, double confidence, const char *reason,
                                       CBMResolvedKind kind) {
     if (!ctx->resolved_calls || !callee_qn || !ctx->enclosing_func_qn)
         return;
@@ -1299,7 +1299,7 @@ static void emit_resolved_reason_kind(PHPLSPContext *ctx, const char *callee_qn,
 }
 
 static void emit_resolved_kind(PHPLSPContext *ctx, const char *callee_qn, const char *strategy,
-                               float confidence, CBMResolvedKind kind) {
+                               double confidence, CBMResolvedKind kind) {
     emit_resolved_reason_kind(ctx, callee_qn, strategy, confidence, NULL, kind);
 }
 

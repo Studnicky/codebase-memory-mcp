@@ -131,7 +131,8 @@ int64_t cbm_calculate_p99(int64_t *values, int count) {
     if (!values || count <= 0) {
         return 0;
     }
-    qsort(values, count, sizeof(int64_t), cmp_int64);
+    /* count > 0 is established above, so the cast to size_t is safe. */
+    qsort(values, (size_t)count, sizeof(int64_t), cmp_int64);
 #define P99_PERCENTILE 0.99
 
     int idx = (int)((double)count * P99_PERCENTILE);

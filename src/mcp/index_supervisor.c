@@ -5,12 +5,11 @@
 
 #include "daemon/runtime.h"
 #include "foundation/compat.h"
-#include "foundation/compat_fs.h" /* cbm_mkdir_p, cbm_fopen */
+#include "foundation/compat_fs.h" /* cbm_mkdir_p, cbm_fopen, cbm_resolve_executable_path */
 #include "foundation/constants.h"
 #include "foundation/log.h"
 #include "foundation/platform.h" /* cbm_safe_getenv, path normalization */
 #include "foundation/profile.h"  /* cbm_profile_active (keep worker log under CBM_PROFILE) */
-#include "ui/http_server.h"      /* cbm_http_server_resolve_binary_path */
 
 #include <stdio.h>
 #include <stdint.h>
@@ -607,7 +606,7 @@ int cbm_index_worker_start_with_log(const char *args_json, size_t memory_budget_
     }
 
     char self[INDEX_WORKER_PATH_CAP] = {0};
-    if (!cbm_http_server_resolve_binary_path(NULL, self, sizeof(self)) || !self[0]) {
+    if (!cbm_resolve_executable_path(NULL, self, sizeof(self)) || !self[0]) {
         cbm_log_error("index.supervisor.no_self_path", "action", "fail_closed");
         return -1;
     }

@@ -1,5 +1,6 @@
 /* Reproduction for temporary directories leaked by repro_harness failures. */
 #include "test_framework.h"
+#include "suites.h"
 #include "repro_harness.h"
 
 #include <stdio.h>

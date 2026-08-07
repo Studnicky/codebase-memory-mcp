@@ -7,6 +7,7 @@
 #include "../src/foundation/compat.h"
 #include "foundation/platform.h" // cbm_normalize_path_sep (drive-canonicalization regression)
 #include "test_framework.h"
+#include "suites.h"
 #include "test_helpers.h"
 #include "foundation/mem.h" // cbm_mem_init/budget (back-pressure futile-nap test)
 #include "pipeline/pipeline.h"
@@ -1051,14 +1052,13 @@ static NamedEdgePropertyObservation observe_named_edge_callee_property(
     }
     observation.database_opened = true;
 
-    static const char sql[] =
-        "SELECT e.properties, json_valid(e.properties), "
-        "CASE WHEN json_valid(e.properties) "
-        "THEN json_extract(e.properties, '$.callee') END "
-        "FROM edges e "
-        "JOIN nodes src ON src.id=e.source_id AND src.project=e.project "
-        "JOIN nodes tgt ON tgt.id=e.target_id AND tgt.project=e.project "
-        "WHERE e.project=?1 AND e.type=?2 AND src.name=?3 AND tgt.name=?4;";
+    static const char sql[] = "SELECT e.properties, json_valid(e.properties), "
+                              "CASE WHEN json_valid(e.properties) "
+                              "THEN json_extract(e.properties, '$.callee') END "
+                              "FROM edges e "
+                              "JOIN nodes src ON src.id=e.source_id AND src.project=e.project "
+                              "JOIN nodes tgt ON tgt.id=e.target_id AND tgt.project=e.project "
+                              "WHERE e.project=?1 AND e.type=?2 AND src.name=?3 AND tgt.name=?4;";
     sqlite3_stmt *stmt = NULL;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK ||
         sqlite3_bind_text(stmt, 1, project, -1, SQLITE_TRANSIENT) != SQLITE_OK ||
@@ -1746,13 +1746,13 @@ TEST(pipeline_call_reference_sequential_parallel_edge_set_parity) {
     long_reference_name[0] = 'l';
     long_reference_name[LONG_REFERENCE_NAME_LEN] = '\0';
     char long_reference_source[1024];
-    int long_reference_source_len = snprintf(
-        long_reference_source, sizeof(long_reference_source),
-        "package parity\n"
-        "func %s() {}\n"
-        "func longPropertiesReferenceAccept(callback func()) {}\n"
-        "func longPropertiesReferenceSite() { longPropertiesReferenceAccept(%s) }\n",
-        long_reference_name, long_reference_name);
+    int long_reference_source_len =
+        snprintf(long_reference_source, sizeof(long_reference_source),
+                 "package parity\n"
+                 "func %s() {}\n"
+                 "func longPropertiesReferenceAccept(callback func()) {}\n"
+                 "func longPropertiesReferenceSite() { longPropertiesReferenceAccept(%s) }\n",
+                 long_reference_name, long_reference_name);
     if (long_reference_source_len <= 0 ||
         (size_t)long_reference_source_len >= sizeof(long_reference_source)) {
         th_rmtree(tmp);
@@ -1940,18 +1940,18 @@ TEST(pipeline_call_reference_sequential_parallel_edge_set_parity) {
                 named_edge_count(sequential_store, sequential_project, "CALLS",
                                  shadow_controls[i].source_name, shadow_controls[i].target_name);
         }
-        sequential_long_reference = named_edge_count(
-            sequential_store, sequential_project, "CALL_REFERENCE", "longPropertiesReferenceSite",
-            long_reference_name);
-        sequential_long_usage = named_edge_count(sequential_store, sequential_project, "USAGE",
-                                                 "longPropertiesReferenceSite",
-                                                 long_reference_name);
-        sequential_long_calls = named_edge_count(sequential_store, sequential_project, "CALLS",
-                                                 "longPropertiesReferenceSite",
-                                                 long_reference_name);
+        sequential_long_reference =
+            named_edge_count(sequential_store, sequential_project, "CALL_REFERENCE",
+                             "longPropertiesReferenceSite", long_reference_name);
+        sequential_long_usage =
+            named_edge_count(sequential_store, sequential_project, "USAGE",
+                             "longPropertiesReferenceSite", long_reference_name);
+        sequential_long_calls =
+            named_edge_count(sequential_store, sequential_project, "CALLS",
+                             "longPropertiesReferenceSite", long_reference_name);
         sequential_long_property = observe_named_edge_callee_property(
-            sequential_db_path, sequential_project, "CALL_REFERENCE",
-            "longPropertiesReferenceSite", long_reference_name, long_reference_name);
+            sequential_db_path, sequential_project, "CALL_REFERENCE", "longPropertiesReferenceSite",
+            long_reference_name, long_reference_name);
         cbm_store_close(sequential_store);
     }
     cbm_pipeline_free(sequential);
@@ -1989,9 +1989,9 @@ TEST(pipeline_call_reference_sequential_parallel_edge_set_parity) {
                 named_edge_count(parallel_store, parallel_project, "CALLS",
                                  shadow_controls[i].source_name, shadow_controls[i].target_name);
         }
-        parallel_long_reference = named_edge_count(
-            parallel_store, parallel_project, "CALL_REFERENCE", "longPropertiesReferenceSite",
-            long_reference_name);
+        parallel_long_reference =
+            named_edge_count(parallel_store, parallel_project, "CALL_REFERENCE",
+                             "longPropertiesReferenceSite", long_reference_name);
         parallel_long_usage = named_edge_count(parallel_store, parallel_project, "USAGE",
                                                "longPropertiesReferenceSite", long_reference_name);
         parallel_long_calls = named_edge_count(parallel_store, parallel_project, "CALLS",
@@ -2339,8 +2339,8 @@ static void closure_probe_repo(const char *tmp) {
 }
 
 /* Fresh full reference build of the same tree into its own DB. */
-static void closure_fresh_full(const char *tmp, const char *db_path, int *out_nodes,
-                               int *out_edges, int *out_ref_edges, const char *project_hint) {
+static void closure_fresh_full(const char *tmp, const char *db_path, int *out_nodes, int *out_edges,
+                               int *out_ref_edges, const char *project_hint) {
     *out_nodes = -1;
     *out_edges = -2;
     *out_ref_edges = -3;
@@ -2357,9 +2357,9 @@ static void closure_fresh_full(const char *tmp, const char *db_path, int *out_no
         if (store) {
             *out_nodes = cbm_store_count_nodes(store, project);
             *out_edges = cbm_store_count_edges(store, project);
-            *out_ref_edges = named_edge_to_file_count(store, project, "CALL_REFERENCE",
-                                                      "closureProbeCaller", "closureProbeHelper",
-                                                      "lib.ts");
+            *out_ref_edges =
+                named_edge_to_file_count(store, project, "CALL_REFERENCE", "closureProbeCaller",
+                                         "closureProbeHelper", "lib.ts");
             cbm_store_close(store);
         }
     }
@@ -2444,8 +2444,8 @@ TEST(pipeline_closure_repair_body_edit_converges_with_fresh_full) {
     ASSERT_NOT_NULL(store);
     repaired_nodes = cbm_store_count_nodes(store, project);
     repaired_edges = cbm_store_count_edges(store, project);
-    repaired_refs = named_edge_to_file_count(store, project, "CALL_REFERENCE",
-                                             "closureProbeCaller", "closureProbeHelper", "lib.ts");
+    repaired_refs = named_edge_to_file_count(store, project, "CALL_REFERENCE", "closureProbeCaller",
+                                             "closureProbeHelper", "lib.ts");
     cbm_store_close(store);
 
     char full_db[512];
@@ -2501,8 +2501,8 @@ TEST(pipeline_closure_repair_removed_def_drops_dependent_edge) {
     int repaired_refs = -1;
     cbm_store_t *store = cbm_store_open_path(db);
     ASSERT_NOT_NULL(store);
-    repaired_refs = named_edge_to_file_count(store, project, "CALL_REFERENCE",
-                                             "closureProbeCaller", "closureProbeHelper", "lib.ts");
+    repaired_refs = named_edge_to_file_count(store, project, "CALL_REFERENCE", "closureProbeCaller",
+                                             "closureProbeHelper", "lib.ts");
     int repaired_nodes = cbm_store_count_nodes(store, project);
     int repaired_edges = cbm_store_count_edges(store, project);
     cbm_store_close(store);
@@ -2745,8 +2745,7 @@ TEST(pipeline_incremental_tsconfig_alias_change_matches_fresh_full) {
      * target_a.ts to target_b.ts. Since alias-config governance landed this
      * runs as a closure repair, and the convergence assertions below now
      * prove that route rather than being satisfied by a full rebuild. */
-    ASSERT_EQ(cbm_pipeline_incremental_test_last_route(),
-              CBM_INCREMENTAL_ROUTE_CLOSURE_REPAIR);
+    ASSERT_EQ(cbm_pipeline_incremental_test_last_route(), CBM_INCREMENTAL_ROUTE_CLOSURE_REPAIR);
     const char *incremental_project = cbm_pipeline_project_name(incremental);
     cbm_store_t *incremental_store = cbm_store_open_path(incremental_db);
     ASSERT_NOT_NULL(incremental_store);
@@ -2934,8 +2933,8 @@ TEST(pipeline_publication_never_uses_a_predictable_staging_path) {
     static const char canary[] = "canary-must-survive\n";
     char canary_path[PREDICTABLE_CANARIES][640];
     for (int i = 0; i < PREDICTABLE_CANARIES; i++) {
-        snprintf(canary_path[i], sizeof(canary_path[i]), "%s.stage.%ld.%d", db_path,
-                 (long)getpid(), i + 1);
+        snprintf(canary_path[i], sizeof(canary_path[i]), "%s.stage.%ld.%d", db_path, (long)getpid(),
+                 i + 1);
         ASSERT_EQ(th_write_file(canary_path[i], canary), 0);
     }
 
@@ -4945,8 +4944,11 @@ TEST(githistory_limits_to_max) {
     int npairs = nfiles * (nfiles - 1) / 2;
     int ncommits = npairs * 3;
 
-    cbm_commit_files_t *commits = calloc(ncommits, sizeof(cbm_commit_files_t));
-    char **file_strs = calloc(nfiles, sizeof(char *));
+    /* nfiles/ncommits are provably non-negative test constants (nfiles=50,
+     * derived arithmetic all positive); kept int because they feed
+     * cbm_compute_change_coupling's int commit_count parameter below. */
+    cbm_commit_files_t *commits = calloc((size_t)ncommits, sizeof(cbm_commit_files_t));
+    char **file_strs = calloc((size_t)nfiles, sizeof(char *));
     for (int i = 0; i < nfiles; i++) {
         file_strs[i] = malloc(32);
         snprintf(file_strs[i], 32, "f%d.go", i);
@@ -5046,32 +5048,40 @@ TEST(implements_creates_override) {
     ASSERT_NOT_NULL(gb);
 
     /* Interface "Reader" with methods "Read" and "Close" */
-    int64_t iface_id =
-        cbm_gbuf_upsert_node(gb, "Interface", "Reader", "pkg.Reader", "pkg/reader.go", 1, 5, "{}");
+    int64_t iface_id = cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "Interface", "Reader", "pkg.Reader", "pkg/reader.go", 1, 5, "{}"));
     ASSERT_GT(iface_id, 0);
 
-    int64_t read_method_id =
-        cbm_gbuf_upsert_node(gb, "Method", "Read", "pkg.Reader.Read", "pkg/reader.go", 2, 2, "{}");
-    int64_t close_method_id = cbm_gbuf_upsert_node(gb, "Method", "Close", "pkg.Reader.Close",
-                                                   "pkg/reader.go", 3, 3, "{}");
+    int64_t read_method_id = cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "Method", "Read", "pkg.Reader.Read", "pkg/reader.go", 2, 2, "{}"));
+    int64_t close_method_id = cbm_node_id_value(cbm_gbuf_upsert_node(
+        gb, "Method", "Close", "pkg.Reader.Close", "pkg/reader.go", 3, 3, "{}"));
     ASSERT_GT(read_method_id, 0);
     ASSERT_GT(close_method_id, 0);
 
     /* DEFINES_METHOD edges */
-    cbm_gbuf_insert_edge(gb, iface_id, read_method_id, "DEFINES_METHOD", "{}");
-    cbm_gbuf_insert_edge(gb, iface_id, close_method_id, "DEFINES_METHOD", "{}");
+    cbm_edge_id_value(
+        cbm_gbuf_insert_edge(gb,
+                             (cbm_edge_endpoints_t){.source = cbm_node_id(iface_id),
+                                                    .target = cbm_node_id(read_method_id)},
+                             "DEFINES_METHOD", "{}"));
+    cbm_edge_id_value(
+        cbm_gbuf_insert_edge(gb,
+                             (cbm_edge_endpoints_t){.source = cbm_node_id(iface_id),
+                                                    .target = cbm_node_id(close_method_id)},
+                             "DEFINES_METHOD", "{}"));
 
     /* Class "FileReader" with matching methods */
-    int64_t class_id = cbm_gbuf_upsert_node(gb, "Class", "FileReader", "pkg.FileReader",
-                                            "pkg/filereader.go", 1, 10, "{}");
+    int64_t class_id = cbm_node_id_value(cbm_gbuf_upsert_node(
+        gb, "Class", "FileReader", "pkg.FileReader", "pkg/filereader.go", 1, 10, "{}"));
     ASSERT_GT(class_id, 0);
 
-    int64_t fr_read_id =
+    int64_t fr_read_id = cbm_node_id_value(
         cbm_gbuf_upsert_node(gb, "Method", "Read", "pkg.FileReader.Read", "pkg/filereader.go", 2, 4,
-                             "{\"receiver\":\"(f *FileReader)\"}");
-    int64_t fr_close_id =
+                             "{\"receiver\":\"(f *FileReader)\"}"));
+    int64_t fr_close_id = cbm_node_id_value(
         cbm_gbuf_upsert_node(gb, "Method", "Close", "pkg.FileReader.Close", "pkg/filereader.go", 5,
-                             7, "{\"receiver\":\"(f *FileReader)\"}");
+                             7, "{\"receiver\":\"(f *FileReader)\"}"));
     ASSERT_GT(fr_read_id, 0);
     ASSERT_GT(fr_close_id, 0);
 
@@ -5090,29 +5100,29 @@ TEST(implements_creates_override) {
     /* Verify IMPLEMENTS edge: FileReader → Reader */
     const cbm_gbuf_edge_t **impl_edges = NULL;
     int impl_count = 0;
-    int rc =
-        cbm_gbuf_find_edges_by_source_type(gb, class_id, "IMPLEMENTS", &impl_edges, &impl_count);
+    int rc = cbm_gbuf_find_edges_by_source_type(gb, cbm_node_id(class_id), "IMPLEMENTS",
+                                                &impl_edges, &impl_count);
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(impl_count, 1);
-    ASSERT_EQ(impl_edges[0]->target_id, iface_id);
+    ASSERT_EQ(impl_edges[0]->target_id.v, iface_id);
 
     /* Verify OVERRIDE edges: FileReader.Read → Reader.Read */
     const cbm_gbuf_edge_t **read_overrides = NULL;
     int read_override_count = 0;
-    rc = cbm_gbuf_find_edges_by_source_type(gb, fr_read_id, "OVERRIDE", &read_overrides,
-                                            &read_override_count);
+    rc = cbm_gbuf_find_edges_by_source_type(gb, cbm_node_id(fr_read_id), "OVERRIDE",
+                                            &read_overrides, &read_override_count);
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(read_override_count, 1);
-    ASSERT_EQ(read_overrides[0]->target_id, read_method_id);
+    ASSERT_EQ(read_overrides[0]->target_id.v, read_method_id);
 
     /* Verify OVERRIDE edge: FileReader.Close → Reader.Close */
     const cbm_gbuf_edge_t **close_overrides = NULL;
     int close_override_count = 0;
-    rc = cbm_gbuf_find_edges_by_source_type(gb, fr_close_id, "OVERRIDE", &close_overrides,
-                                            &close_override_count);
+    rc = cbm_gbuf_find_edges_by_source_type(gb, cbm_node_id(fr_close_id), "OVERRIDE",
+                                            &close_overrides, &close_override_count);
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(close_override_count, 1);
-    ASSERT_EQ(close_overrides[0]->target_id, close_method_id);
+    ASSERT_EQ(close_overrides[0]->target_id.v, close_method_id);
 
     cbm_gbuf_free(gb);
     PASS();
@@ -5125,21 +5135,26 @@ TEST(implements_no_match) {
     ASSERT_NOT_NULL(gb);
 
     /* Interface "ReadWriter" with methods "Read" and "Write" */
-    int64_t iface_id = cbm_gbuf_upsert_node(gb, "Interface", "ReadWriter", "pkg.ReadWriter",
-                                            "pkg/rw.go", 1, 5, "{}");
-    int64_t read_id =
-        cbm_gbuf_upsert_node(gb, "Method", "Read", "pkg.ReadWriter.Read", "pkg/rw.go", 2, 2, "{}");
-    int64_t write_id = cbm_gbuf_upsert_node(gb, "Method", "Write", "pkg.ReadWriter.Write",
-                                            "pkg/rw.go", 3, 3, "{}");
-    cbm_gbuf_insert_edge(gb, iface_id, read_id, "DEFINES_METHOD", "{}");
-    cbm_gbuf_insert_edge(gb, iface_id, write_id, "DEFINES_METHOD", "{}");
+    int64_t iface_id = cbm_node_id_value(cbm_gbuf_upsert_node(
+        gb, "Interface", "ReadWriter", "pkg.ReadWriter", "pkg/rw.go", 1, 5, "{}"));
+    int64_t read_id = cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "Method", "Read", "pkg.ReadWriter.Read", "pkg/rw.go", 2, 2, "{}"));
+    int64_t write_id = cbm_node_id_value(cbm_gbuf_upsert_node(
+        gb, "Method", "Write", "pkg.ReadWriter.Write", "pkg/rw.go", 3, 3, "{}"));
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(iface_id), .target = cbm_node_id(read_id)},
+        "DEFINES_METHOD", "{}"));
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb,
+        (cbm_edge_endpoints_t){.source = cbm_node_id(iface_id), .target = cbm_node_id(write_id)},
+        "DEFINES_METHOD", "{}"));
 
     /* Struct "OnlyReader" with only "Read" (missing "Write") */
-    int64_t class_id = cbm_gbuf_upsert_node(gb, "Class", "OnlyReader", "pkg.OnlyReader",
-                                            "pkg/onlyreader.go", 1, 10, "{}");
-    int64_t or_read_id =
+    int64_t class_id = cbm_node_id_value(cbm_gbuf_upsert_node(
+        gb, "Class", "OnlyReader", "pkg.OnlyReader", "pkg/onlyreader.go", 1, 10, "{}"));
+    int64_t or_read_id = cbm_node_id_value(
         cbm_gbuf_upsert_node(gb, "Method", "Read", "pkg.OnlyReader.Read", "pkg/onlyreader.go", 2, 4,
-                             "{\"receiver\":\"(o *OnlyReader)\"}");
+                             "{\"receiver\":\"(o *OnlyReader)\"}"));
 
     /* Run Go-style implements detection */
     atomic_int cancelled = 0;
@@ -5156,13 +5171,14 @@ TEST(implements_no_match) {
     /* Verify NO IMPLEMENTS edge */
     const cbm_gbuf_edge_t **impl_edges = NULL;
     int impl_count = 0;
-    cbm_gbuf_find_edges_by_source_type(gb, class_id, "IMPLEMENTS", &impl_edges, &impl_count);
+    cbm_gbuf_find_edges_by_source_type(gb, cbm_node_id(class_id), "IMPLEMENTS", &impl_edges,
+                                       &impl_count);
     ASSERT_EQ(impl_count, 0);
 
     /* Verify NO OVERRIDE edge */
     const cbm_gbuf_edge_t **override_edges = NULL;
     int override_count = 0;
-    cbm_gbuf_find_edges_by_source_type(gb, or_read_id, "OVERRIDE", &override_edges,
+    cbm_gbuf_find_edges_by_source_type(gb, cbm_node_id(or_read_id), "OVERRIDE", &override_edges,
                                        &override_count);
     ASSERT_EQ(override_count, 0);
 
@@ -5821,7 +5837,7 @@ TEST(pipeline_swift_cross_package_import) {
     cbm_edge_t *edges = NULL;
     int ec = 0;
     ASSERT_EQ(cbm_store_find_edges_by_source_type(s, importer.id, "IMPORTS", &edges, &ec),
-             CBM_STORE_OK);
+              CBM_STORE_OK);
 
     bool found_exact_edge = false;
     for (int i = 0; i < ec; i++) {
@@ -8515,20 +8531,20 @@ TEST(registry_find_by_name) {
     cbm_registry_add(reg, "transform", "proj.utils.DataProcessor.transform", "Method");
 
     /* FindByName returns all entries for "Foo" */
-    const char **foos = NULL;
+    char *const *foos = NULL;
     int foos_count = 0;
     cbm_registry_find_by_name(reg, "Foo", &foos, &foos_count);
     ASSERT_EQ(foos_count, 2);
 
     /* FindByName for unique "Bar" */
-    const char **bars = NULL;
+    char *const *bars = NULL;
     int bars_count = 0;
     cbm_registry_find_by_name(reg, "Bar", &bars, &bars_count);
     ASSERT_EQ(bars_count, 1);
     ASSERT_STR_EQ(bars[0], "proj.pkg.Bar");
 
     /* FindByName for "transform" */
-    const char **transforms = NULL;
+    char *const *transforms = NULL;
     int trans_count = 0;
     cbm_registry_find_by_name(reg, "transform", &transforms, &trans_count);
     ASSERT_EQ(trans_count, 1);
@@ -8744,7 +8760,9 @@ static void write_temp_file(const char *dir, const char *name, const char *conte
     char *slash = strrchr(path, '/');
     if (slash) {
         char parent[512];
-        size_t plen = slash - path;
+        /* slash was found inside path by strrchr, so slash >= path and the
+         * difference is always non-negative. */
+        size_t plen = (size_t)(slash - path);
         memcpy(parent, path, plen);
         parent[plen] = '\0';
         /* mkdir -p (simple version, one level) */
@@ -9173,17 +9191,16 @@ static const char *pkg_entries_entry_for(const cbm_pkg_entries_t *e, const char 
  * above for the full end-to-end proof. */
 
 TEST(pkgmap_swift_targets_registers_module) {
-    static const char src[] =
-        "// swift-tools-version:5.9\n"
-        "import PackageDescription\n"
-        "let package = Package(\n"
-        "    name: \"Core\",\n"
-        "    targets: [.target(name: \"Core\", dependencies: [])]\n"
-        ")\n";
+    static const char src[] = "// swift-tools-version:5.9\n"
+                              "import PackageDescription\n"
+                              "let package = Package(\n"
+                              "    name: \"Core\",\n"
+                              "    targets: [.target(name: \"Core\", dependencies: [])]\n"
+                              ")\n";
     cbm_pkg_entries_t entries;
     cbm_pkg_entries_init(&entries);
-    bool ok = cbm_pkgmap_try_parse("Package.swift", "Core/Package.swift", src,
-                                   (int)strlen(src), &entries);
+    bool ok = cbm_pkgmap_try_parse("Package.swift", "Core/Package.swift", src, (int)strlen(src),
+                                   &entries);
     ASSERT_TRUE(ok);
     ASSERT_TRUE(pkg_entries_has_name(&entries, "Core"));
     ASSERT_STR_EQ(pkg_entries_entry_for(&entries, "Core"), "Core/Sources/Core");
@@ -9204,8 +9221,8 @@ TEST(pkgmap_swift_products_do_not_register_alias) {
         ")\n";
     cbm_pkg_entries_t entries;
     cbm_pkg_entries_init(&entries);
-    bool ok = cbm_pkgmap_try_parse("Package.swift", "Core/Package.swift", src,
-                                   (int)strlen(src), &entries);
+    bool ok = cbm_pkgmap_try_parse("Package.swift", "Core/Package.swift", src, (int)strlen(src),
+                                   &entries);
     ASSERT_TRUE(ok);
     ASSERT_FALSE(pkg_entries_has_name(&entries, "CoreKit"));
     ASSERT_TRUE(pkg_entries_has_name(&entries, "CoreImpl"));
@@ -9224,15 +9241,14 @@ TEST(pkgmap_swift_products_do_not_register_alias) {
  * fixture in this file happens to follow `name:` with `dependencies:` or a
  * comma, so this specific shape was previously untested and unnoticed. */
 TEST(pkgmap_swift_target_name_immediately_before_close_paren) {
-    static const char src[] =
-        "let package = Package(\n"
-        "    name: \"Core\",\n"
-        "    targets: [.target(name: \"Core\")]\n"
-        ")\n";
+    static const char src[] = "let package = Package(\n"
+                              "    name: \"Core\",\n"
+                              "    targets: [.target(name: \"Core\")]\n"
+                              ")\n";
     cbm_pkg_entries_t entries;
     cbm_pkg_entries_init(&entries);
-    bool ok = cbm_pkgmap_try_parse("Package.swift", "Core/Package.swift", src,
-                                   (int)strlen(src), &entries);
+    bool ok = cbm_pkgmap_try_parse("Package.swift", "Core/Package.swift", src, (int)strlen(src),
+                                   &entries);
     ASSERT_TRUE(ok);
     ASSERT_TRUE(pkg_entries_has_name(&entries, "Core"));
     ASSERT_STR_EQ(pkg_entries_entry_for(&entries, "Core"), "Core/Sources/Core");
@@ -9250,8 +9266,8 @@ TEST(pkgmap_swift_target_honors_literal_path) {
         ")\n";
     cbm_pkg_entries_t entries;
     cbm_pkg_entries_init(&entries);
-    bool ok = cbm_pkgmap_try_parse("Package.swift", "Core/Package.swift", src,
-                                   (int)strlen(src), &entries);
+    bool ok = cbm_pkgmap_try_parse("Package.swift", "Core/Package.swift", src, (int)strlen(src),
+                                   &entries);
     ASSERT_TRUE(ok);
     ASSERT_TRUE(pkg_entries_has_name(&entries, "Core"));
     ASSERT_STR_EQ(pkg_entries_entry_for(&entries, "Core"), "Core/Vendor/CoreLegacy");
@@ -9265,16 +9281,15 @@ TEST(pkgmap_swift_target_honors_literal_path) {
  * target entirely (fail closed), even though its `name:` is a valid
  * literal. */
 TEST(pkgmap_swift_target_computed_path_fails_closed) {
-    static const char src[] =
-        "let customPath = computePath()\n"
-        "let package = Package(\n"
-        "    name: \"Core\",\n"
-        "    targets: [.target(name: \"Core\", path: customPath)]\n"
-        ")\n";
+    static const char src[] = "let customPath = computePath()\n"
+                              "let package = Package(\n"
+                              "    name: \"Core\",\n"
+                              "    targets: [.target(name: \"Core\", path: customPath)]\n"
+                              ")\n";
     cbm_pkg_entries_t entries;
     cbm_pkg_entries_init(&entries);
-    bool ok = cbm_pkgmap_try_parse("Package.swift", "Core/Package.swift", src,
-                                   (int)strlen(src), &entries);
+    bool ok = cbm_pkgmap_try_parse("Package.swift", "Core/Package.swift", src, (int)strlen(src),
+                                   &entries);
     ASSERT_TRUE(ok);
     ASSERT_EQ(entries.count, 0);
     cbm_pkg_entries_free(&entries);
@@ -9296,8 +9311,8 @@ TEST(pkgmap_swift_target_in_comment_or_string_not_registered) {
         ")\n";
     cbm_pkg_entries_t entries;
     cbm_pkg_entries_init(&entries);
-    bool ok = cbm_pkgmap_try_parse("Package.swift", "App/Package.swift", src,
-                                   (int)strlen(src), &entries);
+    bool ok =
+        cbm_pkgmap_try_parse("Package.swift", "App/Package.swift", src, (int)strlen(src), &entries);
     ASSERT_TRUE(ok);
     ASSERT_TRUE(pkg_entries_has_name(&entries, "App"));
     ASSERT_FALSE(pkg_entries_has_name(&entries, "Decoy"));
@@ -9326,8 +9341,8 @@ TEST(pkgmap_swift_dependencies_do_not_leak_entries) {
         ")\n";
     cbm_pkg_entries_t entries;
     cbm_pkg_entries_init(&entries);
-    bool ok = cbm_pkgmap_try_parse("Package.swift", "App/Package.swift", src,
-                                   (int)strlen(src), &entries);
+    bool ok =
+        cbm_pkgmap_try_parse("Package.swift", "App/Package.swift", src, (int)strlen(src), &entries);
     ASSERT_TRUE(ok);
     ASSERT_TRUE(pkg_entries_has_name(&entries, "App"));
     ASSERT_FALSE(pkg_entries_has_name(&entries, "Core"));
@@ -9342,18 +9357,17 @@ TEST(pkgmap_swift_dependencies_do_not_leak_entries) {
  * (Utils/UtilsPkg) name OTHER modules, not this manifest's own
  * products/targets, so neither mints an entry. */
 TEST(pkgmap_swift_target_name_dependency_does_not_leak_entry) {
-    static const char src[] =
-        "let package = Package(\n"
-        "    name: \"App\",\n"
-        "    targets: [.target(name: \"App\", dependencies: [\n"
-        "        \"Core\",\n"
-        "        .product(name: \"Utils\", package: \"UtilsPkg\")\n"
-        "    ])]\n"
-        ")\n";
+    static const char src[] = "let package = Package(\n"
+                              "    name: \"App\",\n"
+                              "    targets: [.target(name: \"App\", dependencies: [\n"
+                              "        \"Core\",\n"
+                              "        .product(name: \"Utils\", package: \"UtilsPkg\")\n"
+                              "    ])]\n"
+                              ")\n";
     cbm_pkg_entries_t entries;
     cbm_pkg_entries_init(&entries);
-    bool ok = cbm_pkgmap_try_parse("Package.swift", "App/Package.swift", src,
-                                   (int)strlen(src), &entries);
+    bool ok =
+        cbm_pkgmap_try_parse("Package.swift", "App/Package.swift", src, (int)strlen(src), &entries);
     ASSERT_TRUE(ok);
     ASSERT_TRUE(pkg_entries_has_name(&entries, "App"));
     ASSERT_FALSE(pkg_entries_has_name(&entries, "Core"));

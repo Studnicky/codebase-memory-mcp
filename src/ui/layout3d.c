@@ -13,6 +13,7 @@
 #include "foundation/constants.h"
 #include "ui/layout3d.h"
 #include "foundation/log.h"
+#include "foundation/platform.h"
 
 #include <yyjson/yyjson.h>
 
@@ -465,9 +466,9 @@ static void free_edge_array(cbm_edge_t *edges, int count) {
     if (!edges)
         return;
     for (int i = 0; i < count; i++) {
-        free((void *)edges[i].project);
-        free((void *)edges[i].type);
-        free((void *)edges[i].properties_json);
+        safe_str_free(&edges[i].project);
+        safe_str_free(&edges[i].type);
+        safe_str_free(&edges[i].properties_json);
     }
     free(edges);
 }
@@ -573,6 +574,13 @@ cbm_layout_result_t *cbm_layout_compute(cbm_store_t *store, const char *project,
                     int di = find_node_index(id_map, n, te[e].target_id);
                     if (si >= 0 && di >= 0) {
                         if (mapped >= edge_cap) {
+                            /* Doubling an int overflows before the cast can widen
+                             * it, so bound it first and treat the ceiling as the
+                             * allocation failure it would become. */
+                            if (edge_cap > INT_MAX / PAIR_LEN) {
+                                free_edge_array(te + e, tc - e);
+                                goto edges_done;
+                            }
                             int nc = edge_cap * PAIR_LEN;
                             cbm_edge_t *te2 = realloc(all_edges, (size_t)nc * sizeof(cbm_edge_t));
                             int *ts = realloc(es, (size_t)nc * sizeof(int));
@@ -600,9 +608,9 @@ cbm_layout_result_t *cbm_layout_compute(cbm_store_t *store, const char *project,
                         deg[di]++;
                         mapped++;
                     } else {
-                        free((void *)te[e].project);
-                        free((void *)te[e].type);
-                        free((void *)te[e].properties_json);
+                        safe_str_free(&te[e].project);
+                        safe_str_free(&te[e].type);
+                        safe_str_free(&te[e].properties_json);
                     }
                 }
                 free(te);
@@ -789,14 +797,14 @@ void cbm_layout_free(cbm_layout_result_t *r) {
     if (!r)
         return;
     for (int i = 0; i < r->node_count; i++) {
-        free((void *)r->nodes[i].label);
-        free((void *)r->nodes[i].name);
-        free((void *)r->nodes[i].qualified_name);
-        free((void *)r->nodes[i].file_path);
+        safe_str_free(&r->nodes[i].label);
+        safe_str_free(&r->nodes[i].name);
+        safe_str_free(&r->nodes[i].qualified_name);
+        safe_str_free(&r->nodes[i].file_path);
     }
     free(r->nodes);
     for (int i = 0; i < r->edge_count; i++)
-        free((void *)r->edges[i].type);
+        safe_str_free(&r->edges[i].type);
     free(r->edges);
     free(r);
 }

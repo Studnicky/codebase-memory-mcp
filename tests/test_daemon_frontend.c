@@ -2,9 +2,10 @@
  * test_daemon_frontend.c — Exact JSON-RPC cancellation and maintenance.
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "test_helpers.h"
 
-#include "daemon/frontend.h"
+#include "host/frontend.h"
 #include "daemon/ipc.h"
 #include "daemon/service.h"
 #include "daemon/version_cohort.h"

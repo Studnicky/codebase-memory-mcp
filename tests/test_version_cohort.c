@@ -1,5 +1,6 @@
 /* RED contract for exact-build admission shared by one-shot CLI and daemon. */
 #include "test_framework.h"
+#include "suites.h"
 #include "test_helpers.h"
 
 #include "daemon/ipc.h"

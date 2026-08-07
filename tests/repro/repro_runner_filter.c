@@ -1,5 +1,6 @@
 /* Reproductions for the cumulative repro runner itself. */
 #include "test_framework.h"
+#include "suites.h"
 #include "repro_runner.h"
 #include "foundation/compat.h"
 

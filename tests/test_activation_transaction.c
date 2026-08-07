@@ -1,5 +1,6 @@
 /* Transactional install/update/uninstall binary activation contract. */
 #include "test_framework.h"
+#include "suites.h"
 #include "test_helpers.h"
 
 #include "cli/activation_transaction.h"

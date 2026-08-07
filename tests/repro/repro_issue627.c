@@ -88,6 +88,7 @@
 
 #include <foundation/compat.h>
 #include "test_framework.h"
+#include "suites.h"
 #include "repro_harness.h"
 
 #include <string.h>

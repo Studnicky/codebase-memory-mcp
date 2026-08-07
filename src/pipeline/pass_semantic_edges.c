@@ -23,7 +23,7 @@
 #define XXH_INLINE_ALL
 #include "xxhash/xxhash.h"
 
-#include "pipeline/worker_pool.h"
+#include "foundation/worker_pool.h"
 #include "foundation/platform.h"
 #include "foundation/profile.h"
 
@@ -36,7 +36,6 @@
 /* ── Helpers ─────────────────────────────────────────────────────── */
 
 enum {
-    PROPS_BUF = 512,
     MAX_FUNCS_INIT = 4096,
     GROW = 2,
     MAX_CALLEES = 64,
@@ -52,6 +51,8 @@ enum {
     PSE_FP_PREFIX_LEN = 6, /* strlen("\"fp\":\"") */
     PSE_LSH_ROWS_PER_BAND = 2,
     PSE_MIN_FUNCS_FOR_PAIR = 2,
+    /* Serialized decimal precision for a SEMANTICALLY_RELATED edge's "score" prop. */
+    PSE_SCORE_DECIMALS = 3,
 };
 
 /* Scalar weight constants used in score_worker and related helpers. */
@@ -418,7 +419,7 @@ static int cmp_name_ptr(const void *pa, const void *pb) {
  * unstable order changed WHICH neighbors contribute to the semantic vectors
  * and flickered near-threshold SEMANTICALLY_RELATED edges (determinism).
  * Returns a malloc'd array of borrowed name pointers; caller frees the array. */
-static const char **collect_sorted_call_neighbors(const cbm_gbuf_t *gbuf, int64_t node_id,
+static const char **collect_sorted_call_neighbors(const cbm_gbuf_t *gbuf, cbm_node_id_t node_id,
                                                   bool outbound, int *out_n) {
     *out_n = 0;
     const cbm_gbuf_edge_t **edges = NULL;
@@ -434,7 +435,7 @@ static const char **collect_sorted_call_neighbors(const cbm_gbuf_t *gbuf, int64_
     }
     int n = 0;
     for (int e = 0; e < ec; e++) {
-        int64_t id = outbound ? edges[e]->target_id : edges[e]->source_id;
+        cbm_node_id_t id = outbound ? edges[e]->target_id : edges[e]->source_id;
         const cbm_gbuf_node_t *neighbor = cbm_gbuf_find_by_id(gbuf, id);
         if (neighbor && neighbor->name) {
             names[n++] = neighbor->name;
@@ -497,7 +498,7 @@ static int tokenize_node(const cbm_gbuf_node_t *n, const cbm_gbuf_t *gbuf, char 
 
 /* ── Build per-function semantic data ────────────────────────────── */
 
-static void build_api_vec(const cbm_gbuf_t *gbuf, int64_t node_id, cbm_sem_vec_t *out) {
+static void build_api_vec(const cbm_gbuf_t *gbuf, cbm_node_id_t node_id, cbm_sem_vec_t *out) {
     memset(out, 0, sizeof(*out));
     /* Sorted neighbors: stable MAX_CALLEES subset + stable float-accumulation
      * order (see collect_sorted_call_neighbors). */
@@ -937,8 +938,8 @@ static int cmp_node_ptr_by_qn(const void *pa, const void *pb) {
     if (r != 0) {
         return r;
     }
-    if (a->id != b->id) {
-        return a->id < b->id ? -1 : 1;
+    if (!cbm_node_id_eq(a->id, b->id)) {
+        return cbm_node_id_value(a->id) < cbm_node_id_value(b->id) ? -1 : 1;
     }
     return 0;
 }
@@ -978,7 +979,7 @@ static int phase1_scan_functions(cbm_gbuf_t *gbuf, cbm_sem_func_t **out_funcs,
                 func_cap = new_cap;
             }
             memset(&funcs[func_count], 0, sizeof(cbm_sem_func_t));
-            funcs[func_count].node_id = nodes[i]->id;
+            funcs[func_count].node_id = cbm_node_id_value(nodes[i]->id);
             funcs[func_count].file_path = nodes[i]->file_path;
             funcs[func_count].file_ext = file_ext(nodes[i]->file_path);
             node_ptrs[func_count] = nodes[i];
@@ -995,7 +996,7 @@ static int phase1_scan_functions(cbm_gbuf_t *gbuf, cbm_sem_func_t **out_funcs,
      * filled in later phases, so no 12.7 KB structs are moved. */
     qsort(node_ptrs, (size_t)func_count, sizeof(node_ptrs[0]), cmp_node_ptr_by_qn);
     for (int k = 0; k < func_count; k++) {
-        funcs[k].node_id = node_ptrs[k]->id;
+        funcs[k].node_id = cbm_node_id_value(node_ptrs[k]->id);
         funcs[k].file_path = node_ptrs[k]->file_path;
         funcs[k].file_ext = file_ext(node_ptrs[k]->file_path);
     }
@@ -1084,10 +1085,18 @@ static int phase6b_merge_edges(cbm_gbuf_t *gbuf, deferred_edge_buf_t *worker_buf
         if (edge_counts[de->i] >= max_edges || edge_counts[de->j] >= max_edges) {
             continue;
         }
-        char props[PROPS_BUF];
-        snprintf(props, sizeof(props), "{\"score\":%.3f,\"same_file\":%s}", de->score,
-                 de->same_file ? "true" : "false");
-        cbm_gbuf_insert_edge(gbuf, de->source_id, de->target_id, "SEMANTICALLY_RELATED", props);
+        cbm_gbuf_prop_t props[] = {
+            {.key = "score",
+             .kind = CBM_EDGE_PROP_NUMBER,
+             .number = (double)de->score,
+             .decimals = PSE_SCORE_DECIMALS},
+            {.key = "same_file", .kind = CBM_EDGE_PROP_BOOL, .flag = de->same_file},
+        };
+        cbm_gbuf_insert_edge_props(gbuf,
+                                   (cbm_edge_endpoints_t){.source = cbm_node_id(de->source_id),
+                                                          .target = cbm_node_id(de->target_id)},
+                                   "SEMANTICALLY_RELATED", props,
+                                   (int)(sizeof(props) / sizeof(props[0])));
         edge_counts[de->i]++;
         edge_counts[de->j]++;
         total_edges++;
@@ -1199,8 +1208,8 @@ static void phase4_build_and_store_vectors(cbm_gbuf_t *gbuf, cbm_sem_func_t *fun
     cbm_parallel_for_opts_t opts = {.max_workers = worker_count, .force_pthreads = false};
     cbm_parallel_for(worker_count, vec_build_worker, &vc, opts);
     for (int f = 0; f < func_count; f++) {
-        cbm_gbuf_store_vector(gbuf, funcs[f].node_id, &qvecs[(ptrdiff_t)f * CBM_SEM_DIM],
-                              CBM_SEM_DIM);
+        cbm_gbuf_store_vector(gbuf, cbm_node_id(funcs[f].node_id),
+                              &qvecs[(ptrdiff_t)f * CBM_SEM_DIM], CBM_SEM_DIM);
     }
     free(qvecs);
 }

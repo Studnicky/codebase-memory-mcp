@@ -2511,9 +2511,12 @@ static bool runtime_control_request_send(const cbm_daemon_ipc_endpoint_t *endpoi
         return false;
     }
     cbm_daemon_ipc_connection_t *connection = cbm_daemon_ipc_connect(endpoint, timeout_ms);
-    bool sent =
-        connection && cbm_daemon_ipc_send_frame(connection, CBM_DAEMON_FRAME_REQUEST, operation,
-                                                request, (uint32_t)sizeof(request));
+    bool sent = connection &&
+                cbm_daemon_ipc_send_frame(connection, CBM_DAEMON_FRAME_REQUEST,
+                                          /* Operation codes are 1-11 (see
+                                           * cbm_daemon_runtime_operation_t); always
+                                           * representable in the wire-format uint16_t. */
+                                          (uint16_t)operation, request, (uint32_t)sizeof(request));
     cbm_daemon_frame_t frame = {0};
     uint8_t *payload = NULL;
     int received = sent ? cbm_daemon_ipc_receive_frame_bounded(connection, timeout_ms,

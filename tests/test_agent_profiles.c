@@ -1,5 +1,6 @@
 /* test_agent_profiles.c — Canonical Scout/Verify/Audit renderer contracts. */
 #include "test_framework.h"
+#include "suites.h"
 
 #include <cli/agent_profiles.h>
 #include <yyjson/yyjson.h>

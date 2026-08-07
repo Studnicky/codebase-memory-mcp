@@ -8,16 +8,18 @@
  */
 #include "../src/foundation/compat.h"
 #include "test_framework.h"
+#include "suites.h"
 #include "test_helpers.h"
 #include "pipeline/pipeline.h"
 #include "pipeline/pipeline_internal.h"
 #include "pipeline/pass_lsp_cross.h"
 #include "pipeline/lsp_resolve.h"
-#include "pipeline/worker_pool.h"
+#include "foundation/worker_pool.h"
 #include "graph_buffer/graph_buffer.h"
 #include "discover/discover.h"
 #include "foundation/platform.h"
 #include "foundation/log.h"
+#include "foundation/constants.h"
 #include "cbm.h"
 
 #include <stdlib.h>
@@ -148,7 +150,8 @@ static void seed_test_file_nodes(cbm_gbuf_t *gbuf, const char *project,
         const char *slash = strrchr(rel, '/');
         const char *basename = slash ? slash + 1 : rel;
         if (file_qn) {
-            cbm_gbuf_upsert_node(gbuf, "File", basename, file_qn, rel, 0, 0, "{}");
+            cbm_node_id_value(
+                cbm_gbuf_upsert_node(gbuf, "File", basename, file_qn, rel, 0, 0, "{}"));
         }
         free(file_qn);
     }
@@ -163,9 +166,16 @@ static void seed_test_file_nodes(cbm_gbuf_t *gbuf, const char *project,
 static void harness_ctx_free_tables(cbm_pipeline_ctx_t *ctx) {
     if (ctx->return_type_table) {
         for (int i = 0; i < ctx->return_type_table->count; i++) {
-            free((void *)ctx->return_type_table->entries[i].return_type);
+            const char *rt = ctx->return_type_table->entries[i].return_type;
+            safe_str_free(&rt);
         }
-        free((void *)ctx->return_type_table);
+        /* ctx holds this as const (read-only for the resolve passes); this
+         * harness is its sole owner and release point here, so the pointer
+         * is unwrapped via memcpy rather than a qualifier-discarding cast,
+         * mirroring the production teardown in pipeline.c. */
+        CBMReturnTypeTable *owned_rtt;
+        memcpy(&owned_rtt, &ctx->return_type_table, sizeof(owned_rtt));
+        free(owned_rtt);
         ctx->return_type_table = NULL;
     }
 }
@@ -606,8 +616,10 @@ TEST(gbuf_shared_ids_unique) {
     cbm_gbuf_t *ga = cbm_gbuf_new_shared_ids("proj", "/", &shared);
     cbm_gbuf_t *gb = cbm_gbuf_new_shared_ids("proj", "/", &shared);
 
-    int64_t id1 = cbm_gbuf_upsert_node(ga, "Function", "foo", "proj.foo", "a.go", 1, 5, "{}");
-    int64_t id2 = cbm_gbuf_upsert_node(gb, "Function", "bar", "proj.bar", "b.go", 1, 3, "{}");
+    int64_t id1 = cbm_node_id_value(
+        cbm_gbuf_upsert_node(ga, "Function", "foo", "proj.foo", "a.go", 1, 5, "{}"));
+    int64_t id2 = cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "Function", "bar", "proj.bar", "b.go", 1, 3, "{}"));
     ASSERT_GT(id1, 0);
     ASSERT_GT(id2, 0);
     ASSERT_NEQ(id1, id2);
@@ -622,10 +634,10 @@ TEST(gbuf_merge_nodes) {
     cbm_gbuf_t *dst = cbm_gbuf_new_shared_ids("proj", "/", &shared);
     cbm_gbuf_t *src = cbm_gbuf_new_shared_ids("proj", "/", &shared);
 
-    cbm_gbuf_upsert_node(dst, "Function", "a", "proj.a", "a.go", 1, 5, "{}");
-    cbm_gbuf_upsert_node(dst, "Function", "b", "proj.b", "a.go", 6, 10, "{}");
-    cbm_gbuf_upsert_node(src, "Function", "c", "proj.c", "b.go", 1, 5, "{}");
-    cbm_gbuf_upsert_node(src, "Function", "d", "proj.d", "b.go", 6, 10, "{}");
+    cbm_node_id_value(cbm_gbuf_upsert_node(dst, "Function", "a", "proj.a", "a.go", 1, 5, "{}"));
+    cbm_node_id_value(cbm_gbuf_upsert_node(dst, "Function", "b", "proj.b", "a.go", 6, 10, "{}"));
+    cbm_node_id_value(cbm_gbuf_upsert_node(src, "Function", "c", "proj.c", "b.go", 1, 5, "{}"));
+    cbm_node_id_value(cbm_gbuf_upsert_node(src, "Function", "d", "proj.d", "b.go", 6, 10, "{}"));
 
     ASSERT_EQ(cbm_gbuf_node_count(dst), 2);
     cbm_gbuf_merge(dst, src);
@@ -647,19 +659,23 @@ TEST(gbuf_merge_edges) {
     cbm_gbuf_t *dst = cbm_gbuf_new_shared_ids("proj", "/", &shared);
     cbm_gbuf_t *src = cbm_gbuf_new_shared_ids("proj", "/", &shared);
 
-    int64_t a = cbm_gbuf_upsert_node(dst, "Function", "a", "proj.a", "a.go", 1, 5, "{}");
-    int64_t b = cbm_gbuf_upsert_node(dst, "Function", "b", "proj.b", "a.go", 6, 10, "{}");
+    int64_t a =
+        cbm_node_id_value(cbm_gbuf_upsert_node(dst, "Function", "a", "proj.a", "a.go", 1, 5, "{}"));
+    int64_t b = cbm_node_id_value(
+        cbm_gbuf_upsert_node(dst, "Function", "b", "proj.b", "a.go", 6, 10, "{}"));
     /* Put an edge in src that references dst nodes (by ID) */
-    cbm_gbuf_insert_edge(src, a, b, "CALLS", "{}");
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        src, (cbm_edge_endpoints_t){.source = cbm_node_id(a), .target = cbm_node_id(b)}, "CALLS",
+        "{}"));
 
     cbm_gbuf_merge(dst, src);
     ASSERT_GT(cbm_gbuf_edge_count(dst), 0);
 
     const cbm_gbuf_edge_t **edges = NULL;
     int count = 0;
-    cbm_gbuf_find_edges_by_source_type(dst, a, "CALLS", &edges, &count);
+    cbm_gbuf_find_edges_by_source_type(dst, cbm_node_id(a), "CALLS", &edges, &count);
     ASSERT_EQ(count, 1);
-    ASSERT_EQ(edges[0]->target_id, b);
+    ASSERT_EQ(edges[0]->target_id.v, b);
 
     cbm_gbuf_free(src);
     cbm_gbuf_free(dst);
@@ -671,7 +687,7 @@ TEST(gbuf_merge_empty_src) {
     cbm_gbuf_t *dst = cbm_gbuf_new_shared_ids("proj", "/", &shared);
     cbm_gbuf_t *src = cbm_gbuf_new_shared_ids("proj", "/", &shared);
 
-    cbm_gbuf_upsert_node(dst, "Function", "a", "proj.a", "a.go", 1, 5, "{}");
+    cbm_node_id_value(cbm_gbuf_upsert_node(dst, "Function", "a", "proj.a", "a.go", 1, 5, "{}"));
     int before = cbm_gbuf_node_count(dst);
     cbm_gbuf_merge(dst, src);
     ASSERT_EQ(cbm_gbuf_node_count(dst), before);
@@ -686,7 +702,7 @@ TEST(gbuf_merge_src_free_safe) {
     cbm_gbuf_t *dst = cbm_gbuf_new_shared_ids("proj", "/", &shared);
     cbm_gbuf_t *src = cbm_gbuf_new_shared_ids("proj", "/", &shared);
 
-    cbm_gbuf_upsert_node(src, "Function", "x", "proj.x", "x.go", 1, 5, "{}");
+    cbm_node_id_value(cbm_gbuf_upsert_node(src, "Function", "x", "proj.x", "x.go", 1, 5, "{}"));
     cbm_gbuf_merge(dst, src);
     cbm_gbuf_free(src); /* must not crash */
 
@@ -700,11 +716,12 @@ TEST(gbuf_next_id_accessors) {
     cbm_gbuf_t *gb = cbm_gbuf_new("proj", "/");
     ASSERT_EQ(cbm_gbuf_next_id(gb), 1);
 
-    cbm_gbuf_upsert_node(gb, "Function", "foo", "proj.foo", "f.go", 1, 5, "{}");
+    cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "foo", "proj.foo", "f.go", 1, 5, "{}"));
     ASSERT_GT(cbm_gbuf_next_id(gb), 1);
 
     cbm_gbuf_set_next_id(gb, 100);
-    int64_t id = cbm_gbuf_upsert_node(gb, "Function", "bar", "proj.bar", "f.go", 6, 10, "{}");
+    int64_t id = cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "Function", "bar", "proj.bar", "f.go", 6, 10, "{}"));
     ASSERT_GTE(id, 100);
 
     cbm_gbuf_free(gb);
@@ -723,6 +740,19 @@ TEST(gbuf_next_id_accessors) {
  * carries an "lsp_*" strategy — proof the parallel path consults
  * result->resolved_calls and emits LSP-attributed edges. */
 
+/* True when edge's "strategy" string property is exactly `strategy`. */
+static bool edge_has_strategy(const cbm_gbuf_edge_t *edge, const char *strategy) {
+    const char *s = cbm_gbuf_edge_prop_string(edge, "strategy");
+    return s && strcmp(s, strategy) == 0;
+}
+
+/* True when edge's "strategy" string property starts with `prefix`
+ * (e.g. "lsp" matches "lsp", "lsp_exact", "lsp_fallback", ...). */
+static bool edge_has_strategy_prefix(const cbm_gbuf_edge_t *edge, const char *prefix) {
+    const char *s = cbm_gbuf_edge_prop_string(edge, "strategy");
+    return s && strncmp(s, prefix, strlen(prefix)) == 0;
+}
+
 typedef struct {
     int lsp_strategy_count;
     int total_calls;
@@ -734,7 +764,7 @@ static void count_lsp_call_edges(const cbm_gbuf_edge_t *edge, void *ud) {
         return;
     }
     c->total_calls++;
-    if (edge->properties_json && strstr(edge->properties_json, "\"strategy\":\"lsp")) {
+    if (edge_has_strategy_prefix(edge, "lsp")) {
         c->lsp_strategy_count++;
     }
 }
@@ -842,7 +872,7 @@ static int count_edges_between_nodes(const cbm_gbuf_t *gbuf, const cbm_gbuf_node
     }
     int matches = 0;
     for (int i = 0; i < count; i++) {
-        if (edges[i] && edges[i]->target_id == target->id) {
+        if (edges[i] && cbm_node_id_eq(edges[i]->target_id, target->id)) {
             matches++;
         }
     }
@@ -861,7 +891,7 @@ static bool has_edge_from_callable_to_node(const cbm_gbuf_t *gbuf, const char *s
         return false;
     }
     for (int i = 0; i < count; i++) {
-        if (edges[i] && edges[i]->target_id == target->id) {
+        if (edges[i] && cbm_node_id_eq(edges[i]->target_id, target->id)) {
             return true;
         }
     }
@@ -883,7 +913,7 @@ static const cbm_gbuf_edge_t *find_calls_edge_by_tails(const cbm_gbuf_t *gbuf,
         return NULL;
     }
     for (int i = 0; i < count; i++) {
-        if (edges[i] && edges[i]->target_id == target->id) {
+        if (edges[i] && cbm_node_id_eq(edges[i]->target_id, target->id)) {
             return edges[i];
         }
     }
@@ -901,7 +931,7 @@ static bool has_edge_from_callable_to_qn(const cbm_gbuf_t *gbuf, const char *sou
     if (cbm_gbuf_find_edges_by_source_type(gbuf, source->id, edge_type, &edges, &count) != 0)
         return false;
     for (int i = 0; i < count; i++) {
-        if (edges[i] && edges[i]->target_id == target->id)
+        if (edges[i] && cbm_node_id_eq(edges[i]->target_id, target->id))
             return true;
     }
     return false;
@@ -980,7 +1010,7 @@ static void inject_higher_confidence_legacy_render(CBMFileResult **result_cache,
         CBMResolvedCall legacy = *exact;
         legacy.callee_qn = beta_qn;
         legacy.strategy = "test_legacy_zero_span";
-        legacy.confidence = 0.99f;
+        legacy.confidence = 0.99;
         legacy.site_start_byte = 0;
         legacy.site_end_byte = 0;
         cbm_resolvedcall_push(&result->resolved_calls, &result->arena, legacy);
@@ -1103,7 +1133,7 @@ static void inject_distinct_exact_render_target(CBMFileResult **result_cache, in
         CBMResolvedCall ambiguous = *exact;
         ambiguous.callee_qn = beta_qn;
         ambiguous.strategy = "test_distinct_exact_target";
-        ambiguous.confidence = 0.99f;
+        ambiguous.confidence = 0.99;
         cbm_resolvedcall_push(&result->resolved_calls, &result->arena, ambiguous);
         state->injected = true;
         return;
@@ -1229,7 +1259,7 @@ static void inject_legacy_after_exact_render_ambiguity(CBMFileResult **result_ca
         CBMResolvedCall legacy = *exact;
         legacy.callee_qn = legacy_qn;
         legacy.strategy = "test_legacy_after_exact_ambiguity";
-        legacy.confidence = 0.99f;
+        legacy.confidence = 0.99;
         legacy.site_start_byte = 0;
         legacy.site_end_byte = 0;
         cbm_resolvedcall_push(&result->resolved_calls, &result->arena, legacy);
@@ -1285,12 +1315,16 @@ TEST(parallel_lsp_index_exact_ambiguity_does_not_fall_through_to_legacy) {
     if (!probe.ambiguity.injected || !probe.legacy_injected || !probe.carrier_allows_fallback ||
         !probe.shared_matcher_failed_closed || alpha_edges != 1 || beta_edges != 0 ||
         legacy_edges != 0) {
+        char legacy_props[CBM_SZ_256] = "";
+        if (legacy_edge) {
+            cbm_gbuf_edge_props_json(legacy_edge, legacy_props, sizeof(legacy_props));
+        }
         printf("  exact ambiguity + legacy diagnostic: exact_ambiguity=%d legacy=%d "
                "fallback_allowed=%d shared_failed_closed=%d alpha=%d beta=%d legacy_edge=%d "
                "props=%s\n",
                probe.ambiguity.injected, probe.legacy_injected, probe.carrier_allows_fallback,
                probe.shared_matcher_failed_closed, alpha_edges, beta_edges, legacy_edges,
-               legacy_edge && legacy_edge->properties_json ? legacy_edge->properties_json : "");
+               legacy_props);
     }
 
     cbm_gbuf_free(gbuf);
@@ -1357,7 +1391,7 @@ static void inject_long_caller_exact_and_legacy(CBMFileResult **result_cache, in
         CBMResolvedCall legacy = *exact;
         legacy.callee_qn = beta_qn;
         legacy.strategy = "test_long_key_legacy";
-        legacy.confidence = 0.99f;
+        legacy.confidence = 0.99;
         legacy.site_start_byte = 0;
         legacy.site_end_byte = 0;
         cbm_resolvedcall_push(&result->resolved_calls, &result->arena, legacy);
@@ -1584,7 +1618,7 @@ static void inject_call_reference_scale_rows(CBMFileResult **result_cache, int f
             resolved.caller_qn = caller_qn;
             resolved.callee_qn = target->qualified_name;
             resolved.strategy = "test_exact_reference_scale";
-            resolved.confidence = 0.95f;
+            resolved.confidence = 0.95;
             resolved.kind = CBM_RESOLVED_CALL_REFERENCE;
             resolved.site_start_byte = usage.site_start_byte;
             resolved.site_end_byte = usage.site_end_byte;
@@ -1788,7 +1822,7 @@ static void inject_exact_noncallable_reference(CBMFileResult **result_cache, int
         resolved.callee_qn = target_qn;
         resolved.strategy = "lsp_callable_value_reference";
         resolved.reason = usage.ref_name;
-        resolved.confidence = 0.99f;
+        resolved.confidence = 0.99;
         resolved.kind = CBM_RESOLVED_CALL_REFERENCE;
         resolved.site_start_byte = usage.site_start_byte;
         resolved.site_end_byte = usage.site_end_byte;
@@ -2850,12 +2884,12 @@ TEST(parallel_java_kotlin_lsp_override_cross_file_emits_lsp_strategy_edges) {
 
     ASSERT_NOT_NULL(java_to_kotlin);
     ASSERT_NOT_NULL(kotlin_to_java);
-    ASSERT_NOT_NULL(java_to_kotlin->properties_json);
-    ASSERT_NOT_NULL(kotlin_to_java->properties_json);
-    ASSERT_NOT_NULL(strstr(java_to_kotlin->properties_json, "\"strategy\":\"lsp"));
-    ASSERT_NOT_NULL(strstr(kotlin_to_java->properties_json, "\"strategy\":\"lsp"));
-    ASSERT_TRUE(strstr(java_to_kotlin->properties_json, "\"strategy\":\"callee_suffix\"") == NULL);
-    ASSERT_TRUE(strstr(kotlin_to_java->properties_json, "\"strategy\":\"callee_suffix\"") == NULL);
+    ASSERT_TRUE(java_to_kotlin->prop_count > 0);
+    ASSERT_TRUE(kotlin_to_java->prop_count > 0);
+    ASSERT_TRUE(edge_has_strategy_prefix(java_to_kotlin, "lsp"));
+    ASSERT_TRUE(edge_has_strategy_prefix(kotlin_to_java, "lsp"));
+    ASSERT_TRUE(!edge_has_strategy(java_to_kotlin, "callee_suffix"));
+    ASSERT_TRUE(!edge_has_strategy(kotlin_to_java, "callee_suffix"));
 
     cbm_gbuf_free(gbuf);
     unlink(kpath);
@@ -2898,7 +2932,7 @@ TEST(parallel_lsp_tail_match_fallbacks_gated_to_jvm) {
     rc_item.caller_qn = "com.example.pkg.Service.handle";
     rc_item.callee_qn = "com.example.pkg.Helper.run";
     rc_item.strategy = "lsp";
-    rc_item.confidence = 0.9f;
+    rc_item.confidence = 0.9;
     CBMResolvedCallArray arr = {0};
     arr.items = &rc_item;
     arr.count = 1;
@@ -2921,7 +2955,7 @@ TEST(parallel_lsp_tail_match_fallbacks_gated_to_jvm) {
     top_level_rows[0].caller_qn = "app.operatorCaller";
     top_level_rows[0].callee_qn = "app.Box.plus";
     top_level_rows[0].strategy = "lsp_kt_operator";
-    top_level_rows[0].confidence = 0.9f;
+    top_level_rows[0].confidence = 0.9;
     top_level_rows[0].site_start_byte = 80;
     top_level_rows[0].site_end_byte = 92;
     top_level_rows[0].source_origin = CBM_SOURCE_ORIGIN_RAW;
@@ -2954,8 +2988,8 @@ TEST(parallel_lsp_tail_match_fallbacks_gated_to_jvm) {
      * "Helper.run" tail in an unrelated module. */
     cbm_gbuf_t *tgbuf = cbm_gbuf_new("proj", "/tmp");
     ASSERT_NOT_NULL(tgbuf);
-    int64_t nid = cbm_gbuf_upsert_node(tgbuf, "Method", "run", "proj.zeta.Helper.run",
-                                       "zeta/helper.py", 1, 3, NULL);
+    int64_t nid = cbm_node_id_value(cbm_gbuf_upsert_node(
+        tgbuf, "Method", "run", "proj.zeta.Helper.run", "zeta/helper.py", 1, 3, NULL));
     ASSERT_TRUE(nid != 0);
     ASSERT_TRUE(cbm_pipeline_lsp_target_node(tgbuf, "proj", "com.other.Helper.run", false) == NULL);
     const cbm_gbuf_node_t *jvm_hit =
@@ -3215,10 +3249,10 @@ TEST(parallel_cross_file_reread_preserves_unretained_edges) {
         ASSERT_NOT_NULL(kotlin_to_java);
         /* And they must come from the source-dependent cross-file LSP, not a
          * source-free suffix heuristic — proving the re-read actually ran. */
-        ASSERT_NOT_NULL(java_to_kotlin->properties_json);
-        ASSERT_NOT_NULL(strstr(java_to_kotlin->properties_json, "\"strategy\":\"lsp"));
-        ASSERT_NOT_NULL(kotlin_to_java->properties_json);
-        ASSERT_NOT_NULL(strstr(kotlin_to_java->properties_json, "\"strategy\":\"lsp"));
+        ASSERT_TRUE(java_to_kotlin->prop_count > 0);
+        ASSERT_TRUE(edge_has_strategy_prefix(java_to_kotlin, "lsp"));
+        ASSERT_TRUE(kotlin_to_java->prop_count > 0);
+        ASSERT_TRUE(edge_has_strategy_prefix(kotlin_to_java, "lsp"));
 
         cbm_gbuf_free(gbuf);
     }
@@ -3276,7 +3310,7 @@ TEST(grpc_no_phantom_route_from_plain_var_issue294) {
  * resolves to the right resolved entry, and (2) the theoretical
  * mis-attribution edge case (two same-named subs from different namespaces) is
  * bounded by caller-QN equality + the confidence floor. */
-static CBMResolvedCall make_rc(const char *caller, const char *callee, float conf) {
+static CBMResolvedCall make_rc(const char *caller, const char *callee, double conf) {
     CBMResolvedCall rc = {0};
     memset(&rc, 0, sizeof(rc));
     rc.caller_qn = caller;
@@ -3308,7 +3342,7 @@ TEST(lsp_resolve_qualified_static_call_normalizes_colons) {
      * prefix) must still match a resolved entry whose callee_qn short-name is
      * the bare `sub`. This is the cross-language "::"-normalization contract. */
     CBMResolvedCall items[] = {
-        make_rc("proj.mod.caller", "proj.Pkg.sub", 0.9f),
+        make_rc("proj.mod.caller", "proj.Pkg.sub", 0.9),
     };
     CBMResolvedCallArray arr = {items, 1, 1};
     CBMCall call = make_call("proj.mod.caller", "Pkg::sub");
@@ -3330,12 +3364,12 @@ TEST(lsp_resolve_distinct_exact_caller_targets_fail_closed) {
      * legacy occurrence are semantic ambiguity, not a confidence contest.
      * Choosing the higher score would fabricate one exact CALLS target. */
     CBMResolvedCall items[] = {
-        make_rc("proj.mod.caller", "proj.A.foo", 0.7f),
-        make_rc("proj.mod.caller", "proj.B.foo", 0.9f),
+        make_rc("proj.mod.caller", "proj.A.foo", 0.7),
+        make_rc("proj.mod.caller", "proj.B.foo", 0.9),
         /* Below the confidence floor: must be ignored entirely. */
-        make_rc("proj.mod.caller", "proj.C.foo", 0.3f),
+        make_rc("proj.mod.caller", "proj.C.foo", 0.3),
         /* Different caller: must never match regardless of short-name. */
-        make_rc("proj.mod.other", "proj.D.foo", 0.95f),
+        make_rc("proj.mod.other", "proj.D.foo", 0.95),
     };
     CBMResolvedCallArray arr = {items, 4, 4};
     CBMCall call = make_call("proj.mod.caller", "B::foo");
@@ -3359,11 +3393,11 @@ TEST(lsp_resolve_duplicate_exact_caller_rows_same_target_are_not_ambiguous) {
     CBMCall call = make_call("proj.mod.caller", "receiver.render");
     call.site_start_byte = 75;
     call.site_end_byte = 91;
-    CBMResolvedCall low = make_rc("proj.mod.caller", "proj.Alpha.render", 0.75f);
+    CBMResolvedCall low = make_rc("proj.mod.caller", "proj.Alpha.render", 0.75);
     low.site_start_byte = call.site_start_byte;
     low.site_end_byte = call.site_end_byte;
     CBMResolvedCall high = low;
-    high.confidence = 0.95f;
+    high.confidence = 0.95;
     CBMResolvedCall items[] = {low, high};
     CBMResolvedCallArray arr = {items, 2, 2};
 
@@ -3376,10 +3410,10 @@ TEST(lsp_resolve_distinct_exact_caller_site_targets_are_ambiguous) {
     call.site_start_byte = 92;
     call.site_end_byte = 108;
     call.requires_lsp_resolution = true;
-    CBMResolvedCall alpha = make_rc("proj.mod.caller", "proj.Alpha.render", 0.75f);
+    CBMResolvedCall alpha = make_rc("proj.mod.caller", "proj.Alpha.render", 0.75);
     alpha.site_start_byte = call.site_start_byte;
     alpha.site_end_byte = call.site_end_byte;
-    CBMResolvedCall beta = make_rc("proj.mod.caller", "proj.Beta.render", 0.99f);
+    CBMResolvedCall beta = make_rc("proj.mod.caller", "proj.Beta.render", 0.99);
     beta.site_start_byte = call.site_start_byte;
     beta.site_end_byte = call.site_end_byte;
     CBMResolvedCall items[] = {alpha, beta};
@@ -3396,18 +3430,17 @@ TEST(lsp_resolve_project_prefixed_duplicate_is_not_ambiguous) {
     const char *project = "proj";
     cbm_gbuf_t *gbuf = cbm_gbuf_new(project, "/tmp");
     ASSERT_NOT_NULL(gbuf);
-    int64_t target_id = cbm_gbuf_upsert_node(gbuf, "Function", "handler",
-                                             "proj.mod.Target.handler", "target.py", 1, 1, "{}");
+    int64_t target_id = cbm_node_id_value(cbm_gbuf_upsert_node(
+        gbuf, "Function", "handler", "proj.mod.Target.handler", "target.py", 1, 1, "{}"));
     ASSERT_GT(target_id, 0);
 
     CBMCall call = make_call("proj.mod.Caller.run", "handler");
     call.site_start_byte = 110;
     call.site_end_byte = 119;
-    CBMResolvedCall raw = make_rc("proj.mod.Caller.run", "mod.Target.handler", 0.75f);
+    CBMResolvedCall raw = make_rc("proj.mod.Caller.run", "mod.Target.handler", 0.75);
     raw.site_start_byte = call.site_start_byte;
     raw.site_end_byte = call.site_end_byte;
-    CBMResolvedCall prefixed =
-        make_rc("proj.mod.Caller.run", "proj.mod.Target.handler", 0.90f);
+    CBMResolvedCall prefixed = make_rc("proj.mod.Caller.run", "proj.mod.Target.handler", 0.90);
     prefixed.site_start_byte = call.site_start_byte;
     prefixed.site_end_byte = call.site_end_byte;
     CBMResolvedCall items[] = {raw, prefixed};
@@ -3424,11 +3457,10 @@ TEST(lsp_resolve_project_prefix_spellings_stay_ambiguous_when_both_nodes_exist) 
     const char *project = "proj";
     cbm_gbuf_t *gbuf = cbm_gbuf_new(project, "/tmp");
     ASSERT_NOT_NULL(gbuf);
-    int64_t raw_id = cbm_gbuf_upsert_node(gbuf, "Function", "handler", "mod.Target.handler",
-                                          "raw.py", 1, 1, "{}");
-    int64_t prefixed_id = cbm_gbuf_upsert_node(gbuf, "Function", "handler",
-                                               "proj.mod.Target.handler", "prefixed.py", 1, 1,
-                                               "{}");
+    int64_t raw_id = cbm_node_id_value(cbm_gbuf_upsert_node(
+        gbuf, "Function", "handler", "mod.Target.handler", "raw.py", 1, 1, "{}"));
+    int64_t prefixed_id = cbm_node_id_value(cbm_gbuf_upsert_node(
+        gbuf, "Function", "handler", "proj.mod.Target.handler", "prefixed.py", 1, 1, "{}"));
     ASSERT_GT(raw_id, 0);
     ASSERT_GT(prefixed_id, 0);
     ASSERT(raw_id != prefixed_id);
@@ -3436,11 +3468,10 @@ TEST(lsp_resolve_project_prefix_spellings_stay_ambiguous_when_both_nodes_exist) 
     CBMCall call = make_call("proj.mod.Caller.run", "handler");
     call.site_start_byte = 120;
     call.site_end_byte = 129;
-    CBMResolvedCall raw = make_rc("proj.mod.Caller.run", "mod.Target.handler", 0.75f);
+    CBMResolvedCall raw = make_rc("proj.mod.Caller.run", "mod.Target.handler", 0.75);
     raw.site_start_byte = call.site_start_byte;
     raw.site_end_byte = call.site_end_byte;
-    CBMResolvedCall prefixed =
-        make_rc("proj.mod.Caller.run", "proj.mod.Target.handler", 0.90f);
+    CBMResolvedCall prefixed = make_rc("proj.mod.Caller.run", "proj.mod.Target.handler", 0.90);
     prefixed.site_start_byte = call.site_start_byte;
     prefixed.site_end_byte = call.site_end_byte;
     CBMResolvedCall items[] = {raw, prefixed};
@@ -3457,17 +3488,17 @@ TEST(lsp_resolve_jvm_package_alias_of_materialized_target_is_not_ambiguous) {
     const char *project = "proj";
     cbm_gbuf_t *gbuf = cbm_gbuf_new(project, "/tmp");
     ASSERT_NOT_NULL(gbuf);
-    int64_t target_id =
-        cbm_gbuf_upsert_node(gbuf, "Method", "twice", "proj.Util.twice", "Util.java", 1, 1, "{}");
+    int64_t target_id = cbm_node_id_value(
+        cbm_gbuf_upsert_node(gbuf, "Method", "twice", "proj.Util.twice", "Util.java", 1, 1, "{}"));
     ASSERT_GT(target_id, 0);
 
     CBMCall call = make_call("proj.Client.run", "twice");
     call.site_start_byte = 120;
     call.site_end_byte = 128;
-    CBMResolvedCall local = make_rc("proj.Client.run", "proj.Util.twice", 0.92f);
+    CBMResolvedCall local = make_rc("proj.Client.run", "proj.Util.twice", 0.92);
     local.site_start_byte = call.site_start_byte;
     local.site_end_byte = call.site_end_byte;
-    CBMResolvedCall package = make_rc("proj.Client.run", "demo.Util.twice", 0.92f);
+    CBMResolvedCall package = make_rc("proj.Client.run", "demo.Util.twice", 0.92);
     package.site_start_byte = call.site_start_byte;
     package.site_end_byte = call.site_end_byte;
     CBMResolvedCall items[] = {local, package};
@@ -3484,17 +3515,17 @@ TEST(lsp_resolve_jvm_two_tail_only_packages_stay_ambiguous) {
     const char *project = "proj";
     cbm_gbuf_t *gbuf = cbm_gbuf_new(project, "/tmp");
     ASSERT_NOT_NULL(gbuf);
-    int64_t target_id = cbm_gbuf_upsert_node(gbuf, "Method", "run", "proj.generated.Service.run",
-                                             "Service.java", 1, 1, "{}");
+    int64_t target_id = cbm_node_id_value(cbm_gbuf_upsert_node(
+        gbuf, "Method", "run", "proj.generated.Service.run", "Service.java", 1, 1, "{}"));
     ASSERT_GT(target_id, 0);
 
     CBMCall call = make_call("proj.Client.call", "run");
     call.site_start_byte = 130;
     call.site_end_byte = 138;
-    CBMResolvedCall first = make_rc("proj.Client.call", "pkg1.Service.run", 0.80f);
+    CBMResolvedCall first = make_rc("proj.Client.call", "pkg1.Service.run", 0.80);
     first.site_start_byte = call.site_start_byte;
     first.site_end_byte = call.site_end_byte;
-    CBMResolvedCall second = make_rc("proj.Client.call", "pkg2.Service.run", 0.90f);
+    CBMResolvedCall second = make_rc("proj.Client.call", "pkg2.Service.run", 0.90);
     second.site_start_byte = call.site_start_byte;
     second.site_end_byte = call.site_end_byte;
     CBMResolvedCall items[] = {first, second};
@@ -3512,14 +3543,14 @@ TEST(lsp_resolve_exact_site_beats_higher_confidence_legacy_record) {
     call.site_start_byte = 100;
     call.site_end_byte = 117;
 
-    CBMResolvedCall exact = make_rc("proj.mod.caller", "proj.Alpha.render", 0.80f);
+    CBMResolvedCall exact = make_rc("proj.mod.caller", "proj.Alpha.render", 0.80);
     exact.site_start_byte = call.site_start_byte;
     exact.site_end_byte = call.site_end_byte;
 
     /* A legacy resolver record has no occurrence span. Even with greater
      * confidence it must not override the semantic record for this exact
      * carrier occurrence. */
-    CBMResolvedCall legacy = make_rc("proj.mod.caller", "proj.Beta.render", 0.95f);
+    CBMResolvedCall legacy = make_rc("proj.mod.caller", "proj.Beta.render", 0.95);
     CBMResolvedCall items[] = {exact, legacy};
     CBMResolvedCallArray arr = {items, 2, 2};
 
@@ -3536,8 +3567,8 @@ TEST(lsp_resolve_exact_site_beats_equal_confidence_legacy_record) {
 
     /* Put the legacy record first to prove equal-confidence selection is not
      * an array-order accident: occurrence exactness is the primary key. */
-    CBMResolvedCall legacy = make_rc("proj.mod.caller", "proj.Beta.render", 0.90f);
-    CBMResolvedCall exact = make_rc("proj.mod.caller", "proj.Alpha.render", 0.90f);
+    CBMResolvedCall legacy = make_rc("proj.mod.caller", "proj.Beta.render", 0.90);
+    CBMResolvedCall exact = make_rc("proj.mod.caller", "proj.Alpha.render", 0.90);
     exact.site_start_byte = call.site_start_byte;
     exact.site_end_byte = call.site_end_byte;
     CBMResolvedCall items[] = {legacy, exact};
@@ -3556,10 +3587,10 @@ TEST(lsp_resolve_malformed_span_is_not_legacy_compatible) {
 
     /* A reversed/partial span is corrupt occurrence metadata, not a legacy
      * 0:0 record. It must be rejected even when it has greater confidence. */
-    CBMResolvedCall malformed = make_rc("proj.mod.caller", "proj.Wrong.render", 0.99f);
+    CBMResolvedCall malformed = make_rc("proj.mod.caller", "proj.Wrong.render", 0.99);
     malformed.site_start_byte = 317;
     malformed.site_end_byte = 300;
-    CBMResolvedCall legacy = make_rc("proj.mod.caller", "proj.Legacy.render", 0.75f);
+    CBMResolvedCall legacy = make_rc("proj.mod.caller", "proj.Legacy.render", 0.75);
     CBMResolvedCall items[] = {malformed, legacy};
     CBMResolvedCallArray arr = {items, 2, 2};
 
@@ -3573,10 +3604,10 @@ TEST(lsp_resolve_below_floor_exact_does_not_block_legacy) {
     call.site_start_byte = 400;
     call.site_end_byte = 417;
 
-    CBMResolvedCall below_floor = make_rc("proj.mod.caller", "proj.Exact.render", 0.55f);
+    CBMResolvedCall below_floor = make_rc("proj.mod.caller", "proj.Exact.render", 0.55);
     below_floor.site_start_byte = call.site_start_byte;
     below_floor.site_end_byte = call.site_end_byte;
-    CBMResolvedCall legacy = make_rc("proj.mod.caller", "proj.Legacy.render", 0.70f);
+    CBMResolvedCall legacy = make_rc("proj.mod.caller", "proj.Legacy.render", 0.70);
     CBMResolvedCall items[] = {below_floor, legacy};
     CBMResolvedCallArray arr = {items, 2, 2};
 
@@ -3591,7 +3622,7 @@ static CBMCall make_tail_call(uint32_t start, uint32_t end) {
     return call;
 }
 
-static CBMResolvedCall make_tail_rc(const char *callee, float confidence, uint32_t start,
+static CBMResolvedCall make_tail_rc(const char *callee, double confidence, uint32_t start,
                                     uint32_t end) {
     CBMResolvedCall resolved = make_rc("com.example.generated.Service.handle", callee, confidence);
     resolved.site_start_byte = start;
@@ -3601,8 +3632,8 @@ static CBMResolvedCall make_tail_rc(const char *callee, float confidence, uint32
 
 TEST(lsp_tail_exact_site_beats_legacy_regardless_of_order) {
     CBMCall call = make_tail_call(500, 512);
-    CBMResolvedCall exact = make_tail_rc("com.example.Alpha.run", 0.80f, 500, 512);
-    CBMResolvedCall legacy = make_tail_rc("com.example.Beta.run", 0.99f, 0, 0);
+    CBMResolvedCall exact = make_tail_rc("com.example.Alpha.run", 0.80, 500, 512);
+    CBMResolvedCall legacy = make_tail_rc("com.example.Beta.run", 0.99, 0, 0);
     CBMResolvedCall exact_first[] = {exact, legacy};
     CBMResolvedCall legacy_first[] = {legacy, exact};
     CBMResolvedCallArray first = {exact_first, 2, 2};
@@ -3615,8 +3646,8 @@ TEST(lsp_tail_exact_site_beats_legacy_regardless_of_order) {
 
 TEST(lsp_tail_duplicate_exact_rows_same_target_are_not_ambiguous) {
     CBMCall call = make_tail_call(600, 612);
-    CBMResolvedCall low = make_tail_rc("com.example.Helper.run", 0.75f, 600, 612);
-    CBMResolvedCall high = make_tail_rc("com.example.Helper.run", 0.90f, 600, 612);
+    CBMResolvedCall low = make_tail_rc("com.example.Helper.run", 0.75, 600, 612);
+    CBMResolvedCall high = make_tail_rc("com.example.Helper.run", 0.90, 600, 612);
     CBMResolvedCall items[] = {low, high};
     CBMResolvedCallArray arr = {items, 2, 2};
 
@@ -3626,8 +3657,8 @@ TEST(lsp_tail_duplicate_exact_rows_same_target_are_not_ambiguous) {
 
 TEST(lsp_tail_distinct_exact_targets_are_ambiguous) {
     CBMCall call = make_tail_call(700, 712);
-    CBMResolvedCall alpha = make_tail_rc("com.example.Alpha.run", 0.75f, 700, 712);
-    CBMResolvedCall beta = make_tail_rc("com.example.Beta.run", 0.99f, 700, 712);
+    CBMResolvedCall alpha = make_tail_rc("com.example.Alpha.run", 0.75, 700, 712);
+    CBMResolvedCall beta = make_tail_rc("com.example.Beta.run", 0.99, 700, 712);
     CBMResolvedCall items[] = {alpha, beta};
     CBMResolvedCallArray arr = {items, 2, 2};
 
@@ -3637,8 +3668,8 @@ TEST(lsp_tail_distinct_exact_targets_are_ambiguous) {
 
 TEST(lsp_tail_duplicate_legacy_rows_same_target_are_not_ambiguous) {
     CBMCall call = make_tail_call(800, 812);
-    CBMResolvedCall low = make_tail_rc("com.example.Helper.run", 0.75f, 0, 0);
-    CBMResolvedCall high = make_tail_rc("com.example.Helper.run", 0.90f, 0, 0);
+    CBMResolvedCall low = make_tail_rc("com.example.Helper.run", 0.75, 0, 0);
+    CBMResolvedCall high = make_tail_rc("com.example.Helper.run", 0.90, 0, 0);
     CBMResolvedCall items[] = {low, high};
     CBMResolvedCallArray arr = {items, 2, 2};
 
@@ -3648,8 +3679,8 @@ TEST(lsp_tail_duplicate_legacy_rows_same_target_are_not_ambiguous) {
 
 TEST(lsp_tail_distinct_legacy_targets_are_ambiguous) {
     CBMCall call = make_tail_call(900, 912);
-    CBMResolvedCall alpha = make_tail_rc("com.example.Alpha.run", 0.75f, 0, 0);
-    CBMResolvedCall beta = make_tail_rc("com.example.Beta.run", 0.99f, 0, 0);
+    CBMResolvedCall alpha = make_tail_rc("com.example.Alpha.run", 0.75, 0, 0);
+    CBMResolvedCall beta = make_tail_rc("com.example.Beta.run", 0.99, 0, 0);
     CBMResolvedCall items[] = {alpha, beta};
     CBMResolvedCallArray arr = {items, 2, 2};
 
@@ -3668,7 +3699,7 @@ static CBMUsage make_reference_usage(const char *caller, const char *name, uint3
     return usage;
 }
 
-static CBMResolvedCall make_reference_rc(const char *caller, const char *callee, float confidence,
+static CBMResolvedCall make_reference_rc(const char *caller, const char *callee, double confidence,
                                          uint32_t start, uint32_t end) {
     CBMResolvedCall resolved = make_rc(caller, callee, confidence);
     resolved.kind = CBM_RESOLVED_CALL_REFERENCE;
@@ -3680,9 +3711,9 @@ static CBMResolvedCall make_reference_rc(const char *caller, const char *callee,
 TEST(lsp_reference_duplicate_exact_rows_same_target_are_not_ambiguous) {
     CBMUsage usage = make_reference_usage("proj.mod.Caller.run", "handler", 1000, 1007);
     CBMResolvedCall low =
-        make_reference_rc("proj.mod.Caller.run", "proj.Target.handler", 0.75f, 1000, 1007);
+        make_reference_rc("proj.mod.Caller.run", "proj.Target.handler", 0.75, 1000, 1007);
     CBMResolvedCall high =
-        make_reference_rc("proj.mod.Caller.run", "proj.Target.handler", 0.90f, 1000, 1007);
+        make_reference_rc("proj.mod.Caller.run", "proj.Target.handler", 0.90, 1000, 1007);
     CBMResolvedCall items[] = {low, high};
     CBMResolvedCallArray arr = {items, 2, 2};
 
@@ -3698,8 +3729,8 @@ TEST(lsp_reference_project_prefixed_duplicate_is_not_ambiguous) {
     const char *project = "proj";
     cbm_gbuf_t *gbuf = cbm_gbuf_new(project, "/tmp");
     ASSERT_NOT_NULL(gbuf);
-    int64_t target_id = cbm_gbuf_upsert_node(gbuf, "Function", "handler", "proj.mod.Target.handler",
-                                             "target.go", 1, 1, "{}");
+    int64_t target_id = cbm_node_id_value(cbm_gbuf_upsert_node(
+        gbuf, "Function", "handler", "proj.mod.Target.handler", "target.go", 1, 1, "{}"));
     ASSERT_GT(target_id, 0);
     const cbm_gbuf_node_t *raw_target =
         cbm_pipeline_lsp_target_node(gbuf, project, "mod.Target.handler", false);
@@ -3707,13 +3738,13 @@ TEST(lsp_reference_project_prefixed_duplicate_is_not_ambiguous) {
         cbm_pipeline_lsp_target_node(gbuf, project, "proj.mod.Target.handler", false);
     ASSERT_NOT_NULL(raw_target);
     ASSERT_NOT_NULL(prefixed_target);
-    ASSERT_EQ(raw_target->id, prefixed_target->id);
+    ASSERT_EQ(raw_target->id.v, prefixed_target->id.v);
 
     CBMUsage usage = make_reference_usage("proj.mod.Caller.run", "handler", 1050, 1057);
     CBMResolvedCall raw =
-        make_reference_rc("proj.mod.Caller.run", "mod.Target.handler", 0.75f, 1050, 1057);
+        make_reference_rc("proj.mod.Caller.run", "mod.Target.handler", 0.75, 1050, 1057);
     CBMResolvedCall prefixed =
-        make_reference_rc("proj.mod.Caller.run", "proj.mod.Target.handler", 0.90f, 1050, 1057);
+        make_reference_rc("proj.mod.Caller.run", "proj.mod.Target.handler", 0.90, 1050, 1057);
     CBMResolvedCall items[] = {raw, prefixed};
     CBMResolvedCallArray arr = {items, 2, 2};
 
@@ -3728,19 +3759,19 @@ TEST(lsp_reference_project_prefix_spellings_stay_ambiguous_when_both_nodes_exist
     const char *project = "proj";
     cbm_gbuf_t *gbuf = cbm_gbuf_new(project, "/tmp");
     ASSERT_NOT_NULL(gbuf);
-    int64_t raw_id = cbm_gbuf_upsert_node(gbuf, "Function", "handler", "mod.Target.handler",
-                                          "raw.go", 1, 1, "{}");
-    int64_t prefixed_id = cbm_gbuf_upsert_node(
-        gbuf, "Function", "handler", "proj.mod.Target.handler", "prefixed.go", 1, 1, "{}");
+    int64_t raw_id = cbm_node_id_value(cbm_gbuf_upsert_node(
+        gbuf, "Function", "handler", "mod.Target.handler", "raw.go", 1, 1, "{}"));
+    int64_t prefixed_id = cbm_node_id_value(cbm_gbuf_upsert_node(
+        gbuf, "Function", "handler", "proj.mod.Target.handler", "prefixed.go", 1, 1, "{}"));
     ASSERT_GT(raw_id, 0);
     ASSERT_GT(prefixed_id, 0);
     ASSERT(raw_id != prefixed_id);
 
     CBMUsage usage = make_reference_usage("proj.mod.Caller.run", "handler", 1070, 1077);
     CBMResolvedCall raw =
-        make_reference_rc("proj.mod.Caller.run", "mod.Target.handler", 0.75f, 1070, 1077);
+        make_reference_rc("proj.mod.Caller.run", "mod.Target.handler", 0.75, 1070, 1077);
     CBMResolvedCall prefixed =
-        make_reference_rc("proj.mod.Caller.run", "proj.mod.Target.handler", 0.90f, 1070, 1077);
+        make_reference_rc("proj.mod.Caller.run", "proj.mod.Target.handler", 0.90, 1070, 1077);
     CBMResolvedCall items[] = {raw, prefixed};
     CBMResolvedCallArray arr = {items, 2, 2};
 
@@ -3761,15 +3792,15 @@ TEST(lsp_reference_jvm_distinct_packages_do_not_collapse_via_tail_node) {
     const char *project = "proj";
     cbm_gbuf_t *gbuf = cbm_gbuf_new(project, "/tmp");
     ASSERT_NOT_NULL(gbuf);
-    int64_t materialized_id = cbm_gbuf_upsert_node(
-        gbuf, "Method", "handler", "proj.generated.Service.handler", "Service.kt", 1, 1, "{}");
+    int64_t materialized_id = cbm_node_id_value(cbm_gbuf_upsert_node(
+        gbuf, "Method", "handler", "proj.generated.Service.handler", "Service.kt", 1, 1, "{}"));
     ASSERT_GT(materialized_id, 0);
 
     CBMUsage usage = make_reference_usage("proj.consumer.Caller.run", "handler", 1080, 1087);
     CBMResolvedCall pkg1 =
-        make_reference_rc("proj.consumer.Caller.run", "pkg1.Service.handler", 0.75f, 1080, 1087);
+        make_reference_rc("proj.consumer.Caller.run", "pkg1.Service.handler", 0.75, 1080, 1087);
     CBMResolvedCall pkg2 =
-        make_reference_rc("proj.consumer.Caller.run", "pkg2.Service.handler", 0.90f, 1080, 1087);
+        make_reference_rc("proj.consumer.Caller.run", "pkg2.Service.handler", 0.90, 1080, 1087);
     CBMResolvedCall pkg1_first[] = {pkg1, pkg2};
     CBMResolvedCall pkg2_first[] = {pkg2, pkg1};
     CBMResolvedCallArray first = {pkg1_first, 2, 2};
@@ -3779,8 +3810,8 @@ TEST(lsp_reference_jvm_distinct_packages_do_not_collapse_via_tail_node) {
         cbm_pipeline_lsp_target_node(gbuf, project, pkg1.callee_qn, true);
     const cbm_gbuf_node_t *pkg2_tail =
         cbm_pipeline_lsp_target_node(gbuf, project, pkg2.callee_qn, true);
-    bool same_tail_node = pkg1_tail && pkg2_tail && pkg1_tail->id == materialized_id &&
-                          pkg2_tail->id == materialized_id;
+    bool same_tail_node = pkg1_tail && pkg2_tail && pkg1_tail->id.v == materialized_id &&
+                          pkg2_tail->id.v == materialized_id;
     const CBMResolvedCall *first_hit =
         cbm_pipeline_find_lsp_reference_in_graph(&first, &usage, true, gbuf, project);
     const CBMResolvedCall *second_hit =
@@ -3796,9 +3827,9 @@ TEST(lsp_reference_jvm_distinct_packages_do_not_collapse_via_tail_node) {
 TEST(lsp_reference_distinct_exact_targets_are_order_invariant) {
     CBMUsage usage = make_reference_usage("proj.mod.Caller.run", "handler", 1100, 1107);
     CBMResolvedCall alpha =
-        make_reference_rc("proj.mod.Caller.run", "proj.Alpha.handler", 0.90f, 1100, 1107);
+        make_reference_rc("proj.mod.Caller.run", "proj.Alpha.handler", 0.90, 1100, 1107);
     CBMResolvedCall beta =
-        make_reference_rc("proj.mod.Caller.run", "proj.Beta.handler", 0.90f, 1100, 1107);
+        make_reference_rc("proj.mod.Caller.run", "proj.Beta.handler", 0.90, 1100, 1107);
     CBMResolvedCall alpha_first[] = {alpha, beta};
     CBMResolvedCall beta_first[] = {beta, alpha};
     CBMResolvedCallArray first = {alpha_first, 2, 2};
@@ -3816,9 +3847,9 @@ TEST(lsp_reference_distinct_exact_targets_are_order_invariant) {
 TEST(lsp_reference_duplicate_tail_rows_same_target_are_not_ambiguous) {
     CBMUsage usage = make_reference_usage("proj.raw.Service.handle", "handler", 1200, 1207);
     CBMResolvedCall low =
-        make_reference_rc("com.generated.Service.handle", "com.Target.handler", 0.75f, 1200, 1207);
+        make_reference_rc("com.generated.Service.handle", "com.Target.handler", 0.75, 1200, 1207);
     CBMResolvedCall high =
-        make_reference_rc("com.generated.Service.handle", "com.Target.handler", 0.90f, 1200, 1207);
+        make_reference_rc("com.generated.Service.handle", "com.Target.handler", 0.90, 1200, 1207);
     CBMResolvedCall items[] = {low, high};
     CBMResolvedCallArray arr = {items, 2, 2};
 
@@ -3829,9 +3860,9 @@ TEST(lsp_reference_duplicate_tail_rows_same_target_are_not_ambiguous) {
 TEST(lsp_reference_distinct_tail_targets_are_ambiguous) {
     CBMUsage usage = make_reference_usage("proj.raw.Service.handle", "handler", 1300, 1307);
     CBMResolvedCall alpha =
-        make_reference_rc("com.generated.Service.handle", "com.Alpha.handler", 0.75f, 1300, 1307);
+        make_reference_rc("com.generated.Service.handle", "com.Alpha.handler", 0.75, 1300, 1307);
     CBMResolvedCall beta =
-        make_reference_rc("com.generated.Service.handle", "com.Beta.handler", 0.99f, 1300, 1307);
+        make_reference_rc("com.generated.Service.handle", "com.Beta.handler", 0.99, 1300, 1307);
     CBMResolvedCall items[] = {alpha, beta};
     CBMResolvedCallArray arr = {items, 2, 2};
 
@@ -3852,15 +3883,15 @@ TEST(lsp_target_node_supports_long_prefixed_qualified_name) {
 
     cbm_gbuf_t *gbuf = cbm_gbuf_new(project, "/tmp");
     ASSERT_NOT_NULL(gbuf);
-    int64_t id =
-        cbm_gbuf_upsert_node(gbuf, "Function", "target", qualified, "target.c", 1, 1, "{}");
+    int64_t id = cbm_node_id_value(
+        cbm_gbuf_upsert_node(gbuf, "Function", "target", qualified, "target.c", 1, 1, "{}"));
     ASSERT_GT(id, 0);
     const cbm_gbuf_node_t *found = cbm_pipeline_lsp_target_node(gbuf, project, callee, false);
     if (!found) {
         printf("  long target-QN diagnostic: project=%zu callee=%zu combined=%zu\n",
                strlen(project), strlen(callee), strlen(qualified));
     }
-    bool same_node = found && found->id == id;
+    bool same_node = found && found->id.v == id;
     cbm_gbuf_free(gbuf);
     free(qualified);
     free(callee);

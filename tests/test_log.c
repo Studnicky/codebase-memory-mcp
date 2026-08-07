@@ -5,6 +5,7 @@
  * We redirect stderr to a pipe and read back the output.
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "../src/foundation/log.h"
 #include "../src/foundation/compat.h"
 #include <stdbool.h>

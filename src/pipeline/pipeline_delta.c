@@ -283,7 +283,8 @@ int64_t cbm_delta_preseed(cbm_store_t *store, const char *project, cbm_gbuf_t *g
         const char *fp = (const char *)sqlite3_column_text(stmt, 4);
         /* Pin the gbuf id to the database id: proxies ARE their rows. */
         cbm_gbuf_set_next_id(gbuf, id);
-        int64_t got = cbm_gbuf_upsert_node(gbuf, label, name, qn, fp ? fp : "", 0, 0, "{}");
+        int64_t got = cbm_node_id_value(
+            cbm_gbuf_upsert_node(gbuf, label, name, qn, fp ? fp : "", 0, 0, "{}"));
         if (got != id) {
             /* A QN collision inside the preseed set would silently split
              * identity between RAM and disk; the run cannot be trusted. */
@@ -370,7 +371,7 @@ static int64_t delta_remap_get(const delta_patch_ctx_t *ctx, int64_t id) {
 
 static void delta_patch_node(const cbm_gbuf_node_t *node, void *userdata) {
     delta_patch_ctx_t *ctx = (delta_patch_ctx_t *)userdata;
-    if (ctx->failed || node->id <= ctx->max_db_id) {
+    if (ctx->failed || cbm_node_id_value(node->id) <= ctx->max_db_id) {
         return;
     }
     if (node->qualified_name) {
@@ -381,13 +382,14 @@ static void delta_patch_node(const cbm_gbuf_node_t *node, void *userdata) {
             /* Already on disk: an unchanged file's symbol. A node from a
              * CHANGED file cannot appear here -- the purge removed it --
              * so repaired files still receive fresh rows. */
-            delta_remap_put(ctx, node->id, sqlite3_column_int64(ctx->qn_lookup, 0));
+            delta_remap_put(ctx, cbm_node_id_value(node->id),
+                            sqlite3_column_int64(ctx->qn_lookup, 0));
             ctx->remapped++;
             return;
         }
     }
     sqlite3_reset(ctx->node_stmt);
-    sqlite3_bind_int64(ctx->node_stmt, 1, node->id);
+    sqlite3_bind_int64(ctx->node_stmt, 1, cbm_node_id_value(node->id));
     sqlite3_bind_text(ctx->node_stmt, 2, ctx->project, CBM_NOT_FOUND, SQLITE_TRANSIENT);
     sqlite3_bind_text(ctx->node_stmt, 3, node->label, CBM_NOT_FOUND, SQLITE_TRANSIENT);
     sqlite3_bind_text(ctx->node_stmt, 4, node->name, CBM_NOT_FOUND, SQLITE_TRANSIENT);
@@ -401,7 +403,7 @@ static void delta_patch_node(const cbm_gbuf_node_t *node, void *userdata) {
     if (sqlite3_step(ctx->node_stmt) != SQLITE_DONE) {
         ctx->failed = true;
         char id_buf[32];
-        snprintf(id_buf, sizeof(id_buf), "%lld", (long long)node->id);
+        snprintf(id_buf, sizeof(id_buf), "%lld", (long long)cbm_node_id_value(node->id));
         cbm_log_error("delta.patch_node_failed", "qn",
                       node->qualified_name ? node->qualified_name : "", "err",
                       sqlite3_errmsg(ctx->db));
@@ -409,7 +411,7 @@ static void delta_patch_node(const cbm_gbuf_node_t *node, void *userdata) {
         sqlite3_stmt *who = NULL;
         if (sqlite3_prepare_v2(ctx->db, "SELECT label, qualified_name FROM nodes WHERE id = ?1",
                                CBM_NOT_FOUND, &who, NULL) == SQLITE_OK) {
-            sqlite3_bind_int64(who, 1, node->id);
+            sqlite3_bind_int64(who, 1, cbm_node_id_value(node->id));
             if (sqlite3_step(who) == SQLITE_ROW) {
                 cbm_log_error("delta.patch_id_owner", "label",
                               (const char *)sqlite3_column_text(who, 0), "qn",
@@ -427,20 +429,28 @@ static void delta_patch_edge(const cbm_gbuf_edge_t *edge, void *userdata) {
     if (ctx->failed) {
         return;
     }
-    int64_t src = delta_remap_get(ctx, edge->source_id);
-    int64_t tgt = delta_remap_get(ctx, edge->target_id);
-    if (src <= ctx->max_db_id && tgt <= ctx->max_db_id && src == edge->source_id &&
-        tgt == edge->target_id) {
+    int64_t src = delta_remap_get(ctx, cbm_node_id_value(edge->source_id));
+    int64_t tgt = delta_remap_get(ctx, cbm_node_id_value(edge->target_id));
+    if (src <= ctx->max_db_id && tgt <= ctx->max_db_id &&
+        src == cbm_node_id_value(edge->source_id) && tgt == cbm_node_id_value(edge->target_id)) {
         return; /* both endpoints pre-existed unremapped: already recorded */
     }
+    char *props_json = cbm_gbuf_edge_props_json_alloc(edge);
+    if (!props_json) {
+        ctx->failed = true;
+        cbm_log_error("delta.patch_edge_props_alloc_failed", "type", edge->type ? edge->type : "");
+        return;
+    }
+
     sqlite3_reset(ctx->edge_stmt);
     sqlite3_bind_text(ctx->edge_stmt, 1, ctx->project, CBM_NOT_FOUND, SQLITE_TRANSIENT);
     sqlite3_bind_int64(ctx->edge_stmt, 2, src);
     sqlite3_bind_int64(ctx->edge_stmt, 3, tgt);
     sqlite3_bind_text(ctx->edge_stmt, 4, edge->type, CBM_NOT_FOUND, SQLITE_TRANSIENT);
-    sqlite3_bind_text(ctx->edge_stmt, 5, edge->properties_json ? edge->properties_json : "{}",
-                      CBM_NOT_FOUND, SQLITE_TRANSIENT);
-    if (sqlite3_step(ctx->edge_stmt) != SQLITE_DONE) {
+    sqlite3_bind_text(ctx->edge_stmt, 5, props_json, CBM_NOT_FOUND, SQLITE_TRANSIENT);
+    int step_rc = sqlite3_step(ctx->edge_stmt);
+    free(props_json);
+    if (step_rc != SQLITE_DONE) {
         ctx->failed = true;
         cbm_log_error("delta.patch_edge_failed", "type", edge->type ? edge->type : "");
         return;

@@ -7,6 +7,7 @@
  * tests.
  */
 #include "test_framework.h"
+#include "suites.h"
 
 #include "daemon/daemon.h"
 #include "daemon/service.h"

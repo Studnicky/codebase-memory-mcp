@@ -51,7 +51,8 @@ typedef struct {
 } Queue;
 
 static void queue_init(Queue *q, int cap) {
-    q->data = (int *)malloc(cap * sizeof(int));
+    // cap is always num_states (>= CBM_AC_ROOT_STATES), never negative.
+    q->data = (int *)malloc((size_t)cap * sizeof(int));
     q->head = q->tail = 0;
     q->cap = cap;
 }
@@ -101,7 +102,9 @@ static int ac_build_trie(CBMAutomaton *ac, const char **patterns, const int *len
 // Phase 2: Build failure function via BFS + compute full goto table.
 static void ac_build_failure(CBMAutomaton *ac, int num_states) {
     int alpha_size = ac->alpha_size;
-    int *fail = (int *)calloc(num_states, sizeof(int));
+    // num_states is always positive (cbm_ac_build's max_states starts at
+    // CBM_AC_ROOT_STATES and only grows).
+    int *fail = (int *)calloc((size_t)num_states, sizeof(int));
 
     Queue q;
     queue_init(&q, num_states);
@@ -144,7 +147,7 @@ static void ac_shrink_tables(CBMAutomaton *ac, int num_states, int max_states) {
     }
     int alpha_size = ac->alpha_size;
     void *tmp;
-    tmp = realloc(ac->go_table, (size_t)num_states * alpha_size * sizeof(int));
+    tmp = realloc(ac->go_table, (size_t)num_states * (size_t)alpha_size * sizeof(int));
     if (tmp) {
         ac->go_table = (int *)tmp;
     }
@@ -199,11 +202,13 @@ CBMAutomaton *cbm_ac_build(const char **patterns, const int *lengths, int count,
         }
     }
 
-    ac->go_table = (int *)malloc((size_t)max_states * alpha_size * sizeof(int));
-    memset(ac->go_table, CBM_AC_NO_STATE, (size_t)max_states * alpha_size * sizeof(int));
-    ac->output = (uint64_t *)calloc(max_states, sizeof(uint64_t));
-    ac->output_list = (int *)malloc(max_states * sizeof(int));
-    ac->output_next = (int *)malloc(max_states * sizeof(int));
+    // max_states starts at CBM_AC_ROOT_STATES and only grows by non-negative
+    // pattern lengths, so it's always positive here.
+    ac->go_table = (int *)malloc((size_t)max_states * (size_t)alpha_size * sizeof(int));
+    memset(ac->go_table, CBM_AC_NO_STATE, (size_t)max_states * (size_t)alpha_size * sizeof(int));
+    ac->output = (uint64_t *)calloc((size_t)max_states, sizeof(uint64_t));
+    ac->output_list = (int *)malloc((size_t)max_states * sizeof(int));
+    ac->output_next = (int *)malloc((size_t)max_states * sizeof(int));
     for (int i = 0; i < max_states; i++) {
         ac->output_list[i] = CBM_AC_NO_STATE;
         ac->output_next[i] = CBM_AC_NO_STATE;

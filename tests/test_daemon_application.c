@@ -2,11 +2,12 @@
  * test_daemon_application.c — RED contract for daemon-owned frontend state.
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "test_helpers.h"
 
 #include "cli/cli.h"
-#include "daemon/application.h"
-#include "daemon/application_internal.h"
+#include "host/application.h"
+#include "host/application_internal.h"
 #include "daemon/ipc.h"
 #include "daemon/project_lock.h"
 #include "foundation/compat.h"
@@ -4607,9 +4608,13 @@ typedef struct {
 
 static void *app_session_request_thread(void *opaque) {
     app_session_request_thread_t *request = opaque;
+    /* status stays int (not the enum type) so it can also hold the -1
+     * not-yet-run sentinel used elsewhere in this file; the enum result is
+     * always one of its small named values, so the conversion is safe. */
     request->status =
-        app_test_request(request->callbacks, request->session, request->payload,
-                         request->payload_length, &request->response, &request->response_length);
+        (int)app_test_request(request->callbacks, request->session, request->payload,
+                              request->payload_length, &request->response,
+                              &request->response_length);
     return NULL;
 }
 

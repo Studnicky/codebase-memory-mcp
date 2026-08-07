@@ -8,7 +8,7 @@
  * Each worker pulls indices from a shared atomic counter — zero
  * contention, natural load balancing across heterogeneous cores.
  */
-#include "pipeline/worker_pool.h"
+#include "foundation/worker_pool.h"
 #include "foundation/constants.h"
 
 enum { WP_TRUE = 1, WP_MIN = 1, WP_STEP = 1 };

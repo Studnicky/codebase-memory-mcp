@@ -15,6 +15,7 @@
  * line and fails; copy those lines into LABEL_GOLDENS, then the test asserts.
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "cbm.h"
 #include "grammar_cases.h"
 

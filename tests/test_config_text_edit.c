@@ -3,6 +3,7 @@
  */
 #include "../src/cli/config_text_edit.h"
 #include "test_framework.h"
+#include "suites.h"
 #include "test_helpers.h"
 
 #include <errno.h>

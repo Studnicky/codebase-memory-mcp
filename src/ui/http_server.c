@@ -20,7 +20,6 @@
 #include "mcp/mcp.h"
 #include "store/store.h"
 #include "watcher/watcher.h"
-#include "cli/cli.h"
 #include "git/git_context.h"
 
 #if defined(HAVE_LIBGIT2)
@@ -52,12 +51,7 @@
 #include <process.h>
 #include <psapi.h> /* GetProcessMemoryInfo */
 #else
-#include <sys/stat.h>
 #include <unistd.h>
-#include <sys/wait.h>
-#endif
-#ifdef __APPLE__
-#include <mach-o/dyld.h>
 #endif
 
 /* ── Constants ────────────────────────────────────────────────── */
@@ -856,119 +850,9 @@ static void handle_adr_save(cbm_http_server_t *srv, cbm_http_conn_t *c, const cb
 
 static char g_binary_path[1024] = {0};
 
-static bool copy_path(char *out, size_t outsz, const char *path) {
-    if (!out || outsz == 0 || !path || !path[0]) {
-        return false;
-    }
-    int n = snprintf(out, outsz, "%s", path);
-    return n > 0 && (size_t)n < outsz;
-}
-
-#ifndef _WIN32
-static bool is_executable_file(const char *path) {
-    struct stat st;
-    return path && stat(path, &st) == 0 && S_ISREG(st.st_mode) && access(path, X_OK) == 0;
-}
-
-static bool resolve_from_path(const char *name, char *out, size_t outsz) {
-    const char *path = getenv("PATH");
-    if (!name || !name[0] || strchr(name, '/') || !path || !path[0]) {
-        return false;
-    }
-
-    const char *cur = path;
-    while (*cur) {
-        const char *colon = strchr(cur, ':');
-        size_t dir_len = colon ? (size_t)(colon - cur) : strlen(cur);
-        if (dir_len > 0 && dir_len < 900) {
-            char candidate[1024];
-            int n = snprintf(candidate, sizeof(candidate), "%.*s/%s", (int)dir_len, cur, name);
-            if (n > 0 && (size_t)n < sizeof(candidate) && is_executable_file(candidate)) {
-                return copy_path(out, outsz, candidate);
-            }
-        }
-        if (!colon) {
-            break;
-        }
-        cur = colon + 1;
-    }
-    return false;
-}
-
-static bool resolve_self_executable(char *out, size_t outsz) {
-#if defined(__APPLE__)
-    char buf[1024];
-    uint32_t sz = sizeof(buf);
-    if (_NSGetExecutablePath(buf, &sz) == 0 && buf[0]) {
-        return copy_path(out, outsz, buf);
-    }
-    return false;
-#else
-    char buf[1024];
-    ssize_t len = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
-    if (len > 0) {
-        buf[len] = '\0';
-        return copy_path(out, outsz, buf);
-    }
-    return false;
-#endif
-}
-#else
-static bool resolve_self_executable(char *out, size_t outsz) {
-    /* GetModuleFileNameA renders the module path through the ANSI code page,
-     * which mangles non-ASCII install paths (café_日本語 -> caf?_???). Resolve
-     * wide and convert to UTF-8 so the returned path survives verbatim. */
-    wchar_t wbuf[1024];
-    DWORD n = GetModuleFileNameW(NULL, wbuf, (DWORD)(sizeof(wbuf) / sizeof(wbuf[0])));
-    if (n == 0 || n >= sizeof(wbuf) / sizeof(wbuf[0])) {
-        return false;
-    }
-    char *utf8 = cbm_wide_to_utf8(wbuf);
-    if (!utf8) {
-        return false;
-    }
-    bool ok = copy_path(out, outsz, utf8);
-    free(utf8);
-    return ok;
-}
-#endif
-
-bool cbm_http_server_resolve_binary_path(const char *argv0, char *out, size_t outsz) {
-    if (!out || outsz == 0) {
-        return false;
-    }
-    out[0] = '\0';
-
-#ifndef _WIN32
-    if (argv0 && strchr(argv0, '/') && is_executable_file(argv0)) {
-        return copy_path(out, outsz, argv0);
-    }
-    if (resolve_from_path(argv0, out, outsz)) {
-        return true;
-    }
-#else
-    if (argv0 && argv0[0]) {
-        /* GetFileAttributesA reads argv0 through the ANSI code page and fails on
-         * non-ASCII install paths, forcing a fallback that can mangle the path;
-         * check wide so a valid non-ASCII argv0 is used verbatim. */
-        wchar_t *wargv0 = cbm_utf8_to_wide(argv0);
-        DWORD attrs = wargv0 ? GetFileAttributesW(wargv0) : INVALID_FILE_ATTRIBUTES;
-        free(wargv0);
-        if (attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY)) {
-            return copy_path(out, outsz, argv0);
-        }
-    }
-#endif
-
-    if (resolve_self_executable(out, outsz)) {
-        return true;
-    }
-    return copy_path(out, outsz, argv0);
-}
-
 void cbm_http_server_set_binary_path(const char *path) {
     if (path) {
-        if (!cbm_http_server_resolve_binary_path(path, g_binary_path, sizeof(g_binary_path))) {
+        if (!cbm_resolve_executable_path(path, g_binary_path, sizeof(g_binary_path))) {
             g_binary_path[0] = '\0';
         }
     }

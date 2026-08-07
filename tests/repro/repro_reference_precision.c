@@ -9,6 +9,7 @@
  * requirement when two receiver types expose the same method name.
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "repro_harness.h"
 #include "lsp/rust_lsp.h"
 #include "lsp/ts_lsp.h"

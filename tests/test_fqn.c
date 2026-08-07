@@ -5,6 +5,7 @@
  *         cbm_pipeline_fqn_folder, cbm_project_name_from_path.
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "../src/pipeline/pipeline.h"
 #include "../src/foundation/str_util.h"
 

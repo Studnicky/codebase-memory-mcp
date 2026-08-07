@@ -225,9 +225,10 @@ static int extract_kv_groups(const char *trimmed, const cbm_regmatch_t *m, int k
     if (klen <= 0 || klen >= (int)key_sz || vlen <= 0 || vlen >= (int)val_sz) {
         return 0;
     }
-    memcpy(key_out, trimmed + m[key_grp].rm_so, klen);
+    /* klen/vlen are checked above: 0 < klen < key_sz and 0 < vlen < val_sz. */
+    memcpy(key_out, trimmed + m[key_grp].rm_so, (size_t)klen);
     key_out[klen] = '\0';
-    memcpy(val_out, trimmed + m[val_grp].rm_so, vlen);
+    memcpy(val_out, trimmed + m[val_grp].rm_so, (size_t)vlen);
     val_out[vlen] = '\0';
     return SKIP_ONE;
 }
@@ -274,7 +275,8 @@ static int scan_terraform_line(const char *line, char *key, size_t ksz, char *va
     }
     strncpy(key, "_tf_default", ksz - SKIP_ONE);
     key[ksz - SKIP_ONE] = '\0';
-    memcpy(val, line + m[ENV_GRP_2].rm_so, vlen);
+    /* vlen is checked above: 0 < vlen < vsz. */
+    memcpy(val, line + m[ENV_GRP_2].rm_so, (size_t)vlen);
     val[vlen] = '\0';
     return SKIP_ONE;
 }
