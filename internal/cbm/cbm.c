@@ -351,8 +351,8 @@ int cbm_init(void) {
     if (cbm_initialized) {
         return 0;
     }
-    enum { CBM_INIT_DONE = 1 };
-    cbm_initialized = CBM_INIT_DONE;
+    enum { CBM_INIT_COMPLETE = 1 };
+    cbm_initialized = CBM_INIT_COMPLETE;
     /* Defense-in-depth allocator binds (idempotent). main() calls cbm_alloc_init
      * first; this covers non-main entry points (pipeline passes call cbm_init).
      * For sqlite the SQLITE_CONFIG_MALLOC bind only takes effect if it runs

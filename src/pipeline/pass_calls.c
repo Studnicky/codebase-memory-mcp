@@ -498,7 +498,7 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call,
             /* Use the gbuf node's QN so downstream edge props show the canonical
              * project-qualified form even when fallback prefixed the project. */
             res.qualified_name = target_node->qualified_name;
-            res.confidence = lsp->confidence;
+            res.confidence = (double)lsp->confidence;
             res.strategy = lsp->strategy;
             res.candidate_count = 1;
             emit_classified_edge(ctx, call, source_node, target_node, &res, module_qn, imp_keys,

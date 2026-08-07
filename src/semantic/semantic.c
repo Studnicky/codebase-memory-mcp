@@ -49,8 +49,8 @@ enum {
 #define CBM_SEM_W_DATAFLOW 0.05F
 
 /* Threshold bounds for CBM_SEMANTIC_THRESHOLD env override. */
-#define CBM_SEM_THRESHOLD_MIN 0.0F
-#define CBM_SEM_THRESHOLD_MAX 1.0F
+#define CBM_SEM_THRESHOLD_MIN 0.0
+#define CBM_SEM_THRESHOLD_MAX 1.0
 
 /* Epsilon for denominator guards in cosine math. */
 #define CBM_SEM_DENOM_EPS 1e-10F
