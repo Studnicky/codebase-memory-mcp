@@ -334,7 +334,7 @@ TEST(golsp_interface_dispatch) {
     int idx = require_resolved(r, "writeAll", "Write");
     ASSERT_GTE(idx, 0);
     ASSERT_STR_EQ(r->resolved_calls.items[idx].strategy, "lsp_interface_dispatch");
-    ASSERT_TRUE(r->resolved_calls.items[idx].confidence <= 0.90f);
+    ASSERT_TRUE(r->resolved_calls.items[idx].confidence <= 0.90);
     cbm_free_result(r);
     PASS();
 }
@@ -595,7 +595,7 @@ TEST(golsp_interface_satisfaction) {
     int idx = find_resolved(r, "runProcessor", "ProcessChunk");
     ASSERT_GTE(idx, 0);
     ASSERT_STR_EQ(r->resolved_calls.items[idx].strategy, "lsp_interface_resolve");
-    ASSERT_TRUE(r->resolved_calls.items[idx].confidence >= 0.89f);
+    ASSERT_TRUE(r->resolved_calls.items[idx].confidence >= 0.89);
 
     int idx2 = find_resolved(r, "runProcessor", "Finalize");
     ASSERT_GTE(idx2, 0);
@@ -827,7 +827,7 @@ TEST(golsp_ordinary_same_leaf_calls_join_by_exact_site) {
     int zero_span_hijackers = 0;
     for (int i = 0; i < r->resolved_calls.count; i++) {
         const CBMResolvedCall *rc = &r->resolved_calls.items[i];
-        if (rc->kind != CBM_RESOLVED_INVOCATION || rc->confidence <= 0.0f || !rc->caller_qn ||
+        if (rc->kind != CBM_RESOLVED_INVOCATION || rc->confidence <= 0.0 || !rc->caller_qn ||
             !strstr(rc->caller_qn, "run") || !rc->callee_qn || !strstr(rc->callee_qn, ".Render")) {
             continue;
         }
@@ -1210,7 +1210,7 @@ TEST(golsp_crossfile_interface_field_chain) {
 
     int idx = find_resolved_arr_confident(&out, "process", "Bind");
     ASSERT_GTE(idx, 0);
-    ASSERT_TRUE(out.items[idx].confidence >= 0.8f);
+    ASSERT_TRUE(out.items[idx].confidence >= 0.8);
 
     cbm_arena_destroy(&arena);
     PASS();

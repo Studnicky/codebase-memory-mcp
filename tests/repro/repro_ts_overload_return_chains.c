@@ -59,7 +59,7 @@ static int count_resolved_suffix(const CBMResolvedCallArray *calls, const char *
     int count = 0;
     for (int i = 0; i < calls->count; i++) {
         const CBMResolvedCall *call = &calls->items[i];
-        if (call->kind == CBM_RESOLVED_INVOCATION && call->confidence >= 0.5f && call->caller_qn &&
+        if (call->kind == CBM_RESOLVED_INVOCATION && call->confidence >= 0.5 && call->caller_qn &&
             strstr(call->caller_qn, "run") && ends_with(call->callee_qn, callee_suffix) &&
             call->strategy && strcmp(call->strategy, strategy) == 0) {
             count++;

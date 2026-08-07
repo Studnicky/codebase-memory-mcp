@@ -668,7 +668,7 @@ TEST(ktlsp_resolves_more_than_textual) {
     if (idx >= 0) {
         const CBMResolvedCall *rc = &r->resolved_calls.items[idx];
         /* Confidence should be >= 0.9 for a top-level call. */
-        ASSERT_TRUE(rc->confidence >= 0.85f);
+        ASSERT_TRUE(rc->confidence >= 0.85);
     }
     cbm_free_result(r);
     PASS();
@@ -778,7 +778,7 @@ TEST(ktlsp_ordinary_same_leaf_calls_join_by_exact_site) {
     int zero_span_semantics = 0;
     for (int i = 0; i < r->resolved_calls.count; i++) {
         const CBMResolvedCall *rc = &r->resolved_calls.items[i];
-        if (rc->kind != CBM_RESOLVED_INVOCATION || rc->confidence <= 0.0f || !rc->caller_qn ||
+        if (rc->kind != CBM_RESOLVED_INVOCATION || rc->confidence <= 0.0 || !rc->caller_qn ||
             !strstr(rc->caller_qn, "occurrenceProbe") || !rc->callee_qn ||
             !strstr(rc->callee_qn, ".render")) {
             continue;
@@ -834,7 +834,7 @@ TEST(ktlsp_constructor_high_confidence) {
     ASSERT_GTE(idx, 0);
     if (idx >= 0) {
         const CBMResolvedCall *rc = &r->resolved_calls.items[idx];
-        ASSERT_TRUE(rc->confidence >= 0.90f);
+        ASSERT_TRUE(rc->confidence >= 0.90);
         ASSERT_TRUE(rc->strategy != NULL);
         ASSERT_TRUE(strstr(rc->strategy, "lsp_kt_") != NULL);
     }
@@ -850,7 +850,7 @@ TEST(ktlsp_method_high_confidence) {
     ASSERT_GTE(idx, 0);
     if (idx >= 0) {
         const CBMResolvedCall *rc = &r->resolved_calls.items[idx];
-        ASSERT_TRUE(rc->confidence >= 0.85f);
+        ASSERT_TRUE(rc->confidence >= 0.85);
     }
     cbm_free_result(r);
     PASS();

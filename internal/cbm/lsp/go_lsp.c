@@ -23,7 +23,7 @@ static void resolve_calls_in_node(GoLSPContext* ctx, TSNode node) {
     ctx->walk_depth--;
 }
 static void emit_resolved_call(GoLSPContext *ctx, const char *callee_qn, const char *strategy,
-                               float confidence, TSNode site);
+                               double confidence, TSNode site);
 static const char *go_exact_callable_target(GoLSPContext *ctx, TSNode node);
 static const CBMType* go_lookup_field(GoLSPContext* ctx, const char* type_qn, const char* field_name, int depth);
 static void extract_type_params_from_ast(CBMArena* arena, CBMTypeRegistry* reg,
@@ -1230,7 +1230,7 @@ void go_process_statement(GoLSPContext* ctx, TSNode node) {
 // --- Emit a resolved call/reference ---
 
 static void go_emit_resolved_kind(GoLSPContext *ctx, const char *callee_qn, const char *strategy,
-                                  float confidence, const char *source_name, CBMResolvedKind kind,
+                                  double confidence, const char *source_name, CBMResolvedKind kind,
                                   TSNode site) {
     if (!ctx->resolved_calls || !callee_qn || !ctx->enclosing_func_qn) return;
 
@@ -1251,7 +1251,7 @@ static void go_emit_resolved_kind(GoLSPContext *ctx, const char *callee_qn, cons
 }
 
 static void emit_resolved_call(GoLSPContext *ctx, const char *callee_qn, const char *strategy,
-                               float confidence, TSNode site) {
+                               double confidence, TSNode site) {
     go_emit_resolved_kind(ctx, callee_qn, strategy, confidence, NULL, CBM_RESOLVED_INVOCATION,
                           site);
 }

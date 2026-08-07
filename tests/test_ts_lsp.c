@@ -1142,7 +1142,7 @@ TEST(tslsp_jsx_local_tag_shadow_blocks_module_component) {
     bool gated_carrier = false;
     for (int i = 0; i < r->resolved_calls.count; i++) {
         const CBMResolvedCall *resolved = &r->resolved_calls.items[i];
-        if (resolved->kind == CBM_RESOLVED_INVOCATION && resolved->confidence >= 0.6f &&
+        if (resolved->kind == CBM_RESOLVED_INVOCATION && resolved->confidence >= 0.6 &&
             resolved->caller_qn && strstr(resolved->caller_qn, "Shadowed") && resolved->callee_qn &&
             strstr(resolved->callee_qn, ".Card")) {
             wrong_semantics++;

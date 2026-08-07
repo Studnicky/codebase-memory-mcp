@@ -53,7 +53,7 @@ static CBMFileResult *cov_extract(const char *source) {
 static int cov_find(const CBMFileResult *r, const char *callerSub, const char *calleeSub) {
     for (int i = 0; i < r->resolved_calls.count; i++) {
         const CBMResolvedCall *rc = &r->resolved_calls.items[i];
-        if (rc->confidence < 0.5f) continue;
+        if (rc->confidence < 0.5) continue;
         if (rc->caller_qn && strstr(rc->caller_qn, callerSub) && rc->callee_qn &&
             strstr(rc->callee_qn, calleeSub)) {
             return i;
@@ -80,7 +80,7 @@ static int cov_require(const CBMFileResult *r, const char *callerSub, const char
 static int cov_count_strict(const CBMFileResult *r) {
     int n = 0;
     for (int i = 0; i < r->resolved_calls.count; i++) {
-        if (r->resolved_calls.items[i].confidence >= 0.85f) n++;
+        if (r->resolved_calls.items[i].confidence >= 0.85) n++;
     }
     return n;
 }
@@ -535,7 +535,7 @@ TEST(cov_id_unresolved_emits_diagnostic) {
     ASSERT_NOT_NULL(r);
     int diag = 0;
     for (int i = 0; i < r->resolved_calls.count; i++) {
-        if (r->resolved_calls.items[i].confidence == 0.0f) diag++;
+        if (r->resolved_calls.items[i].confidence == 0.0) diag++;
     }
     ASSERT_GTE(diag, 1);
     cbm_free_result(r);
@@ -2618,7 +2618,7 @@ TEST(cov_diag_unknown_method) {
     ASSERT_NOT_NULL(r);
     int diag = 0;
     for (int i = 0; i < r->resolved_calls.count; i++) {
-        if (r->resolved_calls.items[i].confidence == 0.0f) diag++;
+        if (r->resolved_calls.items[i].confidence == 0.0) diag++;
     }
     ASSERT_GTE(diag, 1);
     cbm_free_result(r);
@@ -2640,7 +2640,7 @@ TEST(cov_diag_unresolved_count) {
     ASSERT_NOT_NULL(r);
     int diag = 0;
     for (int i = 0; i < r->resolved_calls.count; i++) {
-        if (r->resolved_calls.items[i].confidence == 0.0f) diag++;
+        if (r->resolved_calls.items[i].confidence == 0.0) diag++;
     }
     ASSERT_GTE(diag, 1);
     cbm_free_result(r);
@@ -2662,7 +2662,7 @@ TEST(cov_diag_unresolved_super_no_match) {
     ASSERT_NOT_NULL(r);
     int diag = 0;
     for (int i = 0; i < r->resolved_calls.count; i++) {
-        if (r->resolved_calls.items[i].confidence == 0.0f) diag++;
+        if (r->resolved_calls.items[i].confidence == 0.0) diag++;
     }
     ASSERT_GTE(diag, 1);
     cbm_free_result(r);
@@ -2703,7 +2703,7 @@ TEST(cov_cross_basic) {
                            imp_qns, 1, NULL, &out);
     int found = 0;
     for (int i = 0; i < out.count; i++) {
-        if (out.items[i].confidence < 0.5f) continue;
+        if (out.items[i].confidence < 0.5) continue;
         if (out.items[i].callee_qn && strstr(out.items[i].callee_qn, "Greeter.greet")) found = 1;
     }
     ASSERT_EQ(found, 1);
@@ -2761,7 +2761,7 @@ TEST(cov_cross_inheritance) {
     cbm_run_java_lsp_cross(&arena, src, (int)strlen(src), "test.B", defs, 2, NULL, NULL, 0, NULL, &out);
     int found = 0;
     for (int i = 0; i < out.count; i++) {
-        if (out.items[i].confidence < 0.5f) continue;
+        if (out.items[i].confidence < 0.5) continue;
         if (out.items[i].callee_qn && strstr(out.items[i].callee_qn, "A.tag")) found = 1;
     }
     ASSERT_EQ(found, 1);
@@ -2804,7 +2804,7 @@ TEST(cov_edge_recursive_user_method) {
     int fib_count = 0;
     for (int i = 0; i < r->resolved_calls.count; i++) {
         const CBMResolvedCall *rc = &r->resolved_calls.items[i];
-        if (rc->confidence >= 0.5f && rc->callee_qn && strstr(rc->callee_qn, "fib")) fib_count++;
+        if (rc->confidence >= 0.5 && rc->callee_qn && strstr(rc->callee_qn, "fib")) fib_count++;
     }
     ASSERT_GTE(fib_count, 2);
     cbm_free_result(r);
@@ -2838,7 +2838,7 @@ TEST(cov_edge_deeply_nested_blocks) {
     int len_calls = 0;
     for (int i = 0; i < r->resolved_calls.count; i++) {
         const CBMResolvedCall *rc = &r->resolved_calls.items[i];
-        if (rc->confidence >= 0.5f && rc->callee_qn && strstr(rc->callee_qn, "String.length")) {
+        if (rc->confidence >= 0.5 && rc->callee_qn && strstr(rc->callee_qn, "String.length")) {
             len_calls++;
         }
     }

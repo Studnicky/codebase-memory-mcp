@@ -35,7 +35,7 @@
  * Python-LSP integration plan; revisit when telemetry justifies a knob.
  * Applies to every language whose LSP populates result->resolved_calls
  * (Go, C/C++, Python, PHP). */
-#define CBM_LSP_CONFIDENCE_FLOOR 0.6f
+#define CBM_LSP_CONFIDENCE_FLOOR 0.6
 
 #if defined(CBM_CALL_REFERENCE_LOOKUP_TEST_API) && CBM_CALL_REFERENCE_LOOKUP_TEST_API
 /* Test-build-only operation counter implemented by pass_usages.c. Keeping the

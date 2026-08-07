@@ -397,7 +397,7 @@ static const CBMType *kt_unwrap_nullable(const CBMType *t) {
 
 /* Append a typed resolution result to the output array. */
 static void kt_emit_resolved_kind(KotlinLSPContext *ctx, const char *callee_qn,
-                                  const char *strategy, float confidence, CBMResolvedKind kind) {
+                                  const char *strategy, double confidence, CBMResolvedKind kind) {
     if (ctx->debug) {
         fprintf(stderr, "[kotlin_lsp] EMIT %s -> %s [%s %.2f] (resolved_calls=%p enc=%s)\n",
                 ctx->enclosing_func_qn ? ctx->enclosing_func_qn : "(null)",
@@ -447,7 +447,7 @@ static void kt_stamp_resolved_site(KotlinLSPContext *ctx, int first, TSNode site
 }
 
 static void kt_emit_resolved_kind_at(KotlinLSPContext *ctx, const char *callee_qn,
-                                     const char *strategy, float confidence, CBMResolvedKind kind,
+                                     const char *strategy, double confidence, CBMResolvedKind kind,
                                      TSNode site) {
     int first = ctx->resolved_calls ? ctx->resolved_calls->count : -1;
     kt_emit_resolved_kind(ctx, callee_qn, strategy, confidence, kind);
@@ -456,7 +456,7 @@ static void kt_emit_resolved_kind_at(KotlinLSPContext *ctx, const char *callee_q
 
 static void kt_emit_resolved_reference_at(KotlinLSPContext *ctx, const char *callee_qn,
                                           const char *strategy, const char *reason,
-                                          float confidence, TSNode site) {
+                                          double confidence, TSNode site) {
     int first = ctx->resolved_calls ? ctx->resolved_calls->count : -1;
     kt_emit_resolved_kind(ctx, callee_qn, strategy, confidence, CBM_RESOLVED_CALL_REFERENCE);
     kt_stamp_resolved_site(ctx, first, site);
@@ -469,7 +469,7 @@ static void kt_emit_resolved_reference_at(KotlinLSPContext *ctx, const char *cal
 
 static void kt_emit_resolved_invocation_reason_at(KotlinLSPContext *ctx, const char *callee_qn,
                                                   const char *strategy, const char *reason,
-                                                  float confidence, TSNode site) {
+                                                  double confidence, TSNode site) {
     int first = ctx->resolved_calls ? ctx->resolved_calls->count : -1;
     kt_emit_resolved_kind(ctx, callee_qn, strategy, confidence, CBM_RESOLVED_INVOCATION);
     kt_stamp_resolved_site(ctx, first, site);
@@ -481,7 +481,7 @@ static void kt_emit_resolved_invocation_reason_at(KotlinLSPContext *ctx, const c
 }
 
 static void kt_emit_resolved_at(KotlinLSPContext *ctx, const char *callee_qn, const char *strategy,
-                                float confidence, TSNode site) {
+                                double confidence, TSNode site) {
     kt_emit_resolved_kind_at(ctx, callee_qn, strategy, confidence, CBM_RESOLVED_INVOCATION, site);
 }
 

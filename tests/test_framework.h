@@ -213,7 +213,7 @@ static inline const char *tf_reset(void) {
 #define ASSERT_FLOAT_EQ(a, b, eps)                                                               \
     do {                                                                                         \
         double _a = (double)(a), _b = (double)(b);                                               \
-        if (fabs(_a - _b) > (eps)) {                                                             \
+        if (fabs(_a - _b) > (double)(eps)) {                                                             \
             printf("  %sFAIL%s %s:%d: %s (%g) != %s (%g) within eps %g\n", tf_red(), tf_reset(), \
                    __FILE__, __LINE__, #a, _a, #b, _b, (double)(eps));                           \
             return 1;                                                                            \

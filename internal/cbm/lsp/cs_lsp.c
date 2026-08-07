@@ -1647,7 +1647,7 @@ static void cs_invalidate_conditionally_assigned_callables(CSLSPContext *ctx, TS
 }
 
 static void cs_emit_resolved_kind_reason(CSLSPContext *ctx, const char *callee_qn,
-                                         const char *strategy, float confidence,
+                                         const char *strategy, double confidence,
                                          CBMResolvedKind kind, const char *reason) {
     if (!ctx->resolved_calls || !callee_qn || !ctx->enclosing_func_qn) return;
     CBMResolvedCall rc = {0};
@@ -1661,17 +1661,17 @@ static void cs_emit_resolved_kind_reason(CSLSPContext *ctx, const char *callee_q
 }
 
 static void cs_emit_resolved_kind(CSLSPContext *ctx, const char *callee_qn, const char *strategy,
-                                  float confidence, CBMResolvedKind kind) {
+                                  double confidence, CBMResolvedKind kind) {
     cs_emit_resolved_kind_reason(ctx, callee_qn, strategy, confidence, kind, NULL);
 }
 
 static void cs_emit_resolved(CSLSPContext *ctx, const char *callee_qn, const char *strategy,
-                             float confidence) {
+                             double confidence) {
     cs_emit_resolved_kind(ctx, callee_qn, strategy, confidence, CBM_RESOLVED_INVOCATION);
 }
 
 static void cs_emit_resolved_reason(CSLSPContext *ctx, const char *callee_qn, const char *strategy,
-                                    float confidence, const char *reason) {
+                                    double confidence, const char *reason) {
     cs_emit_resolved_kind_reason(ctx, callee_qn, strategy, confidence, CBM_RESOLVED_INVOCATION,
                                  reason);
 }
@@ -1686,7 +1686,7 @@ static void cs_stamp_resolved_site(CSLSPContext *ctx, int first, TSNode site) {
 }
 
 static void cs_emit_resolved_kind_reason_at(CSLSPContext *ctx, const char *callee_qn,
-                                            const char *strategy, float confidence,
+                                            const char *strategy, double confidence,
                                             CBMResolvedKind kind, const char *reason, TSNode site) {
     int first = ctx->resolved_calls ? ctx->resolved_calls->count : -1;
     cs_emit_resolved_kind_reason(ctx, callee_qn, strategy, confidence, kind, reason);

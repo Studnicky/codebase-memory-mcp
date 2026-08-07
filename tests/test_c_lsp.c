@@ -15558,7 +15558,7 @@ static int assert_cpp_family_repeated_method_occurrences(CBMLanguage language) {
     }
     for (int i = 0; i < result->resolved_calls.count; i++) {
         const CBMResolvedCall *resolved = &result->resolved_calls.items[i];
-        if (resolved->kind != CBM_RESOLVED_INVOCATION || resolved->confidence <= 0.0f ||
+        if (resolved->kind != CBM_RESOLVED_INVOCATION || resolved->confidence <= 0.0 ||
             !resolved->caller_qn || !strstr(resolved->caller_qn, "occurrence_probe") ||
             !resolved->callee_qn ||
             strcmp(cbm_lsp_bare_segment(resolved->callee_qn), "render") != 0) {
@@ -15637,7 +15637,7 @@ TEST(clsp_c_reassigned_function_pointer_calls_join_exact_occurrences) {
     }
     for (int i = 0; i < result->resolved_calls.count; i++) {
         const CBMResolvedCall *resolved = &result->resolved_calls.items[i];
-        if (resolved->kind != CBM_RESOLVED_INVOCATION || resolved->confidence <= 0.0f ||
+        if (resolved->kind != CBM_RESOLVED_INVOCATION || resolved->confidence <= 0.0 ||
             !resolved->caller_qn || !strstr(resolved->caller_qn, "occurrence_probe") ||
             !resolved->reason || strcmp(resolved->reason, "fp") != 0) {
             continue;
@@ -15835,7 +15835,7 @@ static int assert_cpp_family_preprocessed_collision_isolated(CBMLanguage languag
     const CBMResolvedCall *expanded_bravo_semantic = NULL;
     for (int i = 0; i < result->resolved_calls.count; i++) {
         const CBMResolvedCall *resolved = &result->resolved_calls.items[i];
-        if (resolved->kind != CBM_RESOLVED_INVOCATION || resolved->confidence <= 0.0f ||
+        if (resolved->kind != CBM_RESOLVED_INVOCATION || resolved->confidence <= 0.0 ||
             resolved->site_start_byte != collision_start ||
             resolved->site_end_byte != collision_end || !resolved->callee_qn) {
             continue;
@@ -15906,7 +15906,7 @@ TEST(clsp_c_preprocessed_coordinate_collision_isolated) {
     const CBMResolvedCall *bravo_semantic = NULL;
     for (int i = 0; i < result->resolved_calls.count; i++) {
         const CBMResolvedCall *resolved = &result->resolved_calls.items[i];
-        if (resolved->kind != CBM_RESOLVED_INVOCATION || resolved->confidence <= 0.0f ||
+        if (resolved->kind != CBM_RESOLVED_INVOCATION || resolved->confidence <= 0.0 ||
             resolved->site_start_byte != collision_start ||
             resolved->site_end_byte != collision_end || !resolved->callee_qn || !resolved->reason ||
             strcmp(resolved->reason, "fp") != 0) {

@@ -41,7 +41,7 @@
 /* Forward declarations for early callers in the file. */
 static void rust_resolve_calls_in_node(RustLSPContext *ctx, TSNode node);
 static void rust_emit_resolved_call(RustLSPContext *ctx, const char *callee_qn,
-                                    const char *strategy, float confidence);
+                                    const char *strategy, double confidence);
 static void rust_inject_syn_call(RustLSPContext *ctx, const char *callee_qn);
 static bool rust_map_source_range(const RustLSPContext *ctx, uint32_t start, uint32_t end,
                                   uint32_t *mapped_start, uint32_t *mapped_end);
@@ -4093,7 +4093,7 @@ static void rust_ensure_known_macro_carrier(RustLSPContext *ctx, const char *mac
 }
 
 static void rust_emit_resolved_call_reason(RustLSPContext *ctx, const char *callee_qn,
-                                           const char *strategy, float confidence,
+                                           const char *strategy, double confidence,
                                            const char *reason) {
     if (!ctx || !ctx->resolved_calls || !callee_qn || !ctx->enclosing_func_qn)
         return;
@@ -4114,7 +4114,7 @@ static void rust_emit_resolved_call_reason(RustLSPContext *ctx, const char *call
 }
 
 static void rust_emit_resolved_call(RustLSPContext *ctx, const char *callee_qn,
-                                    const char *strategy, float confidence) {
+                                    const char *strategy, double confidence) {
     rust_emit_resolved_call_reason(ctx, callee_qn, strategy, confidence, NULL);
 }
 

@@ -45,7 +45,7 @@ static bool has_resolved_suffix(const CBMResolvedCallArray *calls, const char *c
         return false;
     for (int i = 0; i < calls->count; i++) {
         const CBMResolvedCall *call = &calls->items[i];
-        if (call->kind != CBM_RESOLVED_INVOCATION || call->confidence < 0.5f || !call->caller_qn ||
+        if (call->kind != CBM_RESOLVED_INVOCATION || call->confidence < 0.5 || !call->caller_qn ||
             !strstr(call->caller_qn, caller_sub) || !ends_with(call->callee_qn, callee_suffix) ||
             !call->strategy || strcmp(call->strategy, strategy) != 0) {
             continue;
@@ -61,7 +61,7 @@ static bool has_resolved_exact(const CBMResolvedCallArray *calls, const char *ca
         return false;
     for (int i = 0; i < calls->count; i++) {
         const CBMResolvedCall *call = &calls->items[i];
-        if (call->kind == CBM_RESOLVED_INVOCATION && call->confidence >= 0.5f && call->caller_qn &&
+        if (call->kind == CBM_RESOLVED_INVOCATION && call->confidence >= 0.5 && call->caller_qn &&
             strstr(call->caller_qn, caller_sub) && call->callee_qn &&
             strcmp(call->callee_qn, callee_qn) == 0 && call->strategy &&
             strcmp(call->strategy, strategy) == 0) {

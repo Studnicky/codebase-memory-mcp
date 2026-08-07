@@ -380,7 +380,7 @@ TEST(pylsp_no_false_positive_on_unknown_method) {
     int idx = find_resolved(r, "f", "something_unknown_42");
     if (idx >= 0) {
         const CBMResolvedCall *rc = &r->resolved_calls.items[idx];
-        ASSERT(rc->confidence < 0.6f);
+        ASSERT(rc->confidence < 0.6);
     }
     cbm_free_result(r);
     PASS();
@@ -1520,7 +1520,7 @@ TEST(pylsp_round2_isinstance_no_false_positive_in_else) {
     int idx = find_resolved(r, "use", "method");
     if (idx >= 0) {
         const CBMResolvedCall *rc = &r->resolved_calls.items[idx];
-        ASSERT(rc->confidence < 0.6f);
+        ASSERT(rc->confidence < 0.6);
     }
     cbm_free_result(r);
     PASS();

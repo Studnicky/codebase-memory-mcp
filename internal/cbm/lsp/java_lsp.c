@@ -60,7 +60,7 @@ static void process_local_var_decl(JavaLSPContext *ctx, TSNode node);
 static void process_enhanced_for(JavaLSPContext *ctx, TSNode node);
 static void process_block(JavaLSPContext *ctx, TSNode node);
 static void java_emit_resolved(JavaLSPContext *ctx, const char *callee_qn, const char *strategy,
-                               float confidence);
+                               double confidence);
 static void java_emit_unresolved(JavaLSPContext *ctx, const char *expr_text, const char *reason);
 static const CBMType *eval_method_invocation(JavaLSPContext *ctx, TSNode node);
 static const CBMType *eval_object_creation(JavaLSPContext *ctx, TSNode node);
@@ -1798,7 +1798,7 @@ void java_lsp_process_file(JavaLSPContext *ctx, TSNode root) {
 /* ── Call-edge resolution ─────────────────────────────────────────── */
 
 static void java_emit_resolved_orig_kind(JavaLSPContext *ctx, const char *callee_qn,
-                                         const char *orig, const char *strategy, float confidence,
+                                         const char *orig, const char *strategy, double confidence,
                                          CBMResolvedKind kind) {
     if (!ctx->resolved_calls || !ctx->enclosing_method_qn || !callee_qn)
         return;
@@ -1815,18 +1815,18 @@ static void java_emit_resolved_orig_kind(JavaLSPContext *ctx, const char *callee
 }
 
 static void java_emit_resolved_orig(JavaLSPContext *ctx, const char *callee_qn, const char *orig,
-                                    const char *strategy, float confidence) {
+                                    const char *strategy, double confidence) {
     java_emit_resolved_orig_kind(ctx, callee_qn, orig, strategy, confidence,
                                  CBM_RESOLVED_INVOCATION);
 }
 
 static void java_emit_resolved(JavaLSPContext *ctx, const char *callee_qn, const char *strategy,
-                               float confidence) {
+                               double confidence) {
     java_emit_resolved_orig(ctx, callee_qn, NULL, strategy, confidence);
 }
 
 static void java_emit_resolved_reference(JavaLSPContext *ctx, const char *callee_qn,
-                                         const char *strategy, float confidence) {
+                                         const char *strategy, double confidence) {
     java_emit_resolved_orig_kind(ctx, callee_qn, NULL, strategy, confidence,
                                  CBM_RESOLVED_CALL_REFERENCE);
 }
@@ -1842,7 +1842,7 @@ static void java_stamp_resolved_site(JavaLSPContext *ctx, int first, TSNode site
 }
 
 static void java_emit_resolved_reference_at(JavaLSPContext *ctx, const char *callee_qn,
-                                            const char *strategy, float confidence, TSNode site) {
+                                            const char *strategy, double confidence, TSNode site) {
     int first = ctx->resolved_calls ? ctx->resolved_calls->count : -1;
     java_emit_resolved_reference(ctx, callee_qn, strategy, confidence);
     java_stamp_resolved_site(ctx, first, site);

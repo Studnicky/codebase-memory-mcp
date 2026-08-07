@@ -15,7 +15,7 @@ static inline CBMTypeKind safe_kind(const CBMType *t) {
 // Forward declarations
 static void c_resolve_calls_in_node(CLSPContext *ctx, TSNode node);
 static void c_emit_resolved_call(CLSPContext *ctx, const char *callee_qn, const char *strategy,
-                                 float confidence);
+                                 double confidence);
 static void c_emit_unresolved_call(CLSPContext *ctx, const char *expr_text, const char *reason);
 static const CBMType *c_lookup_field_type(CLSPContext *ctx, const char *type_qn,
                                           const char *field_name, int depth);
@@ -3788,7 +3788,7 @@ static bool c_is_compound_assignment_operator(const char *operator_token) {
 }
 
 static void c_emit_resolved_call_orig_at(CLSPContext *ctx, const char *callee_qn, const char *orig,
-                                         const char *strategy, float confidence, TSNode site) {
+                                         const char *strategy, double confidence, TSNode site) {
     if (!ctx->resolved_calls || !callee_qn || !ctx->enclosing_func_qn)
         return;
     CBMResolvedCall rc = {0};
@@ -3812,17 +3812,17 @@ static void c_emit_resolved_call_orig_at(CLSPContext *ctx, const char *callee_qn
 }
 
 static void c_emit_resolved_call_orig(CLSPContext *ctx, const char *callee_qn, const char *orig,
-                                      const char *strategy, float confidence) {
+                                      const char *strategy, double confidence) {
     c_emit_resolved_call_orig_at(ctx, callee_qn, orig, strategy, confidence, (TSNode){0});
 }
 
 static void c_emit_resolved_call(CLSPContext *ctx, const char *callee_qn, const char *strategy,
-                                 float confidence) {
+                                 double confidence) {
     c_emit_resolved_call_orig(ctx, callee_qn, NULL, strategy, confidence);
 }
 
 static void c_emit_resolved_call_at(CLSPContext *ctx, const char *callee_qn, const char *strategy,
-                                    float confidence, TSNode site) {
+                                    double confidence, TSNode site) {
     c_emit_resolved_call_orig_at(ctx, callee_qn, NULL, strategy, confidence, site);
 }
 
