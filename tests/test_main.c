@@ -637,6 +637,7 @@ int main(int argc, char **argv) {
     RUN_SELECTED_SUITE(str_intern);
     RUN_SELECTED_SUITE(log);
     RUN_SELECTED_SUITE(str_util);
+    RUN_SELECTED_SUITE(workspace);
     RUN_SELECTED_SUITE(platform);
     RUN_SELECTED_SUITE(diagnostics);
     RUN_SELECTED_SUITE(subprocess);

@@ -26,6 +26,7 @@ extern void suite_dyn_array(void);
 extern void suite_str_intern(void);
 extern void suite_log(void);
 extern void suite_str_util(void);
+extern void suite_workspace(void);
 extern void suite_platform(void);
 extern void suite_diagnostics(void);
 extern void suite_subprocess(void);
