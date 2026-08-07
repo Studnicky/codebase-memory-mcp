@@ -71,7 +71,7 @@ CFLAGS_STRICT = -Wconversion -Wsign-conversion -Wshadow -Wcast-qual -Wcast-align
                 -Wno-error=enum-float-conversion -Wno-error=implicit-int-conversion \
                 -Wno-error=implicit-int-float-conversion \
                 -Wno-error=implicit-const-int-float-conversion \
-                -Wno-error=shorten-64-to-32 -Wno-error=float-conversion
+                -Wno-error=float-conversion
 
 # -Wdate-time: with -Werror, any use of __DATE__/__TIME__/__TIMESTAMP__ fails the
 # build. Build-time entropy is how one identical source tree produced a new hash

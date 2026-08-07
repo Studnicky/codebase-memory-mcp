@@ -22,7 +22,7 @@ typedef struct CBMHashTable CBMHashTable;
 
 /* Create a hash table with initial capacity hint (used to pre-reserve
  * buckets and avoid early growth; 0 = library default). */
-CBMHashTable *cbm_ht_create(uint32_t initial_capacity);
+CBMHashTable *cbm_ht_create(size_t initial_capacity);
 
 /* Free the hash table (does NOT free keys or values). */
 void cbm_ht_free(CBMHashTable *ht);
