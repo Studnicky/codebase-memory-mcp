@@ -1,5 +1,6 @@
 /* RED contract for daemon-owned asynchronous index workers. */
 #include "test_framework.h"
+#include "suites.h"
 #include "test_helpers.h"
 
 #include "cli/progress_sink.h"
@@ -219,12 +220,15 @@ TEST(index_supervisor_worker_argv_requires_exact_build_bound_grammar) {
     (void)snprintf(mismatched, sizeof(mismatched), "%s", captured);
     mismatched[0] = mismatched[0] == '0' ? '1' : '0';
 
+    char fingerprint[CBM_INDEX_WORKER_BUILD_FINGERPRINT_SIZE];
+    (void)snprintf(fingerprint, sizeof(fingerprint), "%s", captured);
+
     char *valid[] = {
         "test-runner",
         "cli",
         "--index-worker",
         CBM_INDEX_WORKER_BUILD_ARG,
-        (char *)captured,
+        fingerprint,
         "index_repository",
         "{\"__cbm_test_worker\":\"hang-tree\"}",
         "--response-out",
@@ -266,7 +270,7 @@ TEST(index_supervisor_worker_argv_requires_exact_build_bound_grammar) {
                          "cli",
                          "--index-worker",
                          CBM_INDEX_WORKER_BUILD_ARG,
-                         (char *)captured,
+                         fingerprint,
                          "index_repository",
                          "{}",
                          "--response-out",
@@ -280,7 +284,7 @@ TEST(index_supervisor_worker_argv_requires_exact_build_bound_grammar) {
                         "cli",
                         "--index-worker",
                         CBM_INDEX_WORKER_BUILD_ARG,
-                        (char *)captured,
+                        fingerprint,
                         "index_repository",
                         "{}",
                         "--response-out",
@@ -291,7 +295,7 @@ TEST(index_supervisor_worker_argv_requires_exact_build_bound_grammar) {
                            "cli",
                            "--index-worker",
                            CBM_INDEX_WORKER_BUILD_ARG,
-                           (char *)captured,
+                           fingerprint,
                            "index_repository",
                            "{}",
                            "--response-out",
@@ -303,7 +307,7 @@ TEST(index_supervisor_worker_argv_requires_exact_build_bound_grammar) {
                                "cli",
                                "--index-worker",
                                CBM_INDEX_WORKER_BUILD_ARG,
-                               (char *)captured,
+                               fingerprint,
                                "index_repository",
                                "{}",
                                "--response-out",
@@ -336,12 +340,14 @@ TEST(index_supervisor_worker_argv_requires_exact_build_bound_grammar) {
 TEST(index_supervisor_async_jobs_are_isolated_cancellable_and_terminal_cached) {
     const char *captured = cbm_index_supervisor_build_fingerprint();
     ASSERT_NOT_NULL(captured);
+    char fingerprint[CBM_INDEX_WORKER_BUILD_FINGERPRINT_SIZE];
+    (void)snprintf(fingerprint, sizeof(fingerprint), "%s", captured);
     char *worker_argv[] = {
         "test-runner",
         "cli",
         "--index-worker",
         CBM_INDEX_WORKER_BUILD_ARG,
-        (char *)captured,
+        fingerprint,
         "index_repository",
         "{\"__cbm_test_worker\":\"hang-tree\"}",
         "--response-out",

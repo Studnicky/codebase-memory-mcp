@@ -138,6 +138,13 @@ typedef struct {
     const CBMReturnTypeTable *return_type_table;
 } cbm_pipeline_ctx_t;
 
+/* Build the ObjectScript $$$macro table from .inc include files in the repo.
+ * Returns NULL (and does no work) when no ObjectScript include files exist.
+ * Caller owns the returned heap table (free via cbm_macro_table_free). Shared
+ * by the sequential path (pipeline.c) and the parallel path (pass_parallel.c). */
+CBMMacroTable *cbm_build_macro_table_from_files(const cbm_file_info_t *files, int count,
+                                                const char *repo_path);
+
 /* Transcode an ObjectScript Studio Export XML file and compose every generated
  * UDL class into one cacheable result. The returned result owns all child
  * extraction arenas and is released with the ordinary cbm_free_result(). */

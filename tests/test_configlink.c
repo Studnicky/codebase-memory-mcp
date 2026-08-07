@@ -7,6 +7,7 @@
  */
 #include "../src/foundation/compat.h"
 #include "test_framework.h"
+#include "suites.h"
 #include "test_helpers.h"
 #include "pipeline/pipeline.h"
 #include "pipeline/pipeline_internal.h"
@@ -85,13 +86,14 @@ TEST(configlink_key_symbol_exact_match) {
     cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp/test");
 
     /* Config Variable node: max_connections from config.toml */
-    int64_t cfg_id = cbm_gbuf_upsert_node(gb, "Variable", "max_connections",
-                                          "test.config.max_connections", "config.toml", 0, 0, NULL);
+    int64_t cfg_id = cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Variable", "max_connections",
+                                                            "test.config.max_connections",
+                                                            "config.toml", 0, 0, NULL));
     ASSERT_GT(cfg_id, 0);
 
     /* Code Function node: getMaxConnections from main.go */
-    int64_t func_id = cbm_gbuf_upsert_node(gb, "Function", "getMaxConnections",
-                                           "test.main.getMaxConnections", "main.go", 0, 0, NULL);
+    int64_t func_id = cbm_node_id_value(cbm_gbuf_upsert_node(
+        gb, "Function", "getMaxConnections", "test.main.getMaxConnections", "main.go", 0, 0, NULL));
     ASSERT_GT(func_id, 0);
 
     /* Run configlink */
@@ -112,11 +114,13 @@ TEST(configlink_key_symbol_exact_match) {
 TEST(configlink_key_symbol_substring_match) {
     cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp/test");
 
-    cbm_gbuf_upsert_node(gb, "Variable", "request_timeout", "test.config.request_timeout",
-                         "config.toml", 0, 0, NULL);
+    cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Variable", "request_timeout",
+                                           "test.config.request_timeout", "config.toml", 0, 0,
+                                           NULL));
 
-    cbm_gbuf_upsert_node(gb, "Function", "getRequestTimeoutSeconds",
-                         "test.main.getRequestTimeoutSeconds", "main.go", 0, 0, NULL);
+    cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "getRequestTimeoutSeconds",
+                                           "test.main.getRequestTimeoutSeconds", "main.go", 0, 0,
+                                           NULL));
 
     run_configlink(gb, "test", NULL);
 
@@ -138,10 +142,12 @@ TEST(configlink_key_symbol_short_key_skipped) {
     for (int i = 0; i < 3; i++) {
         char qn[64];
         snprintf(qn, sizeof(qn), "test.config.%s", short_keys[i]);
-        cbm_gbuf_upsert_node(gb, "Variable", short_keys[i], qn, "config.toml", 0, 0, NULL);
+        cbm_node_id_value(
+            cbm_gbuf_upsert_node(gb, "Variable", short_keys[i], qn, "config.toml", 0, 0, NULL));
     }
 
-    cbm_gbuf_upsert_node(gb, "Function", "getPort", "test.main.getPort", "main.go", 0, 0, NULL);
+    cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "getPort", "test.main.getPort",
+                                           "main.go", 0, 0, NULL));
 
     run_configlink(gb, "test", NULL);
 
@@ -159,11 +165,12 @@ TEST(configlink_key_symbol_short_key_skipped) {
 TEST(configlink_key_symbol_camel_case) {
     cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp/test");
 
-    cbm_gbuf_upsert_node(gb, "Variable", "maxRetryCount", "test.config.maxRetryCount",
-                         "config.json", 0, 0, NULL);
+    cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Variable", "maxRetryCount",
+                                           "test.config.maxRetryCount", "config.json", 0, 0, NULL));
 
-    cbm_gbuf_upsert_node(gb, "Function", "getMaxRetryCount", "test.handler.getMaxRetryCount",
-                         "handler.go", 0, 0, NULL);
+    cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "getMaxRetryCount",
+                                           "test.handler.getMaxRetryCount", "handler.go", 0, 0,
+                                           NULL));
 
     run_configlink(gb, "test", NULL);
 
@@ -180,9 +187,11 @@ TEST(configlink_key_symbol_camel_case) {
 TEST(configlink_key_symbol_no_false_positive) {
     cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp/test");
 
-    cbm_gbuf_upsert_node(gb, "Variable", "url", "test.db.url", "config.toml", 0, 0, NULL);
+    cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "Variable", "url", "test.db.url", "config.toml", 0, 0, NULL));
 
-    cbm_gbuf_upsert_node(gb, "Function", "parseURL", "test.main.parseURL", "main.go", 0, 0, NULL);
+    cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "parseURL", "test.main.parseURL",
+                                           "main.go", 0, 0, NULL));
 
     run_configlink(gb, "test", NULL);
 
@@ -203,18 +212,23 @@ TEST(configlink_dep_import_package_json) {
     cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp/test");
 
     /* Dependency Variable in package.json */
-    cbm_gbuf_upsert_node(gb, "Variable", "express", "test.package.dependencies.express",
-                         "package.json", 0, 0, NULL);
+    cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Variable", "express",
+                                           "test.package.dependencies.express", "package.json", 0,
+                                           0, NULL));
 
     /* Module node for app.js (source of import) */
-    int64_t app_id = cbm_gbuf_upsert_node(gb, "Module", "app", "test.app", "app.js", 0, 0, NULL);
+    int64_t app_id = cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "Module", "app", "test.app", "app.js", 0, 0, NULL));
 
     /* Import target node (what 'express' resolves to) */
-    int64_t target_id = cbm_gbuf_upsert_node(gb, "Module", "express", "test.node_modules.express",
-                                             "node_modules/express/index.js", 0, 0, NULL);
+    int64_t target_id =
+        cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Module", "express", "test.node_modules.express",
+                                               "node_modules/express/index.js", 0, 0, NULL));
 
     /* IMPORTS edge: app.js → express module */
-    cbm_gbuf_insert_edge(gb, app_id, target_id, "IMPORTS", NULL);
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(app_id), .target = cbm_node_id(target_id)},
+        "IMPORTS", NULL));
 
     run_configlink(gb, "test", NULL);
 
@@ -263,11 +277,11 @@ TEST(configlink_file_ref_no_false_positive) {
 
     /* data.csv Module (NOT a config extension) */
     char *csv_qn = cbm_pipeline_fqn_module(project, "data.csv");
-    cbm_gbuf_upsert_node(gb, "Module", "data", csv_qn, "data.csv", 0, 0, NULL);
+    cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Module", "data", csv_qn, "data.csv", 0, 0, NULL));
 
     /* Source Module */
     char *main_qn = cbm_pipeline_fqn_module(project, "main.go");
-    cbm_gbuf_upsert_node(gb, "Module", "main", main_qn, "main.go", 0, 0, NULL);
+    cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Module", "main", main_qn, "main.go", 0, 0, NULL));
 
     run_configlink(gb, project, tmpdir);
 
@@ -345,8 +359,9 @@ static cbm_gbuf_t *build_oversized_corpus(bool reverse) {
     cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp/test");
 
     /* One config key every candidate can match on: "max_connections". */
-    cbm_gbuf_upsert_node(gb, "Variable", "max_connections", "test.config.max_connections",
-                         "config.toml", 0, 0, NULL);
+    cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Variable", "max_connections",
+                                           "test.config.max_connections", "config.toml", 0, 0,
+                                           NULL));
 
     for (int k = 0; k < CL_DET_CANDIDATES; k++) {
         int i = reverse ? (CL_DET_CANDIDATES - 1 - k) : k;
@@ -356,7 +371,7 @@ static cbm_gbuf_t *build_oversized_corpus(bool reverse) {
         snprintf(name, sizeof(name), "getMaxConnections%04d", i);
         snprintf(qn, sizeof(qn), "test.mod%04d.%s", i, name);
         snprintf(path, sizeof(path), "mod%04d.go", i);
-        cbm_gbuf_upsert_node(gb, "Function", name, qn, path, 0, 0, NULL);
+        cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", name, qn, path, 0, 0, NULL));
     }
     return gb;
 }

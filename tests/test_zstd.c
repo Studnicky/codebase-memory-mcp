@@ -2,6 +2,7 @@
  * test_zstd.c — Tests for zstd compression wrappers.
  */
 #include "test_framework.h"
+#include "suites.h"
 
 extern int cbm_zstd_compress(const char *src, int srcLen, char *dst, int dstCap, int level);
 extern int cbm_zstd_decompress(const char *src, int srcLen, char *dst, int dstCap);
@@ -20,12 +21,12 @@ TEST(zstd_roundtrip) {
     int clen = cbm_zstd_compress(data, len, cbuf, (int)bound, 3);
     ASSERT_GT(clen, 0);
 
-    char *dbuf = malloc(len);
+    char *dbuf = malloc((size_t)len); /* len = strlen(data), always positive here */
     ASSERT_NOT_NULL(dbuf);
 
     int dlen = cbm_zstd_decompress(cbuf, clen, dbuf, len);
     ASSERT_EQ(dlen, len);
-    ASSERT_MEM_EQ(dbuf, data, len);
+    ASSERT_MEM_EQ(dbuf, data, (size_t)len);
 
     free(cbuf);
     free(dbuf);
@@ -34,7 +35,7 @@ TEST(zstd_roundtrip) {
 
 TEST(zstd_roundtrip_large) {
     int len = 100000;
-    char *data = malloc(len);
+    char *data = malloc((size_t)len); /* len is a fixed positive constant */
     ASSERT_NOT_NULL(data);
 
     /* Repetitive data — should compress well */
@@ -51,12 +52,12 @@ TEST(zstd_roundtrip_large) {
     /* Repetitive data should compress at least 2:1 */
     ASSERT_LT(clen, len / 2);
 
-    char *dbuf = malloc(len);
+    char *dbuf = malloc((size_t)len); /* len is a fixed positive constant */
     ASSERT_NOT_NULL(dbuf);
 
     int dlen = cbm_zstd_decompress(cbuf, clen, dbuf, len);
     ASSERT_EQ(dlen, len);
-    ASSERT_MEM_EQ(dbuf, data, len);
+    ASSERT_MEM_EQ(dbuf, data, (size_t)len);
 
     free(data);
     free(cbuf);

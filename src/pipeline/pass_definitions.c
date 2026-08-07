@@ -91,7 +91,7 @@ static char *read_file(const char *path, int *out_len, long *out_size,
         return NULL;
     }
 
-    size_t nread = fread(buf, SKIP_ONE, size, f);
+    size_t nread = fread(buf, SKIP_ONE, (size_t)size, f);
     (void)fclose(f);
 
     if (nread > (size_t)size) {
@@ -324,7 +324,7 @@ static void process_def(cbm_pipeline_ctx_t *ctx, const CBMDefinition *def, const
     }
     char props[CBM_SZ_2K];
     build_def_props(props, sizeof(props), def);
-    int64_t node_id = cbm_gbuf_upsert_node(
+    cbm_node_id_t node_id = cbm_gbuf_upsert_node(
         ctx->gbuf, def->label ? def->label : "Function", def->name, def->qualified_name,
         def->file_path ? def->file_path : rel, (int)def->start_line, (int)def->end_line, props);
     /* Register callable symbols + every type-like container (Class/Struct/
@@ -335,7 +335,7 @@ static void process_def(cbm_pipeline_ctx_t *ctx, const CBMDefinition *def, const
      * registered so pass_usages.c can resolve READS/WRITES accesses (rw->var_name)
      * to a Variable/Field node QN.
      * KEEP IN SYNC with pass_parallel.c and pipeline_incremental.c's seed sets. */
-    if (node_id > 0 && def->label &&
+    if (cbm_node_id_valid(node_id) && def->label &&
         (strcmp(def->label, "Function") == 0 || strcmp(def->label, "Method") == 0 ||
          cbm_label_is_type_like(def->label) || strcmp(def->label, "Variable") == 0 ||
          strcmp(def->label, "Field") == 0)) {
@@ -343,14 +343,18 @@ static void process_def(cbm_pipeline_ctx_t *ctx, const CBMDefinition *def, const
     }
     char *file_qn = cbm_pipeline_fqn_compute(ctx->project_name, rel, "__file__");
     const cbm_gbuf_node_t *file_node = cbm_gbuf_find_by_qn(ctx->gbuf, file_qn);
-    if (file_node && node_id > 0) {
-        cbm_gbuf_insert_edge_props(ctx->gbuf, file_node->id, node_id, "DEFINES", NULL, 0);
+    if (file_node && cbm_node_id_valid(node_id)) {
+        cbm_gbuf_insert_edge_props(
+            ctx->gbuf, (cbm_edge_endpoints_t){.source = file_node->id, .target = node_id},
+            "DEFINES", NULL, 0);
     }
     free(file_qn);
     if (def->parent_class && def->label && strcmp(def->label, "Method") == 0) {
         const cbm_gbuf_node_t *parent = cbm_gbuf_find_by_qn(ctx->gbuf, def->parent_class);
-        if (parent && node_id > 0) {
-            cbm_gbuf_insert_edge_props(ctx->gbuf, parent->id, node_id, "DEFINES_METHOD", NULL, 0);
+        if (parent && cbm_node_id_valid(node_id)) {
+            cbm_gbuf_insert_edge_props(
+                ctx->gbuf, (cbm_edge_endpoints_t){.source = parent->id, .target = node_id},
+                "DEFINES_METHOD", NULL, 0);
         }
     }
 }
@@ -385,19 +389,20 @@ static void create_channel_edges_for_file(cbm_pipeline_ctx_t *ctx, const CBMFile
         char channel_props[CBM_SZ_512];
         snprintf(channel_props, sizeof(channel_props), "{\"transport\":\"%s\",\"name\":\"%s\"}",
                  ch->transport ? ch->transport : "unknown", ch->channel_name);
-        int64_t channel_id = cbm_gbuf_upsert_node(ctx->gbuf, "Channel", ch->channel_name,
-                                                  channel_qn, "", 0, 0, channel_props);
+        cbm_node_id_t channel_id = cbm_gbuf_upsert_node(ctx->gbuf, "Channel", ch->channel_name,
+                                                        channel_qn, "", 0, 0, channel_props);
 
         const cbm_gbuf_node_t *src_node = find_channel_source(ctx, ch, rel);
-        if (src_node && channel_id > 0) {
+        if (src_node && cbm_node_id_valid(channel_id)) {
             const char *edge_type = ch->direction == CBM_CHANNEL_EMIT ? "EMITS" : "LISTENS_ON";
             const cbm_gbuf_prop_t edge_props[] = {
                 {.key = "transport",
                  .kind = CBM_EDGE_PROP_STRING,
                  .text = ch->transport ? ch->transport : "unknown"},
             };
-            cbm_gbuf_insert_edge_props(ctx->gbuf, src_node->id, channel_id, edge_type, edge_props,
-                                       (int)(sizeof(edge_props) / sizeof(edge_props[0])));
+            cbm_gbuf_insert_edge_props(
+                ctx->gbuf, (cbm_edge_endpoints_t){.source = src_node->id, .target = channel_id},
+                edge_type, edge_props, (int)(sizeof(edge_props) / sizeof(edge_props[0])));
         }
     }
 }
@@ -422,9 +427,9 @@ int cbm_pipeline_create_env_configures_for_file(cbm_pipeline_ctx_t *ctx,
         snprintf(env_qn, sizeof(env_qn), "__env__%s", ea->env_key);
         char env_props[CBM_SZ_512];
         snprintf(env_props, sizeof(env_props), "{\"env_key\":\"%s\"}", ea->env_key);
-        int64_t env_id =
+        cbm_node_id_t env_id =
             cbm_gbuf_upsert_node(ctx->gbuf, "EnvVar", ea->env_key, env_qn, "", 0, 0, env_props);
-        if (env_id <= 0) {
+        if (!cbm_node_id_valid(env_id)) {
             continue;
         }
         const cbm_gbuf_node_t *src = NULL;
@@ -444,12 +449,13 @@ int cbm_pipeline_create_env_configures_for_file(cbm_pipeline_ctx_t *ctx,
             }
             src = file_node;
         }
-        if (src && src->id != env_id) {
+        if (src && !cbm_node_id_eq(src->id, env_id)) {
             const cbm_gbuf_prop_t configures_props[] = {
                 {.key = "strategy", .kind = CBM_EDGE_PROP_STRING, .text = "env_access"},
             };
             cbm_gbuf_insert_edge_props(
-                ctx->gbuf, src->id, env_id, "CONFIGURES", configures_props,
+                ctx->gbuf, (cbm_edge_endpoints_t){.source = src->id, .target = env_id},
+                "CONFIGURES", configures_props,
                 (int)(sizeof(configures_props) / sizeof(configures_props[0])));
             count++;
         }
@@ -476,14 +482,15 @@ static int create_import_edges_for_file(cbm_pipeline_ctx_t *ctx, const CBMFileRe
         }
         const cbm_gbuf_node_t *target =
             cbm_pipeline_resolve_import_node(ctx, rel, file_qn, imp, namespace_map);
-        if (target && target->id != source_node->id) {
+        if (target && !cbm_node_id_eq(target->id, source_node->id)) {
             const cbm_gbuf_prop_t imp_props[] = {
                 {.key = "local_name",
                  .kind = CBM_EDGE_PROP_STRING,
                  .text = imp->local_name ? imp->local_name : ""},
             };
-            cbm_gbuf_insert_edge_props(ctx->gbuf, source_node->id, target->id, "IMPORTS", imp_props,
-                                       (int)(sizeof(imp_props) / sizeof(imp_props[0])));
+            cbm_gbuf_insert_edge_props(
+                ctx->gbuf, (cbm_edge_endpoints_t){.source = source_node->id, .target = target->id},
+                "IMPORTS", imp_props, (int)(sizeof(imp_props) / sizeof(imp_props[0])));
             count++;
         }
     }

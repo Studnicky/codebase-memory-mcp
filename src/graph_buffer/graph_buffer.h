@@ -20,14 +20,88 @@ typedef struct cbm_gbuf cbm_gbuf_t;
 /* Forward declare store for dump path */
 typedef struct cbm_store cbm_store_t;
 
+/* ── Nominal ID types ─────────────────────────────────────────────── */
+
+/* Node and edge temp IDs are distinct single-field structs so the compiler
+ * rejects mixing them. Passing a node id where an edge id is expected, or a
+ * bare int64_t where either is expected, is a compile error.
+ *
+ * These types do NOT by themselves catch a transposed source_id/target_id at
+ * a call site: both endpoints are node ids, so two bare cbm_node_id_t
+ * arguments have the same type and swapping them would still compile, still
+ * reversing the edge with no diagnostic. That hazard is closed by
+ * cbm_edge_endpoints_t below, which requires the roles to be named at the
+ * call site instead of inferred from argument order. */
+typedef struct {
+    int64_t v;
+} cbm_node_id_t;
+
+typedef struct {
+    int64_t v;
+} cbm_edge_id_t;
+
+/* Edge endpoints, named rather than positional. cbm_gbuf_insert_edge and
+ * cbm_gbuf_insert_edge_props take one of these instead of two bare
+ * cbm_node_id_t parameters, so a transposition stops being a silent
+ * positional slip and becomes a statement the caller must write on purpose:
+ *
+ *     cbm_gbuf_insert_edge(gb, (cbm_edge_endpoints_t){.source = caller,
+ *                                                      .target = callee},
+ *                          "CALLS", props);
+ *
+ * Always use the designated-initializer form (.source = ..., .target = ...)
+ * at every call site. A positional initializer, (cbm_edge_endpoints_t){a, b},
+ * reintroduces the exact hazard this type exists to remove and must never be
+ * used. */
+typedef struct {
+    cbm_node_id_t source;
+    cbm_node_id_t target;
+} cbm_edge_endpoints_t;
+
+/* Sentinel for "no id" / error, matching the buffer's existing convention
+ * (temp ids are sequential from 1; 0 means not-found or allocation failure). */
+#define CBM_NODE_ID_INVALID ((cbm_node_id_t){0})
+#define CBM_EDGE_ID_INVALID ((cbm_edge_id_t){0})
+
+static inline cbm_node_id_t cbm_node_id(int64_t v) {
+    return (cbm_node_id_t){v};
+}
+static inline cbm_edge_id_t cbm_edge_id(int64_t v) {
+    return (cbm_edge_id_t){v};
+}
+
+/* Unwrap to a plain int64_t — for serialization, SQL binding, printf, and
+ * hash-table keys. Should not be used to feed logic that stays inside the
+ * buffer; keep computations in the wrapped type. */
+static inline int64_t cbm_node_id_value(cbm_node_id_t id) {
+    return id.v;
+}
+static inline int64_t cbm_edge_id_value(cbm_edge_id_t id) {
+    return id.v;
+}
+
+static inline bool cbm_node_id_eq(cbm_node_id_t a, cbm_node_id_t b) {
+    return a.v == b.v;
+}
+static inline bool cbm_edge_id_eq(cbm_edge_id_t a, cbm_edge_id_t b) {
+    return a.v == b.v;
+}
+
+static inline bool cbm_node_id_valid(cbm_node_id_t id) {
+    return id.v != 0;
+}
+static inline bool cbm_edge_id_valid(cbm_edge_id_t id) {
+    return id.v != 0;
+}
+
 /* ── Node / Edge structs (owned by the buffer) ───────────────────── */
 
 typedef struct {
-    int64_t id;           /* temp ID (sequential from 1) */
-    char *label;          /* heap-owned */
-    char *name;           /* heap-owned */
-    char *qualified_name; /* heap-owned */
-    char *file_path;      /* heap-owned */
+    cbm_node_id_t id;           /* temp ID (sequential from 1) */
+    const char *label;          /* pool-owned (interned); freed once by the pool, not here */
+    char *name;                 /* heap-owned */
+    char *qualified_name;       /* heap-owned */
+    const char *file_path;      /* pool-owned (interned); freed once by the pool, not here */
     int start_line;
     int end_line;
     char *properties_json; /* heap-owned JSON string, "{}" default */
@@ -55,11 +129,11 @@ typedef struct {
 } cbm_gbuf_prop_t;
 
 typedef struct {
-    int64_t id;             /* temp ID */
-    int64_t source_id;      /* temp node ID */
-    int64_t target_id;      /* temp node ID */
-    char *type;             /* heap-owned */
-    cbm_gbuf_prop_t *props; /* heap-owned array; each key/text heap-owned */
+    cbm_edge_id_t id;          /* temp ID */
+    cbm_node_id_t source_id;   /* temp node ID */
+    cbm_node_id_t target_id;   /* temp node ID */
+    const char *type;          /* pool-owned (interned); freed once by the pool, not here */
+    cbm_gbuf_prop_t *props;    /* heap-owned array; each key/text heap-owned */
     int prop_count;
 } cbm_gbuf_edge_t;
 
@@ -91,15 +165,15 @@ int cbm_gbuf_merge(cbm_gbuf_t *dst, cbm_gbuf_t *src);
 /* Upsert a node by qualified name. Returns the temp ID.
  * All string fields are copied (buffer owns the copies).
  * Returns 0 on error. */
-int64_t cbm_gbuf_upsert_node(cbm_gbuf_t *gb, const char *label, const char *name,
-                             const char *qualified_name, const char *file_path, int start_line,
-                             int end_line, const char *properties_json);
+cbm_node_id_t cbm_gbuf_upsert_node(cbm_gbuf_t *gb, const char *label, const char *name,
+                                   const char *qualified_name, const char *file_path,
+                                   int start_line, int end_line, const char *properties_json);
 
 /* Find a node by qualified name. Returns NULL if not found. */
 const cbm_gbuf_node_t *cbm_gbuf_find_by_qn(const cbm_gbuf_t *gb, const char *qn);
 
 /* Find a node by temp ID. Returns NULL if not found. */
-const cbm_gbuf_node_t *cbm_gbuf_find_by_id(const cbm_gbuf_t *gb, int64_t id);
+const cbm_gbuf_node_t *cbm_gbuf_find_by_id(const cbm_gbuf_t *gb, cbm_node_id_t id);
 
 /* Find nodes by label. Sets *out and *count. Caller does NOT free.
  * Returns 0 on success, -1 on error. */
@@ -113,11 +187,26 @@ int cbm_gbuf_find_by_name(const cbm_gbuf_t *gb, const char *name, const cbm_gbuf
 /* Count total nodes in buffer. */
 int cbm_gbuf_node_count(const cbm_gbuf_t *gb);
 
+/* Replace a node's properties JSON in place, keyed by id.
+ *
+ * The lookup API above hands out `const cbm_gbuf_node_t *`, so a pass that
+ * enriches nodes it found has no typed way to write the result back. This is
+ * that way. Node storage belongs to the buffer, so the buffer performs the
+ * write and frees the string it replaces; a caller unwrapping the const off a
+ * looked-up node and assigning the field itself is a const violation whether
+ * or not the compiler is able to see it.
+ *
+ * Copies the string. Returns false if the id names no node. */
+bool cbm_gbuf_set_node_properties_json(cbm_gbuf_t *gb, cbm_node_id_t id,
+                                       const char *properties_json);
+
 /* Get the next ID that would be assigned. Used to initialize shared atomic counters. */
 int64_t cbm_gbuf_next_id(const cbm_gbuf_t *gb);
 
 /* Set the next ID counter. Used after merging worker gbufs to sync the main counter. */
 void cbm_gbuf_set_next_id(cbm_gbuf_t *gb, int64_t next_id);
+/* next_id/set_next_id stay bare int64_t: they address the shared allocation
+ * counter, not a specific node or edge, so neither nominal type applies. */
 
 /* Delete all nodes with a label. Cascade-deletes referencing edges. */
 int cbm_gbuf_delete_by_label(cbm_gbuf_t *gb, const char *label);
@@ -143,8 +232,8 @@ void cbm_gbuf_foreach_edge(const cbm_gbuf_t *gb, cbm_gbuf_edge_visitor_fn fn, vo
 /* Insert an edge. Deduplicates by (source_id, target_id, type).
  * On duplicate, merges properties (later wins). Returns edge temp ID.
  * Returns 0 on error. */
-int64_t cbm_gbuf_insert_edge(cbm_gbuf_t *gb, int64_t source_id, int64_t target_id, const char *type,
-                             const char *properties_json);
+cbm_edge_id_t cbm_gbuf_insert_edge(cbm_gbuf_t *gb, cbm_edge_endpoints_t endpoints, const char *type,
+                                   const char *properties_json);
 
 /* Insert an edge with typed properties. Deduplicates by (source_id, target_id,
  * type) — IMPORTS edges also key on the "local_name" property (#768). On
@@ -153,8 +242,9 @@ int64_t cbm_gbuf_insert_edge(cbm_gbuf_t *gb, int64_t source_id, int64_t target_i
  * break on a deterministic serialized-JSON order; an empty incoming set never
  * displaces stored properties). props/prop_count are borrowed for the call;
  * key/text are heap-copied into the edge. Returns edge temp ID, 0 on error. */
-int64_t cbm_gbuf_insert_edge_props(cbm_gbuf_t *gb, int64_t source_id, int64_t target_id,
-                                   const char *type, const cbm_gbuf_prop_t *props, int prop_count);
+cbm_edge_id_t cbm_gbuf_insert_edge_props(cbm_gbuf_t *gb, cbm_edge_endpoints_t endpoints,
+                                         const char *type, const cbm_gbuf_prop_t *props,
+                                         int prop_count);
 
 /* Typed property accessors. Return NULL/false when the edge has no property
  * with that key and kind. The returned string pointer is borrowed (edge-owned,
@@ -178,12 +268,12 @@ char *cbm_gbuf_edge_props_json_alloc(const cbm_gbuf_edge_t *edge);
 
 /* Find edges from source_id with given type.
  * Sets *out and *count. Caller does NOT free. */
-int cbm_gbuf_find_edges_by_source_type(const cbm_gbuf_t *gb, int64_t source_id, const char *type,
-                                       const cbm_gbuf_edge_t ***out, int *count);
+int cbm_gbuf_find_edges_by_source_type(const cbm_gbuf_t *gb, cbm_node_id_t source_id,
+                                       const char *type, const cbm_gbuf_edge_t ***out, int *count);
 
 /* Find edges to target_id with given type. */
-int cbm_gbuf_find_edges_by_target_type(const cbm_gbuf_t *gb, int64_t target_id, const char *type,
-                                       const cbm_gbuf_edge_t ***out, int *count);
+int cbm_gbuf_find_edges_by_target_type(const cbm_gbuf_t *gb, cbm_node_id_t target_id,
+                                       const char *type, const cbm_gbuf_edge_t ***out, int *count);
 
 /* Find all edges of a given type. */
 int cbm_gbuf_find_edges_by_type(const cbm_gbuf_t *gb, const char *type,
@@ -203,7 +293,8 @@ int cbm_gbuf_delete_edges_by_type(cbm_gbuf_t *gb, const char *type);
 /* Store an int8-quantized vector for a node. The vector data is copied.
  * Called by pass_semantic_edges after computing RI vectors.
  * Vectors are carried through to cbm_write_db during the dump phase. */
-int cbm_gbuf_store_vector(cbm_gbuf_t *gb, int64_t node_id, const uint8_t *vector, int vector_len);
+int cbm_gbuf_store_vector(cbm_gbuf_t *gb, cbm_node_id_t node_id, const uint8_t *vector,
+                          int vector_len);
 
 /* Store an enriched token vector for query-time lookup.
  * Called by pass_semantic_edges after corpus finalization.

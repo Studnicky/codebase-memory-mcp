@@ -123,7 +123,7 @@ static const cbm_gbuf_node_t **canonical_node_copy(const cbm_gbuf_node_t *const 
 }
 
 typedef struct {
-    int64_t node_id;
+    cbm_node_id_t node_id;
     char normalized[CBM_SZ_256];
     char name[CBM_SZ_256];
 } config_entry_t;
@@ -182,7 +182,7 @@ static config_entry_list_t collect_config_entries(const cbm_gbuf_node_t *const *
 
 /* Collect code nodes (Function/Variable/Class/Struct) not from config files. */
 typedef struct {
-    int64_t node_id;
+    cbm_node_id_t node_id;
     char normalized[CBM_SZ_256];
 } code_entry_t;
 
@@ -337,8 +337,8 @@ static void ac_insert(ac_automaton_t *ac, const char *pattern, int group_idx) {
  * cognitive-complexity ceiling. */
 static void ac_expand_state(ac_automaton_t *ac, int32_t u, int32_t *queue, int *qtail) {
     for (int c = 0; c < AC_ALPHABET_SIZE; c++) {
-        int32_t *edge = &ac->trans[((size_t)u * AC_ALPHABET_SIZE) + c];
-        int32_t fail_edge = ac->trans[((size_t)ac->fail[u] * AC_ALPHABET_SIZE) + c];
+        int32_t *edge = &ac->trans[((size_t)u * AC_ALPHABET_SIZE) + (size_t)c];
+        int32_t fail_edge = ac->trans[((size_t)ac->fail[u] * AC_ALPHABET_SIZE) + (size_t)c];
         if (*edge == AC_NO_STATE) {
             *edge = fail_edge;
         } else {
@@ -359,7 +359,7 @@ static void ac_build_links(ac_automaton_t *ac, int32_t *queue) {
     /* Depth-1 states fail to the root; missing root edges self-loop so
      * goto(root, c) is defined for every byte. */
     for (int c = 0; c < AC_ALPHABET_SIZE; c++) {
-        int32_t *edge = &ac->trans[((size_t)AC_ROOT_STATE * AC_ALPHABET_SIZE) + c];
+        int32_t *edge = &ac->trans[((size_t)AC_ROOT_STATE * AC_ALPHABET_SIZE) + (size_t)c];
         if (*edge == AC_NO_STATE) {
             *edge = AC_ROOT_STATE;
         } else {
@@ -441,8 +441,9 @@ static int emit_group_edges(cbm_gbuf_t *gb, const pattern_group_list_t *groups,
              .decimals = CONFIGLINK_CONFIDENCE_DECIMALS},
             {.key = "config_key", .kind = CBM_EDGE_PROP_STRING, .text = ce->name},
         };
-        cbm_gbuf_insert_edge_props(gb, code_entry->node_id, ce->node_id, "CONFIGURES", props,
-                                   (int)(sizeof(props) / sizeof(props[0])));
+        cbm_gbuf_insert_edge_props(
+            gb, (cbm_edge_endpoints_t){.source = code_entry->node_id, .target = ce->node_id},
+            "CONFIGURES", props, (int)(sizeof(props) / sizeof(props[0])));
         edges++;
     }
     return edges;
@@ -518,7 +519,7 @@ static int strategy_key_symbols(cbm_gbuf_t *gb) {
 /* ── Strategy 2: Dependency → Import ────────────────────────────── */
 
 typedef struct {
-    int64_t node_id;
+    cbm_node_id_t node_id;
     char name[CBM_SZ_256];
 } dep_entry_t;
 
@@ -661,8 +662,9 @@ static int strategy_dep_imports(cbm_gbuf_t *gb) {
                      .decimals = CONFIGLINK_CONFIDENCE_DECIMALS},
                     {.key = "dep_name", .kind = CBM_EDGE_PROP_STRING, .text = deps[di].name},
                 };
-                cbm_gbuf_insert_edge_props(gb, source->id, deps[di].node_id, "CONFIGURES", props,
-                                           (int)(sizeof(props) / sizeof(props[0])));
+                cbm_gbuf_insert_edge_props(
+                    gb, (cbm_edge_endpoints_t){.source = source->id, .target = deps[di].node_id},
+                    "CONFIGURES", props, (int)(sizeof(props) / sizeof(props[0])));
                 edge_count++;
             }
         }
@@ -676,7 +678,7 @@ static int strategy_dep_imports(cbm_gbuf_t *gb) {
 
 typedef struct {
     const char *key;
-    int64_t node_id;
+    cbm_node_id_t node_id;
 } path_map_t;
 
 /* Match a ref_path against config module maps. Returns target node_id (0 = no match). */

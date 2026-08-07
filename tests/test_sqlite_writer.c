@@ -10,6 +10,7 @@
 #include "../src/foundation/compat.h"
 #include "foundation/compat_fs.h"
 #include "test_framework.h"
+#include "suites.h"
 /* sqlite_writer.h is at internal/cbm/ — Makefile adds -Iinternal/cbm */
 #include "sqlite_writer.h" /* CBMDumpNode, CBMDumpEdge, cbm_write_db */
 #include "sqlite3.h"       /* vendored/sqlite3/ via -Ivendored/sqlite3 */
@@ -626,7 +627,7 @@ TEST(sw_oversized_node) {
     /* Build a properties JSON string that exceeds max_local (65501 bytes).
      * Use 70000 bytes of padding inside the JSON value so the full record,
      * which includes other text columns, is well above the threshold. */
-    int prop_len = 70000;
+    size_t prop_len = 70000;
     char *big_props = (char *)malloc(prop_len + 1);
     ASSERT_NOT_NULL(big_props);
     memset(big_props, 'x', prop_len);

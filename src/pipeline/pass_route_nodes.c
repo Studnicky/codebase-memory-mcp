@@ -16,6 +16,7 @@
  */
 #include "foundation/constants.h"
 #include "foundation/str_util.h" // cbm_json_escape
+#include "service_patterns.h"    // cbm_service_pattern_is_http_route_literal
 #include <yyjson/yyjson.h>       // validate assembled DATA_FLOWS props
 
 enum {
@@ -38,8 +39,6 @@ enum {
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-bool cbm_service_pattern_is_http_route_literal(const char *literal, const char *callee_name);
 
 /* True for characters that may appear in a ":name" route parameter. */
 static inline bool is_route_ident_char(char c) {
@@ -330,7 +329,10 @@ static int match_one_infra_route(cbm_gbuf_t *gb, const cbm_gbuf_node_t *infra,
             };
             for (int fh = 0; fh < fn_hcount; fh++) {
                 cbm_gbuf_insert_edge_props(
-                    gb, fn_handles[fh]->source_id, infra->id, "HANDLES", infra_match_props,
+                    gb,
+                    (cbm_edge_endpoints_t){.source = fn_handles[fh]->source_id,
+                                           .target = infra->id},
+                    "HANDLES", infra_match_props,
                     (int)(sizeof(infra_match_props) / sizeof(infra_match_props[0])));
             }
             return SKIP_ONE;
@@ -430,15 +432,15 @@ static int ensure_one_decorator_route(cbm_gbuf_t *gb, const cbm_gbuf_node_t *fun
 
     char rprops[CBM_SZ_256];
     snprintf(rprops, sizeof(rprops), "{\"method\":\"%s\",\"source\":\"decorator\"}", method);
-    int64_t route_id = cbm_gbuf_upsert_node(gb, "Route", path, route_qn,
-                                            func->file_path ? func->file_path : "", 0, 0, rprops);
+    cbm_node_id_t route_id = cbm_gbuf_upsert_node(
+        gb, "Route", path, route_qn, func->file_path ? func->file_path : "", 0, 0, rprops);
 
     if (existing) {
         const cbm_gbuf_edge_t **existing_handles = NULL;
         int eh_count = 0;
         cbm_gbuf_find_edges_by_target_type(gb, route_id, "HANDLES", &existing_handles, &eh_count);
         for (int eh = 0; eh < eh_count; eh++) {
-            if (existing_handles[eh]->source_id == func->id) {
+            if (cbm_node_id_eq(existing_handles[eh]->source_id, func->id)) {
                 return 0;
             }
         }
@@ -449,8 +451,8 @@ static int ensure_one_decorator_route(cbm_gbuf_t *gb, const cbm_gbuf_node_t *fun
          .kind = CBM_EDGE_PROP_STRING,
          .text = func->qualified_name ? func->qualified_name : ""},
     };
-    cbm_gbuf_insert_edge_props(gb, func->id, route_id, "HANDLES", hprops,
-                               (int)(sizeof(hprops) / sizeof(hprops[0])));
+    cbm_gbuf_insert_edge_props(gb, (cbm_edge_endpoints_t){.source = func->id, .target = route_id},
+                               "HANDLES", hprops, (int)(sizeof(hprops) / sizeof(hprops[0])));
     return SKIP_ONE;
 }
 
@@ -508,8 +510,9 @@ static int bridge_funcs_to_prefix(cbm_gbuf_t *gb, const cbm_gbuf_node_t *prefix_
         const cbm_gbuf_prop_t bridge_props[] = {
             {.key = "source", .kind = CBM_EDGE_PROP_STRING, .text = "prefix_decorator_bridge"},
         };
-        cbm_gbuf_insert_edge_props(gb, func->id, prefix_route->id, "HANDLES", bridge_props,
-                                   (int)(sizeof(bridge_props) / sizeof(bridge_props[0])));
+        cbm_gbuf_insert_edge_props(
+            gb, (cbm_edge_endpoints_t){.source = func->id, .target = prefix_route->id}, "HANDLES",
+            bridge_props, (int)(sizeof(bridge_props) / sizeof(bridge_props[0])));
         connected++;
     }
     return connected;
@@ -569,12 +572,12 @@ static void connect_prefix_to_decorators(cbm_gbuf_t *gb) {
  * For each HTTP_CALLS/ASYNC_CALLS edge (caller → Route), find the HANDLES edge
  * (handler → Route) and create DATA_FLOWS (caller → handler) with route context. */
 /* Check if a direct CALLS edge already exists between two nodes */
-static int has_direct_call(const cbm_gbuf_t *gb, int64_t source, int64_t target) {
+static int has_direct_call(const cbm_gbuf_t *gb, cbm_node_id_t source, cbm_node_id_t target) {
     const cbm_gbuf_edge_t **edges = NULL;
     int count = 0;
     cbm_gbuf_find_edges_by_source_type(gb, source, "CALLS", &edges, &count);
     for (int i = 0; i < count; i++) {
-        if (edges[i]->target_id == target) {
+        if (cbm_node_id_eq(edges[i]->target_id, target)) {
             return SKIP_ONE;
         }
     }
@@ -648,7 +651,7 @@ static void finish_data_flow_props(char *props, size_t propsz, size_t pos,
 }
 
 typedef struct {
-    int64_t source_id;
+    cbm_node_id_t source_id;
     char *props; /* heap-owned: cbm_gbuf_edge_props_json_alloc(edge); caller frees */
     const char *edge_type;
 } caller_edge_ref_t;
@@ -705,10 +708,10 @@ static int data_flow_props_open(char *out, size_t out_size, const char *route_na
                     route_name, route_qn, edge_type);
 }
 
-static int try_create_data_flow(cbm_gbuf_t *gb, int64_t caller_id, int64_t handler_id,
+static int try_create_data_flow(cbm_gbuf_t *gb, cbm_node_id_t caller_id, cbm_node_id_t handler_id,
                                 const cbm_gbuf_node_t *route, const char *edge_type,
                                 const char *caller_props, bool via_infra) {
-    if (caller_id == handler_id) {
+    if (cbm_node_id_eq(caller_id, handler_id)) {
         return 0;
     }
     if (has_direct_call(gb, caller_id, handler_id)) {
@@ -781,12 +784,15 @@ static int try_create_data_flow(cbm_gbuf_t *gb, int64_t caller_id, int64_t handl
             }
         }
     }
-    cbm_gbuf_insert_edge_props(gb, caller_id, handler_id, "DATA_FLOWS", dfprops, dfcount);
+    cbm_gbuf_insert_edge_props(gb,
+                               (cbm_edge_endpoints_t){.source = caller_id, .target = handler_id},
+                               "DATA_FLOWS", dfprops, dfcount);
     return SKIP_ONE;
 }
 
 /* Collect extra handler IDs reachable via INFRA_MAPS chain from a route. */
-static int collect_infra_handlers(cbm_gbuf_t *gb, int64_t route_id, int64_t *out, int max_out) {
+static int collect_infra_handlers(cbm_gbuf_t *gb, cbm_node_id_t route_id, cbm_node_id_t *out,
+                                  int max_out) {
     const cbm_gbuf_edge_t **infra_edges = NULL;
     int infra_count = 0;
     cbm_gbuf_find_edges_by_source_type(gb, route_id, "INFRA_MAPS", &infra_edges, &infra_count);
@@ -809,7 +815,7 @@ static int collect_infra_handlers(cbm_gbuf_t *gb, int64_t route_id, int64_t *out
  * the caller frees them once done (see create_data_flows). An edge whose
  * properties fail to serialize (OOM) is skipped rather than added with a
  * missing props string. */
-static int collect_caller_edges(cbm_gbuf_t *gb, int64_t route_id, caller_edge_ref_t *out,
+static int collect_caller_edges(cbm_gbuf_t *gb, cbm_node_id_t route_id, caller_edge_ref_t *out,
                                 int max_out) {
     int n = 0;
     const cbm_gbuf_edge_t **http_edges = NULL;
@@ -852,7 +858,7 @@ static void create_route_data_flows(cbm_gbuf_t *gb, const cbm_gbuf_node_t *route
     int handles_count = 0;
     cbm_gbuf_find_edges_by_target_type(gb, route->id, "HANDLES", &handles_edges, &handles_count);
 
-    int64_t extra_handlers[CBM_SZ_32];
+    cbm_node_id_t extra_handlers[CBM_SZ_32];
     int n_extra = collect_infra_handlers(gb, route->id, extra_handlers, CBM_SZ_32);
 
     for (int ci = 0; ci < n_callers; ci++) {
@@ -933,14 +939,14 @@ static void create_grpc_routes(cbm_gbuf_t *gb) {
         char props[CBM_SZ_128];
         snprintf(props, sizeof(props), "{\"source\":\"proto\",\"service\":\"%s\"}", svc->name);
 
-        int64_t route_id = cbm_gbuf_upsert_node(gb, "Route", fn->name, route_qn, fn->file_path,
-                                                fn->start_line, fn->end_line, props);
+        cbm_node_id_t route_id = cbm_gbuf_upsert_node(
+            gb, "Route", fn->name, route_qn, fn->file_path, fn->start_line, fn->end_line, props);
         const cbm_gbuf_prop_t grpc_handles_props[] = {
             {.key = "via", .kind = CBM_EDGE_PROP_STRING, .text = "proto_rpc"},
         };
         cbm_gbuf_insert_edge_props(
-            gb, fn->id, route_id, "HANDLES", grpc_handles_props,
-            (int)(sizeof(grpc_handles_props) / sizeof(grpc_handles_props[0])));
+            gb, (cbm_edge_endpoints_t){.source = fn->id, .target = route_id}, "HANDLES",
+            grpc_handles_props, (int)(sizeof(grpc_handles_props) / sizeof(grpc_handles_props[0])));
         grpc_routes++;
     }
     if (grpc_routes > 0) {
@@ -1222,9 +1228,9 @@ static void sveltekit_file_visitor(const cbm_gbuf_node_t *node, void *userdata) 
         char route_props[CBM_SZ_256];
         snprintf(route_props, sizeof(route_props),
                  "{\"method\":\"%s\",\"framework\":\"sveltekit\"}", method);
-        int64_t route_id =
+        cbm_node_id_t route_id =
             cbm_gbuf_upsert_node(ctx->gb, "Route", route_path, route_qn, "", 0, 0, route_props);
-        if (route_id == 0) {
+        if (!cbm_node_id_valid(route_id)) {
             continue;
         }
         ctx->routes_created++;
@@ -1241,7 +1247,9 @@ static void sveltekit_file_visitor(const cbm_gbuf_node_t *node, void *userdata) 
             hprops[hprop_count++] = (cbm_gbuf_prop_t){
                 .key = "via", .kind = CBM_EDGE_PROP_STRING, .text = "actions_object"};
         }
-        cbm_gbuf_insert_edge_props(ctx->gb, child->id, route_id, "HANDLES", hprops, hprop_count);
+        cbm_gbuf_insert_edge_props(ctx->gb,
+                                   (cbm_edge_endpoints_t){.source = child->id, .target = route_id},
+                                   "HANDLES", hprops, hprop_count);
         ctx->handles_created++;
     }
 }

@@ -101,4 +101,11 @@ FILE *cbm_fopen(const char *path, const char *mode);
  * POSIX: fork() + execvp(). Windows: CreateProcess with proper quoting. */
 int cbm_exec_no_shell(const char *const *argv);
 
+/* Resolve the running process's own executable path. argv0 (may be NULL) is
+ * tried first — as a direct executable path, then searched on PATH — before
+ * falling back to the OS self-exe query (/proc/self/exe on Linux,
+ * _NSGetExecutablePath on macOS, GetModuleFileNameW on Windows). Returns
+ * true and writes a NUL-terminated path to out on success. */
+bool cbm_resolve_executable_path(const char *argv0, char *out, size_t outsz);
+
 #endif /* CBM_COMPAT_FS_H */

@@ -27,6 +27,7 @@ enum { PC_RING = 4, PC_RING_MASK = 3, PC_SIG_SCAN = 15, PC_REGEX_GRP = 2 };
 #include "foundation/compat.h"
 #include "foundation/compat_fs.h"
 #include "foundation/limits.h"
+#include "foundation/platform.h"
 #include "foundation/str_util.h"
 #include "cbm.h"
 #include "service_patterns.h"
@@ -70,7 +71,7 @@ static char *read_file(const char *path, int *out_len) {
         return NULL;
     }
 
-    size_t nread = fread(buf, SKIP_ONE, size, f);
+    size_t nread = fread(buf, SKIP_ONE, (size_t)size, f);
     (void)fclose(f);
 
     if (nread > (size_t)size) {
@@ -144,8 +145,8 @@ static int build_import_map(cbm_pipeline_ctx_t *ctx, const char *rel_path,
         return 0;
     }
 
-    const char **keys = calloc(edge_count, sizeof(const char *));
-    const char **vals = calloc(edge_count, sizeof(const char *));
+    const char **keys = calloc((size_t)edge_count, sizeof(const char *));
+    const char **vals = calloc((size_t)edge_count, sizeof(const char *));
     int count = 0;
 
     for (int i = 0; i < edge_count; i++) {
@@ -172,7 +173,7 @@ static int build_import_map(cbm_pipeline_ctx_t *ctx, const char *rel_path,
 static void free_import_map(const char **keys, const char **vals, int count) {
     if (keys) {
         for (int i = 0; i < count; i++) {
-            free((void *)keys[i]);
+            safe_str_free(&keys[i]);
         }
         free((void *)keys);
     }
@@ -192,16 +193,17 @@ static void handle_route_registration(cbm_pipeline_ctx_t *ctx, const CBMCall *ca
              cbm_route_canon_path(call->first_string_arg, cpath, sizeof(cpath)));
     char route_props[CBM_SZ_256];
     snprintf(route_props, sizeof(route_props), "{\"method\":\"%s\"}", method ? method : "ANY");
-    int64_t route_id = cbm_gbuf_upsert_node(ctx->gbuf, "Route", call->first_string_arg, route_qn,
-                                            "", 0, 0, route_props);
+    cbm_node_id_t route_id = cbm_gbuf_upsert_node(ctx->gbuf, "Route", call->first_string_arg,
+                                                  route_qn, "", 0, 0, route_props);
     enum { ROUTE_CALLS_PROP_COUNT = 3 };
     cbm_gbuf_prop_t call_props[ROUTE_CALLS_PROP_COUNT] = {
         {.key = "callee", .kind = CBM_EDGE_PROP_STRING, .text = call->callee_name},
         {.key = "url_path", .kind = CBM_EDGE_PROP_STRING, .text = call->first_string_arg},
         {.key = "via", .kind = CBM_EDGE_PROP_STRING, .text = "route_registration"},
     };
-    cbm_gbuf_insert_edge_props(ctx->gbuf, source_node->id, route_id, "CALLS", call_props,
-                               ROUTE_CALLS_PROP_COUNT);
+    cbm_gbuf_insert_edge_props(
+        ctx->gbuf, (cbm_edge_endpoints_t){.source = source_node->id, .target = route_id}, "CALLS",
+        call_props, ROUTE_CALLS_PROP_COUNT);
     if (call->second_arg_name != NULL && call->second_arg_name[0] != '\0') {
         cbm_resolution_t hres = cbm_registry_resolve(ctx->registry, call->second_arg_name,
                                                      module_qn, imp_keys, imp_vals, imp_count);
@@ -212,8 +214,9 @@ static void handle_route_registration(cbm_pipeline_ctx_t *ctx, const CBMCall *ca
                 cbm_gbuf_prop_t handles_props[HANDLES_PROP_COUNT] = {
                     {.key = "handler", .kind = CBM_EDGE_PROP_STRING, .text = hres.qualified_name},
                 };
-                cbm_gbuf_insert_edge_props(ctx->gbuf, handler->id, route_id, "HANDLES",
-                                           handles_props, HANDLES_PROP_COUNT);
+                cbm_gbuf_insert_edge_props(
+                    ctx->gbuf, (cbm_edge_endpoints_t){.source = handler->id, .target = route_id},
+                    "HANDLES", handles_props, HANDLES_PROP_COUNT);
             }
         }
     }
@@ -221,8 +224,9 @@ static void handle_route_registration(cbm_pipeline_ctx_t *ctx, const CBMCall *ca
 
 /* Emit an HTTP/async route edge for a service call. */
 /* Build route QN and upsert Route node for HTTP/async edge. */
-static int64_t create_svc_route_node(cbm_pipeline_ctx_t *ctx, const char *url, cbm_svc_kind_t svc,
-                                     const char *method, const char *broker) {
+static cbm_node_id_t create_svc_route_node(cbm_pipeline_ctx_t *ctx, const char *url,
+                                           cbm_svc_kind_t svc, const char *method,
+                                           const char *broker) {
     char route_qn[CBM_ROUTE_QN_SIZE];
     const char *prefix;
     char cpath[CBM_SZ_256];
@@ -303,8 +307,9 @@ static bool calls_build_args_json(char *buf, size_t cap, const CBMCall *call) {
 /* Insert an edge from a caller-built base prop array, appending "line" and
  * "args" typed props for a CALLS edge when the call site provides them.
  * props must have room for prop_count + CALLS_EMIT_EXTRA_PROPS entries. */
-static void calls_emit_edge(cbm_gbuf_t *gbuf, int64_t src, int64_t tgt, const char *type,
-                            cbm_gbuf_prop_t *props, int prop_count, const CBMCall *call) {
+static void calls_emit_edge(cbm_gbuf_t *gbuf, cbm_node_id_t src, cbm_node_id_t tgt,
+                            const char *type, cbm_gbuf_prop_t *props, int prop_count,
+                            const CBMCall *call) {
     char args_buf[CBM_SZ_1K];
     bool is_calls = call && strcmp(type, "CALLS") == 0;
     if (is_calls && call->start_line > 0) {
@@ -319,7 +324,8 @@ static void calls_emit_edge(cbm_gbuf_t *gbuf, int64_t src, int64_t tgt, const ch
         props[prop_count++] =
             (cbm_gbuf_prop_t){.key = "args", .kind = CBM_EDGE_PROP_STRING, .text = args_buf};
     }
-    cbm_gbuf_insert_edge_props(gbuf, src, tgt, type, props, prop_count);
+    cbm_gbuf_insert_edge_props(gbuf, (cbm_edge_endpoints_t){.source = src, .target = tgt}, type,
+                               props, prop_count);
 }
 
 /* Number of base props built by calls_build_resolution_props: callee,
@@ -382,7 +388,7 @@ static void emit_http_async_edge(cbm_pipeline_ctx_t *ctx, const CBMCall *call,
         (svc == CBM_SVC_HTTP) ? cbm_service_pattern_http_method(call->callee_name) : NULL;
     const char *broker =
         (svc == CBM_SVC_ASYNC) ? cbm_service_pattern_broker(res->qualified_name) : NULL;
-    int64_t route_id = create_svc_route_node(ctx, url_or_topic, svc, method, broker);
+    cbm_node_id_t route_id = create_svc_route_node(ctx, url_or_topic, svc, method, broker);
     /* Mirrors the parallel path's emit_http_async_service_edge field set:
      * callee + url_path always present, method/broker only for their
      * respective svc kind (#898). */
@@ -493,7 +499,7 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call,
                                         ctx->gbuf, ctx->project_name, lsp->callee_qn, allow_tail)
                                   : cbm_pipeline_lsp_target_node(ctx->gbuf, ctx->project_name,
                                                                  lsp->callee_qn, allow_tail);
-        if (target_node && source_node->id != target_node->id) {
+        if (target_node && !cbm_node_id_eq(source_node->id, target_node->id)) {
             cbm_resolution_t res = {0};
             /* Use the gbuf node's QN so downstream edge props show the canonical
              * project-qualified form even when fallback prefixed the project. */
@@ -638,7 +644,7 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call,
     }
 
     const cbm_gbuf_node_t *target_node = cbm_gbuf_find_by_qn(ctx->gbuf, res.qualified_name);
-    if (!target_node || source_node->id == target_node->id) {
+    if (!target_node || cbm_node_id_eq(source_node->id, target_node->id)) {
         return 0;
     }
     emit_classified_edge(ctx, call, source_node, target_node, &res, module_qn, imp_keys, imp_vals,
@@ -883,7 +889,7 @@ static int scan_depends_in_sig(cbm_pipeline_ctx_t *ctx, const cbm_regex_t *re, c
         if (res.qualified_name && res.qualified_name[0] != '\0') {
             const cbm_gbuf_node_t *sn = cbm_gbuf_find_by_qn(ctx->gbuf, def->qualified_name);
             const cbm_gbuf_node_t *tn = cbm_gbuf_find_by_qn(ctx->gbuf, res.qualified_name);
-            if (sn && tn && sn->id != tn->id) {
+            if (sn && tn && !cbm_node_id_eq(sn->id, tn->id)) {
                 enum { DEPENDS_PROP_COUNT = 2 };
                 cbm_gbuf_prop_t depends_props[DEPENDS_PROP_COUNT] = {
                     {.key = "confidence",
@@ -892,8 +898,9 @@ static int scan_depends_in_sig(cbm_pipeline_ctx_t *ctx, const cbm_regex_t *re, c
                      .decimals = 2},
                     {.key = "strategy", .kind = CBM_EDGE_PROP_STRING, .text = "fastapi_depends"},
                 };
-                cbm_gbuf_insert_edge_props(ctx->gbuf, sn->id, tn->id, "CALLS", depends_props,
-                                           DEPENDS_PROP_COUNT);
+                cbm_gbuf_insert_edge_props(
+                    ctx->gbuf, (cbm_edge_endpoints_t){.source = sn->id, .target = tn->id}, "CALLS",
+                    depends_props, DEPENDS_PROP_COUNT);
                 count++;
             }
         }

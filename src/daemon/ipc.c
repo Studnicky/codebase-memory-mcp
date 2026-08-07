@@ -94,12 +94,12 @@ static char *string_format(const char *format, ...) {
 
 #ifndef _WIN32
 static cbm_daemon_ipc_posix_publication_hook_fn g_posix_publication_hook_for_test;
-static void *g_posix_publication_hook_context_for_test;
+static const void *g_posix_publication_hook_context_for_test;
 #endif
 static atomic_uint g_windows_legacy_guard_release_failures_for_test;
 
 void cbm_daemon_ipc_posix_publication_hook_set_for_test(
-    cbm_daemon_ipc_posix_publication_hook_fn hook, void *context) {
+    cbm_daemon_ipc_posix_publication_hook_fn hook, const void *context) {
 #ifndef _WIN32
     g_posix_publication_hook_context_for_test = context;
     g_posix_publication_hook_for_test = hook;
@@ -1721,8 +1721,8 @@ static bool posix_socket_record_decode(const uint8_t record[POSIX_SOCKET_RECORD_
     uint64_t seconds = posix_u64_decode(record + POSIX_SOCKET_IDENTITY_CTIME_SECONDS_OFFSET);
     uint32_t nanoseconds =
         posix_u32_decode(record + POSIX_SOCKET_IDENTITY_CTIME_NANOSECONDS_OFFSET);
-    if ((dev_t)device != device || (ino_t)inode != inode || seconds > (uint64_t)INT64_MAX ||
-        nanoseconds >= 1000000000U) {
+    if ((uint64_t)(dev_t)device != device || (ino_t)inode != inode ||
+        seconds > (uint64_t)INT64_MAX || nanoseconds >= 1000000000U) {
         return false;
     }
     const uint8_t *anchor = record + POSIX_SOCKET_ANCHOR_NAME_OFFSET;

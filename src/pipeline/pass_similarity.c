@@ -87,7 +87,7 @@ static const char *itoa_log(int val) {
 enum { FP_ENTRY_INIT_CAP = 256, FP_ENTRY_GROW = 2 };
 
 typedef struct {
-    int64_t node_id;
+    cbm_node_id_t node_id;
     cbm_minhash_t fp;
     const char *file_path;
     const char *ext;
@@ -107,8 +107,8 @@ static int cmp_fp_entry_by_qn(const void *pa, const void *pb) {
     if (r != 0) {
         return r;
     }
-    if (a->node_id != b->node_id) {
-        return a->node_id < b->node_id ? -1 : 1;
+    if (!cbm_node_id_eq(a->node_id, b->node_id)) {
+        return cbm_node_id_value(a->node_id) < cbm_node_id_value(b->node_id) ? -1 : 1;
     }
     return 0;
 }
@@ -164,8 +164,8 @@ static int collect_fp_entries(cbm_gbuf_t *gbuf, fp_entry_t **out_entries) {
 
 /* Deferred edge record; collected per-worker, merged into gbuf sequentially. */
 typedef struct {
-    int64_t source_id;
-    int64_t target_id;
+    cbm_node_id_t source_id;
+    cbm_node_id_t target_id;
     double jaccard;
     bool same_file;
 } sim_deferred_edge_t;
@@ -176,8 +176,8 @@ typedef struct {
     int cap;
 } sim_edge_buf_t;
 
-static void sim_edge_buf_push(sim_edge_buf_t *buf, int64_t src, int64_t tgt, double jaccard,
-                              bool same_file) {
+static void sim_edge_buf_push(sim_edge_buf_t *buf, cbm_node_id_t src, cbm_node_id_t tgt,
+                              double jaccard, bool same_file) {
     if (buf->count >= buf->cap) {
         int nc = buf->cap < SIM_EDGE_INIT_CAP ? SIM_EDGE_INIT_CAP : buf->cap * SIM_EDGE_GROW;
         sim_deferred_edge_t *grown = realloc(buf->edges, (size_t)nc * sizeof(sim_deferred_edge_t));
@@ -226,7 +226,7 @@ static void sim_query_worker(int worker_id, void *ctx_ptr) {
         int emitted = 0;
         for (int c = 0; c < cand_count; c++) {
             const cbm_lsh_entry_t *cand = cands[c];
-            if (cand->node_id == src->node_id) {
+            if (cand->node_id == cbm_node_id_value(src->node_id)) {
                 continue;
             }
             if (strcmp(src->ext, cand->file_ext) != 0) {
@@ -252,7 +252,7 @@ static void sim_query_worker(int worker_id, void *ctx_ptr) {
 
             bool same_file =
                 src->file_path && cand->file_path && strcmp(src->file_path, cand->file_path) == 0;
-            sim_edge_buf_push(my_buf, src->node_id, cand->node_id, jaccard, same_file);
+            sim_edge_buf_push(my_buf, src->node_id, cbm_node_id(cand->node_id), jaccard, same_file);
             emitted++;
         }
         if (emitted > 0) {
@@ -274,8 +274,9 @@ static int merge_sim_edges(cbm_gbuf_t *gbuf, sim_edge_buf_t *worker_bufs, int wo
                  .decimals = SIM_JACCARD_DECIMALS},
                 {.key = "same_file", .kind = CBM_EDGE_PROP_BOOL, .flag = de->same_file},
             };
-            cbm_gbuf_insert_edge_props(gbuf, de->source_id, de->target_id, "SIMILAR_TO", props,
-                                       (int)(sizeof(props) / sizeof(props[0])));
+            cbm_gbuf_insert_edge_props(
+                gbuf, (cbm_edge_endpoints_t){.source = de->source_id, .target = de->target_id},
+                "SIMILAR_TO", props, (int)(sizeof(props) / sizeof(props[0])));
             total++;
         }
         free(worker_bufs[w].edges);
@@ -317,7 +318,7 @@ int cbm_pipeline_pass_similarity(cbm_pipeline_ctx_t *ctx) {
 
     for (int i = 0; i < entry_count; i++) {
         lsh_entries[i] = (cbm_lsh_entry_t){
-            .node_id = entries[i].node_id,
+            .node_id = cbm_node_id_value(entries[i].node_id),
             .fingerprint = &entries[i].fp,
             .file_path = entries[i].file_path,
             .file_ext = entries[i].ext,

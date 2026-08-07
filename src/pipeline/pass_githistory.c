@@ -87,8 +87,8 @@ bool cbm_is_trackable_file(const char *path) {
 
 typedef struct {
     char **files;
-    int count;
-    int cap;
+    size_t count;
+    size_t cap;
     long long timestamp; /* unix epoch of this commit; 0 when unknown */
 } commit_t;
 
@@ -101,7 +101,7 @@ static void commit_add_file(commit_t *c, const char *file) {
 }
 
 static void commit_free(commit_t *c) {
-    for (int i = 0; i < c->count; i++) {
+    for (size_t i = 0; i < c->count; i++) {
         free(c->files[i]);
     }
     free(c->files);
@@ -137,9 +137,9 @@ static int parse_git_log(const char *repo_path, commit_t **out, int *out_count) 
         return CBM_NOT_FOUND;
     }
 
-    int cap = CBM_SZ_64;
+    size_t cap = CBM_SZ_64;
     commit_t *commits = malloc(cap * sizeof(commit_t));
-    int count = 0;
+    size_t count = 0;
     commit_t current = {0};
 
     char line[CBM_SZ_1K];
@@ -186,7 +186,10 @@ static int parse_git_log(const char *repo_path, commit_t **out, int *out_count) 
 
     cbm_pclose(fp);
     *out = commits;
-    *out_count = count;
+    /* git log is capped at --max-count=10000 above, so count always fits the
+     * int out_count contract (matched by cbm_compute_change_coupling's int
+     * commit_count parameter, fixed by its header signature). */
+    *out_count = (int)count;
     return 0;
 }
 
@@ -222,7 +225,8 @@ static void collect_coupling_cb(const char *pair_key, void *val, void *ud) {
     if (!sep) {
         return;
     }
-    size_t la = sep - pair_key;
+    /* sep is a forward strchr() hit within pair_key, so sep >= pair_key always. */
+    size_t la = (size_t)(sep - pair_key);
     const char *file_b = sep + SKIP_ONE;
 
     char file_a_buf[CBM_SZ_512];
@@ -378,7 +382,10 @@ int cbm_pipeline_githistory_compute(const char *repo_path, cbm_githistory_result
     }
     for (int c = 0; c < commit_count; c++) {
         cf[c].files = commits[c].files;
-        cf[c].count = commits[c].count;
+        /* commits[c].count is a per-commit file count from git log output,
+         * far below GH_MAX_FILES; cbm_commit_files_t.count is a fixed int
+         * per its header contract. */
+        cf[c].count = (int)commits[c].count;
         cf[c].timestamp = commits[c].timestamp;
     }
 
@@ -461,7 +468,7 @@ int cbm_pipeline_githistory_apply(cbm_pipeline_ctx_t *ctx, const cbm_githistory_
         free(qn_a);
         free(qn_b);
 
-        if (!node_a || !node_b || node_a->id == node_b->id) {
+        if (!node_a || !node_b || cbm_node_id_eq(node_a->id, node_b->id)) {
             continue;
         }
 
@@ -479,8 +486,9 @@ int cbm_pipeline_githistory_apply(cbm_pipeline_ctx_t *ctx, const cbm_githistory_
              .number = (double)cc->last_co_change,
              .decimals = 0},
         };
-        cbm_gbuf_insert_edge_props(ctx->gbuf, node_a->id, node_b->id, "FILE_CHANGES_WITH", props,
-                                   (int)(sizeof(props) / sizeof(props[0])));
+        cbm_gbuf_insert_edge_props(
+            ctx->gbuf, (cbm_edge_endpoints_t){.source = node_a->id, .target = node_b->id},
+            "FILE_CHANGES_WITH", props, (int)(sizeof(props) / sizeof(props[0])));
         edge_count++;
     }
 

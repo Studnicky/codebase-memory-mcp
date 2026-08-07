@@ -14,6 +14,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdlib.h>
+#include <string.h>
 
 /* ── Safe memory ──────────────────────────────────────────────── */
 
@@ -42,10 +43,17 @@ static inline void safe_free_impl(void **pp) {
 #define safe_free(ptr) safe_free_impl((void **)(void *)&(ptr))
 
 /* Safe const string free: frees a const char* and NULLs it.
- * Casts away const so callers don't repeat the (void *) dance. */
+ *
+ * The `const` here describes what callers may do with the string, not who owns
+ * it: this function IS the owner's release point. Reading the pointer value out
+ * with memcpy transfers ownership without a qualifier-discarding cast, which
+ * -Wcast-qual would otherwise report at every one of this function's call
+ * sites rather than once here. */
 static inline void safe_str_free(const char **sp) {
     if (sp && *sp) {
-        free((void *)*sp);
+        void *owned;
+        memcpy(&owned, sp, sizeof(owned));
+        free(owned);
         *sp = NULL;
     }
 }

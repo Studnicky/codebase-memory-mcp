@@ -38,6 +38,7 @@ enum { CBM_DIR_PERMS = 0755, PL_RING = 4, PL_RING_MASK = 3, PL_SEQ_PASSES = 6 };
 #include "foundation/mem.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -447,6 +448,12 @@ void cbm_pipeline_add_file_error(cbm_pipeline_t *p, const char *path, const char
         return;
     }
     if (p->file_errors_count >= p->file_errors_cap) {
+        /* Doubling an int overflows before the cast can widen it, so bound it
+         * first and drop the record as this function already does when the
+         * allocation fails. */
+        if (p->file_errors_cap > INT_MAX / 2) {
+            return;
+        }
         int ncap = p->file_errors_cap ? p->file_errors_cap * 2 : 16;
         cbm_file_error_t *grown =
             (cbm_file_error_t *)realloc(p->file_errors, (size_t)ncap * sizeof(*grown));
@@ -560,7 +567,7 @@ static int check_cancel(const cbm_pipeline_t *p) {
 static void free_seen_dir_key(const char *key, void *val, void *ud) {
     (void)val;
     (void)ud;
-    free((void *)key);
+    safe_str_free(&key);
 }
 
 /* ── Pass 1: Structure ──────────────────────────────────────────── */
@@ -595,7 +602,9 @@ static void create_folder_chain(cbm_pipeline_t *p, const char *dir, CBMHashTable
         const cbm_gbuf_node_t *fn = cbm_gbuf_find_by_qn(p->gbuf, folder_qn);
         const cbm_gbuf_node_t *pn = cbm_gbuf_find_by_qn(p->gbuf, pqn);
         if (fn && pn) {
-            cbm_gbuf_insert_edge_props(p->gbuf, pn->id, fn->id, "CONTAINS_FOLDER", NULL, 0);
+            cbm_gbuf_insert_edge_props(p->gbuf,
+                                       (cbm_edge_endpoints_t){.source = pn->id, .target = fn->id},
+                                       "CONTAINS_FOLDER", NULL, 0);
         }
         free(folder_qn);
         free(pqn_heap);
@@ -613,10 +622,13 @@ static void create_folder_chain(cbm_pipeline_t *p, const char *dir, CBMHashTable
 /* Insert the HAS_BRANCH edge with git-context props mirroring
  * cbm_git_context_props_json's schema and field order exactly. Degrades to no
  * props when that serialization failed for this git context (props_ok false). */
-static void insert_has_branch_edge(cbm_gbuf_t *gbuf, int64_t project_id, int64_t branch_id,
-                                   const cbm_git_context_t *gc, bool props_ok) {
+static void insert_has_branch_edge(cbm_gbuf_t *gbuf, cbm_node_id_t project_id,
+                                   cbm_node_id_t branch_id, const cbm_git_context_t *gc,
+                                   bool props_ok) {
     if (!props_ok) {
-        cbm_gbuf_insert_edge_props(gbuf, project_id, branch_id, "HAS_BRANCH", NULL, 0);
+        cbm_gbuf_insert_edge_props(
+            gbuf, (cbm_edge_endpoints_t){.source = project_id, .target = branch_id}, "HAS_BRANCH",
+            NULL, 0);
         return;
     }
     cbm_gbuf_prop_t branch_edge_props[] = {
@@ -631,8 +643,9 @@ static void insert_has_branch_edge(cbm_gbuf_t *gbuf, int64_t project_id, int64_t
         {.key = "head_sha", .kind = CBM_EDGE_PROP_STRING, .text = gc->head_sha},
         {.key = "base_sha", .kind = CBM_EDGE_PROP_STRING, .text = gc->base_sha},
     };
-    cbm_gbuf_insert_edge_props(gbuf, project_id, branch_id, "HAS_BRANCH", branch_edge_props,
-                               (int)(sizeof(branch_edge_props) / sizeof(branch_edge_props[0])));
+    cbm_gbuf_insert_edge_props(
+        gbuf, (cbm_edge_endpoints_t){.source = project_id, .target = branch_id}, "HAS_BRANCH",
+        branch_edge_props, (int)(sizeof(branch_edge_props) / sizeof(branch_edge_props[0])));
 }
 
 static int pass_structure(cbm_pipeline_t *p, const cbm_file_info_t *files, int file_count) {
@@ -648,10 +661,10 @@ static int pass_structure(cbm_pipeline_t *p, const cbm_file_info_t *files, int f
         branch_props_json = branch_props;
     }
     if (p->branch_qn) {
-        int64_t branch_id = cbm_gbuf_upsert_node(p->gbuf, "Branch", branch_name, branch_qn, NULL, 0,
-                                                 0, branch_props_json);
+        cbm_node_id_t branch_id = cbm_gbuf_upsert_node(p->gbuf, "Branch", branch_name, branch_qn,
+                                                       NULL, 0, 0, branch_props_json);
         const cbm_gbuf_node_t *project_node = cbm_gbuf_find_by_qn(p->gbuf, p->project_name);
-        if (project_node && branch_id > 0) {
+        if (project_node && cbm_node_id_valid(branch_id)) {
             insert_has_branch_edge(p->gbuf, project_node->id, branch_id, &p->git_ctx,
                                    branch_props_json == branch_props);
         }
@@ -708,7 +721,9 @@ static int pass_structure(cbm_pipeline_t *p, const cbm_file_info_t *files, int f
         const cbm_gbuf_node_t *fnode = cbm_gbuf_find_by_qn(p->gbuf, file_qn);
         const cbm_gbuf_node_t *pnode = cbm_gbuf_find_by_qn(p->gbuf, parent_qn);
         if (fnode && pnode) {
-            cbm_gbuf_insert_edge_props(p->gbuf, pnode->id, fnode->id, "CONTAINS_FILE", NULL, 0);
+            cbm_gbuf_insert_edge_props(
+                p->gbuf, (cbm_edge_endpoints_t){.source = pnode->id, .target = fnode->id},
+                "CONTAINS_FILE", NULL, 0);
         }
 
         free(file_qn);
@@ -752,13 +767,13 @@ static int process_one_infra_binding(cbm_gbuf_t *gbuf, const CBMInfraBinding *ib
                                      const char *rel_path) {
     char url_route_qn[CBM_ROUTE_QN_SIZE];
     snprintf(url_route_qn, sizeof(url_route_qn), "__route__infra__%s", ib->target_url);
-    int64_t url_route_id = cbm_gbuf_upsert_node(gbuf, "Route", ib->target_url, url_route_qn,
-                                                rel_path, 0, 0, "{\"source\":\"infra\"}");
+    cbm_node_id_t url_route_id = cbm_gbuf_upsert_node(gbuf, "Route", ib->target_url, url_route_qn,
+                                                      rel_path, 0, 0, "{\"source\":\"infra\"}");
     char topic_route_qn[CBM_ROUTE_QN_SIZE];
     snprintf(topic_route_qn, sizeof(topic_route_qn), "__route__%s__%s",
              ib->broker ? ib->broker : "async", ib->source_name);
     const cbm_gbuf_node_t *topic_route = cbm_gbuf_find_by_qn(gbuf, topic_route_qn);
-    int64_t topic_route_id;
+    cbm_node_id_t topic_route_id;
     if (topic_route) {
         topic_route_id = topic_route->id;
     } else {
@@ -768,7 +783,7 @@ static int process_one_infra_binding(cbm_gbuf_t *gbuf, const CBMInfraBinding *ib
          * manifest). */
         topic_route_id = cbm_gbuf_upsert_node(gbuf, "Route", ib->source_name, topic_route_qn,
                                               rel_path, 0, 0, ib->broker ? ib->broker : "async");
-        if (topic_route_id <= 0) {
+        if (!cbm_node_id_valid(topic_route_id)) {
             return 0;
         }
     }
@@ -777,8 +792,9 @@ static int process_one_infra_binding(cbm_gbuf_t *gbuf, const CBMInfraBinding *ib
         {.key = "topic", .kind = CBM_EDGE_PROP_STRING, .text = ib->source_name},
         {.key = "endpoint", .kind = CBM_EDGE_PROP_STRING, .text = ib->target_url},
     };
-    cbm_gbuf_insert_edge_props(gbuf, topic_route_id, url_route_id, "INFRA_MAPS", infra_map_props,
-                               (int)(sizeof(infra_map_props) / sizeof(infra_map_props[0])));
+    cbm_gbuf_insert_edge_props(
+        gbuf, (cbm_edge_endpoints_t){.source = topic_route_id, .target = url_route_id},
+        "INFRA_MAPS", infra_map_props, (int)(sizeof(infra_map_props) / sizeof(infra_map_props[0])));
     return SKIP_ONE;
 }
 
@@ -1072,7 +1088,7 @@ static int run_sequential_pipeline(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
                                                        ctx->project_name, ctx->excluded_dirs,
                                                        ctx->excluded_count));
 
-    CBMFileResult **seq_cache = (CBMFileResult **)calloc(file_count, sizeof(CBMFileResult *));
+    CBMFileResult **seq_cache = (CBMFileResult **)calloc((size_t)file_count, sizeof(CBMFileResult *));
     if (seq_cache) {
         ctx->result_cache = seq_cache;
     }
@@ -1150,16 +1166,24 @@ static int run_sequential_pipeline(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
      * mimalloc-epoch memory through slab_free -> plain free() and libmalloc
      * aborts — the #773 second-index SIGABRT. */
     cbm_destroy_thread_parser();
-    /* ObjectScript: free the macro / return-type tables built for this run. */
+    /* ObjectScript: free the macro / return-type tables built for this run.
+     * ctx holds these as const (read-only for the resolve passes); this
+     * function is their sole owner and release point, so the pointers are
+     * unwrapped via memcpy rather than a qualifier-discarding cast. */
     if (ctx->macro_table) {
-        cbm_macro_table_free((CBMMacroTable *)ctx->macro_table);
+        CBMMacroTable *owned_mt;
+        memcpy(&owned_mt, &ctx->macro_table, sizeof(owned_mt));
+        cbm_macro_table_free(owned_mt);
         ctx->macro_table = NULL;
     }
     if (ctx->return_type_table) {
         for (int i = 0; i < ctx->return_type_table->count; i++) {
-            free((void *)ctx->return_type_table->entries[i].return_type);
+            const char *rt = ctx->return_type_table->entries[i].return_type;
+            safe_str_free(&rt);
         }
-        free((void *)ctx->return_type_table);
+        CBMReturnTypeTable *owned_rtt;
+        memcpy(&owned_rtt, &ctx->return_type_table, sizeof(owned_rtt));
+        free(owned_rtt);
         ctx->return_type_table = NULL;
     }
     return rc;
@@ -1173,7 +1197,7 @@ static int run_parallel_pipeline(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
                  itoa_buf(file_count));
     _Atomic int64_t shared_ids;
     atomic_init(&shared_ids, cbm_gbuf_next_id(p->gbuf));
-    CBMFileResult **cache = (CBMFileResult **)calloc(file_count, sizeof(CBMFileResult *));
+    CBMFileResult **cache = (CBMFileResult **)calloc((size_t)file_count, sizeof(CBMFileResult *));
     if (!cache) {
         cbm_log_error("pipeline.err", "phase", "cache_alloc");
         return CBM_NOT_FOUND;
@@ -1895,7 +1919,7 @@ static int dump_and_persist_hashes(cbm_pipeline_t *p, const cbm_file_hash_t *bas
 #if defined(CBM_INCREMENTAL_TEST_API) && CBM_INCREMENTAL_TEST_API
     cbm_pipeline_persist_test_run_before_final_manifest();
 #endif
-    if (cbm_pipeline_build_fresh_semantic_manifest(p->project_name, p->repo_path, p->mode,
+    if (cbm_pipeline_build_fresh_semantic_manifest(p->project_name, p->repo_path, (int)p->mode,
                                                    &manifest, &manifest_count) != 0) {
         cbm_log_error("pipeline.err", "phase", "semantic_manifest");
         /* db_path and db_dir are this function's strdups; the success tail and

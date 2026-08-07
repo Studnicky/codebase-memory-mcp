@@ -1,14 +1,13 @@
 /*
  * host.c — Lifecycle owner for the mandatory per-account CBM daemon.
  */
-#include "daemon/host.h"
-#include "daemon/host_internal.h"
+#include "host/host.h"
+#include "host/host_internal.h"
 
-#include "daemon/application.h"
+#include "host/application.h"
 #include "daemon/runtime.h"
 #include "daemon/project_lock.h"
 #include "daemon/version_cohort.h"
-#include "cli/cli.h"
 #include "foundation/compat.h"
 #include "foundation/compat_fs.h"
 #include "foundation/compat_thread.h"

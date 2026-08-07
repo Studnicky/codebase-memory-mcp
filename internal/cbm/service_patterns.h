@@ -67,4 +67,10 @@ const char *cbm_service_pattern_route_method(const char *callee_name);
  * Returns NULL if not an async pattern. */
 const char *cbm_service_pattern_broker(const char *resolved_qn);
 
+/* True when `literal` (a quoted string argument to `callee_name`) looks like an
+ * HTTP route path rather than a filesystem path or unrelated string — used to
+ * gate ROUTE node emission so file paths and other non-route string literals
+ * passed to lookalike calls (e.g. `requests.get`) are not misclassified. */
+bool cbm_service_pattern_is_http_route_literal(const char *literal, const char *callee_name);
+
 #endif /* CBM_SERVICE_PATTERNS_H */

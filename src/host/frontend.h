@@ -1,5 +1,9 @@
 /*
  * frontend.h — Stateless stdio bridge for a daemon-backed MCP session.
+ *
+ * `host` is the composition root: it wires the adapters (cli, mcp, store,
+ * ui, watcher) onto the daemon client protocol. It may depend on any
+ * adapter. No adapter may depend on `host`.
  */
 #ifndef CBM_DAEMON_FRONTEND_H
 #define CBM_DAEMON_FRONTEND_H

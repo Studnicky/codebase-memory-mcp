@@ -32,7 +32,7 @@
 #define VAL_TY void *
 #define HASH_FN vt_hash_string
 #define CMPR_FN vt_cmpr_string
-#include "../../internal/cbm/vendored/verstable/verstable.h"
+#include <verstable.h>
 
 /* The opaque CBMHashTable struct holds the Verstable instance + a
  * count cache (Verstable's _size traversal is O(buckets) so we keep

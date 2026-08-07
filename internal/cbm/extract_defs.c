@@ -1959,7 +1959,7 @@ static const char **extract_decorators(CBMArena *a, TSNode node, const char *sou
     }
 
     const char **result =
-        (const char **)cbm_arena_alloc(a, sizeof(const char *) * (total + NULL_TERM));
+        (const char **)cbm_arena_alloc(a, sizeof(const char *) * (size_t)(total + NULL_TERM));
     if (!result) {
         return NULL;
     }
@@ -2087,7 +2087,7 @@ static const char **extract_cpp_base_classes(CBMArena *a, TSNode clause, const c
     }
     if (base_count > 0) {
         const char **result =
-            (const char **)cbm_arena_alloc(a, (base_count + NULL_TERM) * sizeof(const char *));
+            (const char **)cbm_arena_alloc(a, (size_t)(base_count + NULL_TERM) * sizeof(const char *));
         if (result) {
             for (int j = 0; j < base_count; j++) {
                 result[j] = bases[j];
@@ -2170,7 +2170,7 @@ static const char **collect_csharp_bases(CBMArena *a, TSNode base_list, const ch
         return NULL;
     }
     const char **result =
-        (const char **)cbm_arena_alloc(a, (base_count + NULL_TERM) * sizeof(const char *));
+        (const char **)cbm_arena_alloc(a, (size_t)(base_count + NULL_TERM) * sizeof(const char *));
     if (!result) {
         return NULL;
     }
@@ -2512,7 +2512,7 @@ static const char **extract_base_classes(CBMArena *a, TSNode node, const char *s
             }
             if (base_count > 0) {
                 const char **result =
-                    (const char **)cbm_arena_alloc(a, (base_count + 1) * sizeof(const char *));
+                    (const char **)cbm_arena_alloc(a, (size_t)(base_count + 1) * sizeof(const char *));
                 if (result) {
                     for (int i = 0; i < base_count; i++) {
                         result[i] = bases[i];
@@ -2613,7 +2613,7 @@ static const char **extract_base_classes(CBMArena *a, TSNode node, const char *s
         }
         if (pc > 0) {
             const char **result =
-                (const char **)cbm_arena_alloc(a, (pc + NULL_TERM) * sizeof(const char *));
+                (const char **)cbm_arena_alloc(a, (size_t)(pc + NULL_TERM) * sizeof(const char *));
             if (result) {
                 for (int i = 0; i < pc; i++) {
                     result[i] = pbases[i];
@@ -2650,7 +2650,7 @@ static const char **extract_base_classes(CBMArena *a, TSNode node, const char *s
         }
         if (pc > 0) {
             const char **result =
-                (const char **)cbm_arena_alloc(a, (pc + NULL_TERM) * sizeof(const char *));
+                (const char **)cbm_arena_alloc(a, (size_t)(pc + NULL_TERM) * sizeof(const char *));
             if (result) {
                 for (int i = 0; i < pc; i++) {
                     result[i] = pbases[i];
@@ -2682,7 +2682,7 @@ static const char **extract_base_classes(CBMArena *a, TSNode node, const char *s
         }
         if (pc > 0) {
             const char **result =
-                (const char **)cbm_arena_alloc(a, (pc + NULL_TERM) * sizeof(const char *));
+                (const char **)cbm_arena_alloc(a, (size_t)(pc + NULL_TERM) * sizeof(const char *));
             if (result) {
                 for (int i = 0; i < pc; i++) {
                     result[i] = pbases[i];
@@ -2731,7 +2731,7 @@ static const char **extract_base_classes(CBMArena *a, TSNode node, const char *s
 
     if (base_count > 0) {
         const char **result =
-            (const char **)cbm_arena_alloc(a, (base_count + NULL_TERM) * sizeof(const char *));
+            (const char **)cbm_arena_alloc(a, (size_t)(base_count + NULL_TERM) * sizeof(const char *));
         if (result) {
             for (int i = 0; i < base_count; i++) {
                 result[i] = bases[i];
@@ -2918,7 +2918,7 @@ static const char **extract_param_names(CBMArena *a, TSNode params, const char *
     }
 
     const char **result =
-        (const char **)cbm_arena_alloc(a, (count + NULL_TERM) * sizeof(const char *));
+        (const char **)cbm_arena_alloc(a, (size_t)(count + NULL_TERM) * sizeof(const char *));
     for (int i = 0; i < count; i++) {
         result[i] = names[i];
     }
@@ -2966,7 +2966,7 @@ static const char **build_type_array(CBMArena *a, const char **types, int count)
         return NULL;
     }
     const char **result =
-        (const char **)cbm_arena_alloc(a, (count + NULL_TERM) * sizeof(const char *));
+        (const char **)cbm_arena_alloc(a, (size_t)(count + NULL_TERM) * sizeof(const char *));
     for (int i = 0; i < count; i++) {
         result[i] = types[i];
     }
@@ -3135,7 +3135,7 @@ static const char **extract_param_types(CBMArena *a, TSNode params, const char *
     }
 
     const char **result =
-        (const char **)cbm_arena_alloc(a, (count + NULL_TERM) * sizeof(const char *));
+        (const char **)cbm_arena_alloc(a, (size_t)(count + NULL_TERM) * sizeof(const char *));
     for (int i = 0; i < count; i++) {
         result[i] = types[i];
     }
@@ -6634,7 +6634,7 @@ typedef struct {
 typedef struct {
     walk_defs_frame_t *data;
     int top;
-    int cap;
+    size_t cap; // capacity only — never a sentinel, doubles without signed-overflow risk
     const char *path; // for the WARN when the ceiling is hit (may be NULL)
     bool warned;
 } wd_stack_t;
@@ -6654,9 +6654,9 @@ static int wd_stack_max(void) {
 }
 
 static void wd_push(wd_stack_t *s, TSNode node, const char *enclosing_qn) {
-    if (s->top >= s->cap) {
-        int ncap = s->cap ? s->cap * 2 : 256;
-        if (ncap > wd_stack_max()) {
+    if ((size_t)s->top >= s->cap) {
+        size_t ncap = s->cap ? s->cap * 2 : 256;
+        if (ncap > (size_t)wd_stack_max()) {
             if (!s->warned) {
                 char lim[24];
                 snprintf(lim, sizeof(lim), "%d", wd_stack_max());
@@ -6666,7 +6666,7 @@ static void wd_push(wd_stack_t *s, TSNode node, const char *enclosing_qn) {
             }
             return; // bounded: stop growing (warned, not silent)
         }
-        walk_defs_frame_t *nd = safe_realloc(s->data, (size_t)ncap * sizeof(walk_defs_frame_t));
+        walk_defs_frame_t *nd = safe_realloc(s->data, ncap * sizeof(walk_defs_frame_t));
         if (!nd) {
             /* OOM — safe_realloc already freed the old buffer. Bail cleanly: drop
              * pending frames so the walk_defs loop drains and exits without a NULL

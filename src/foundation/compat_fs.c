@@ -699,6 +699,46 @@ int cbm_exec_no_shell(const char *const *argv) {
     return (int)exit_code;
 }
 
+static bool copy_resolved_path(char *out, size_t outsz, const char *path) {
+    if (!out || outsz == 0 || !path || !path[0]) {
+        return false;
+    }
+    int n = snprintf(out, outsz, "%s", path);
+    return n > 0 && (size_t)n < outsz;
+}
+
+bool cbm_resolve_executable_path(const char *argv0, char *out, size_t outsz) {
+    if (!out || outsz == 0) {
+        return false;
+    }
+    out[0] = '\0';
+
+    if (argv0 && argv0[0]) {
+        /* GetFileAttributesA reads argv0 through the ANSI code page and fails on
+         * non-ASCII install paths, forcing a fallback that can mangle the path;
+         * check wide so a valid non-ASCII argv0 is used verbatim. */
+        wchar_t *wargv0 = cbm_utf8_to_wide(argv0);
+        DWORD attrs = wargv0 ? GetFileAttributesW(wargv0) : INVALID_FILE_ATTRIBUTES;
+        free(wargv0);
+        if (attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY)) {
+            return copy_resolved_path(out, outsz, argv0);
+        }
+    }
+
+    wchar_t wbuf[1024];
+    DWORD n = GetModuleFileNameW(NULL, wbuf, (DWORD)(sizeof(wbuf) / sizeof(wbuf[0])));
+    if (n == 0 || n >= sizeof(wbuf) / sizeof(wbuf[0])) {
+        return copy_resolved_path(out, outsz, argv0);
+    }
+    char *utf8 = cbm_wide_to_utf8(wbuf);
+    if (!utf8) {
+        return copy_resolved_path(out, outsz, argv0);
+    }
+    bool ok = copy_resolved_path(out, outsz, utf8);
+    free(utf8);
+    return ok;
+}
+
 #else /* POSIX */
 
 /* ── POSIX implementation ────────────────────────────────── */
@@ -709,6 +749,9 @@ int cbm_exec_no_shell(const char *const *argv) {
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
 
 struct cbm_dir {
     DIR *dir;
@@ -916,7 +959,13 @@ int cbm_exec_no_shell(const char *const *argv) {
         /* Child: exec directly — no shell interpretation */
         /* 127 = standard "command not found" exit code (POSIX convention) */
         enum { EXEC_NOT_FOUND = 127 };
-        execvp(argv[0], (char *const *)argv);
+        /* execvp's argv parameter is non-const for historical reasons only —
+         * POSIX guarantees exec never modifies it. memcpy the pointer value
+         * rather than cast away const, matching safe_str_free's convention
+         * in foundation/platform.h. */
+        char *const *exec_argv;
+        memcpy(&exec_argv, &argv, sizeof(exec_argv));
+        execvp(argv[0], exec_argv);
         _exit(EXEC_NOT_FOUND);
     }
     /* Parent: wait for child */
@@ -928,6 +977,81 @@ int cbm_exec_no_shell(const char *const *argv) {
         return WEXITSTATUS(status);
     }
     return CBM_NOT_FOUND; /* killed by signal */
+}
+
+static bool copy_resolved_path(char *out, size_t outsz, const char *path) {
+    if (!out || outsz == 0 || !path || !path[0]) {
+        return false;
+    }
+    int n = snprintf(out, outsz, "%s", path);
+    return n > 0 && (size_t)n < outsz;
+}
+
+static bool is_executable_file(const char *path) {
+    struct stat st;
+    return path && stat(path, &st) == 0 && S_ISREG(st.st_mode) && access(path, X_OK) == 0;
+}
+
+static bool resolve_from_path_env(const char *name, char *out, size_t outsz) {
+    const char *path = getenv("PATH");
+    if (!name || !name[0] || strchr(name, '/') || !path || !path[0]) {
+        return false;
+    }
+
+    const char *cur = path;
+    while (*cur) {
+        const char *colon = strchr(cur, ':');
+        size_t dir_len = colon ? (size_t)(colon - cur) : strlen(cur);
+        if (dir_len > 0 && dir_len < 900) {
+            char candidate[1024];
+            int n = snprintf(candidate, sizeof(candidate), "%.*s/%s", (int)dir_len, cur, name);
+            if (n > 0 && (size_t)n < sizeof(candidate) && is_executable_file(candidate)) {
+                return copy_resolved_path(out, outsz, candidate);
+            }
+        }
+        if (!colon) {
+            break;
+        }
+        cur = colon + 1;
+    }
+    return false;
+}
+
+static bool resolve_self_executable(char *out, size_t outsz) {
+#if defined(__APPLE__)
+    char buf[1024];
+    uint32_t sz = sizeof(buf);
+    if (_NSGetExecutablePath(buf, &sz) == 0 && buf[0]) {
+        return copy_resolved_path(out, outsz, buf);
+    }
+    return false;
+#else
+    char buf[1024];
+    ssize_t len = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (len > 0) {
+        buf[len] = '\0';
+        return copy_resolved_path(out, outsz, buf);
+    }
+    return false;
+#endif
+}
+
+bool cbm_resolve_executable_path(const char *argv0, char *out, size_t outsz) {
+    if (!out || outsz == 0) {
+        return false;
+    }
+    out[0] = '\0';
+
+    if (argv0 && strchr(argv0, '/') && is_executable_file(argv0)) {
+        return copy_resolved_path(out, outsz, argv0);
+    }
+    if (resolve_from_path_env(argv0, out, outsz)) {
+        return true;
+    }
+    if (resolve_self_executable(out, outsz)) {
+        return true;
+    }
+    return copy_resolved_path(out, outsz, argv0);
 }
 
 #endif /* _WIN32 */

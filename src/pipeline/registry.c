@@ -162,7 +162,7 @@ static int candidate_score(const char *candidate_qn, const char *module_qn) {
 }
 
 /* Pick candidate with highest composite score (test-deprioritization + namespace proximity). */
-static const char *best_by_import_distance(const char **candidates, int count,
+static const char *best_by_import_distance(char *const *candidates, int count,
                                            const char *module_qn) {
     const char *best = NULL;
     int best_score = CBM_NOT_FOUND;
@@ -198,7 +198,11 @@ static CBM_TLS CBMHashTable *_reach_cache = NULL;
 static void reach_cache_free_key(const char *key, void *val, void *ud) {
     (void)val;
     (void)ud;
-    free((char *)key);
+    /* Release the cache's owned key copy without a qualifier-discarding cast
+     * (mirrors platform.h's safe_str_free). */
+    void *owned;
+    memcpy(&owned, &key, sizeof(owned));
+    free(owned);
 }
 
 void cbm_registry_reach_cache_begin(int estimated_capacity) {
@@ -281,7 +285,11 @@ static CBM_TLS CBMHashTable *_resolve_cache = NULL;
 
 static void resolve_cache_free_entry(const char *key, void *val, void *ud) {
     (void)ud;
-    free((char *)key);
+    /* Release the cache's owned key copy without a qualifier-discarding cast
+     * (mirrors platform.h's safe_str_free). */
+    void *owned;
+    memcpy(&owned, &key, sizeof(owned));
+    free(owned);
     free(val);
 }
 
@@ -470,7 +478,11 @@ cbm_registry_t *cbm_registry_new(void) {
 static void free_label(const char *key, void *value, void *ud) {
     (void)ud;
     (void)value; /* interned in the registry's label_pool */
-    free((void *)key);
+    /* Release the exact map's owned key copy without a qualifier-discarding
+     * cast (mirrors platform.h's safe_str_free). */
+    void *owned;
+    memcpy(&owned, &key, sizeof(owned));
+    free(owned);
 }
 
 static void free_qn_array(const char *key, void *value, void *ud) {
@@ -481,7 +493,11 @@ static void free_qn_array(const char *key, void *value, void *ud) {
         cbm_da_free(arr);
         free(arr);
     }
-    free((void *)key);
+    /* Release the by_name map's owned key copy without a qualifier-discarding
+     * cast (mirrors platform.h's safe_str_free). */
+    void *owned;
+    memcpy(&owned, &key, sizeof(owned));
+    free(owned);
 }
 
 void cbm_registry_free(cbm_registry_t *r) {
@@ -533,7 +549,12 @@ void cbm_registry_add(cbm_registry_t *r, const char *name, const char *qualified
     /* Store in exact map: QN → interned label. The key is the registry's ONE
      * owned copy of the QN; by_name below borrows it (same lifetime) instead
      * of a second strdup — this pair of copies was ~280 MB on the kernel. */
-    cbm_ht_set(r->exact, strdup(qualified_name), (void *)interned);
+    /* interned is a read-only pointer into label_pool; hand it to the opaque
+     * void* VALUE slot without a qualifier-discarding cast (mirrors
+     * platform.h's safe_str_free — cbm_ht_set never writes through it). */
+    void *interned_value;
+    memcpy(&interned_value, &interned, sizeof(interned_value));
+    cbm_ht_set(r->exact, strdup(qualified_name), interned_value);
     const char *owned_qn = cbm_ht_get_key(r->exact, qualified_name);
 
     /* Index by simple name.
@@ -544,7 +565,12 @@ void cbm_registry_add(cbm_registry_t *r, const char *name, const char *qualified
         arr = calloc(CBM_ALLOC_ONE, sizeof(qn_array_t));
         cbm_ht_set(r->by_name, strdup(simple), arr);
     }
-    cbm_da_push(arr, (char *)owned_qn);
+    /* owned_qn borrows the exact map's key (freed there, not by this array —
+     * see free_qn_array); hand it to the array without a qualifier-discarding
+     * cast (mirrors platform.h's safe_str_free). */
+    char *push_qn;
+    memcpy(&push_qn, &owned_qn, sizeof(push_qn));
+    cbm_da_push(arr, push_qn);
 }
 
 /* ── Lookup ──────────────────────────────────────────────────────── */
@@ -563,14 +589,14 @@ const char *cbm_registry_label_of(const cbm_registry_t *r, const char *qn) {
     return cbm_ht_get(r->exact, qn);
 }
 
-int cbm_registry_find_by_name(const cbm_registry_t *r, const char *name, const char ***out,
+int cbm_registry_find_by_name(const cbm_registry_t *r, const char *name, char *const **out,
                               int *count) {
     if (!r || !out || !count) {
         return CBM_NOT_FOUND;
     }
     qn_array_t *arr = cbm_ht_get(r->by_name, name);
     if (arr && arr->count > 0) {
-        *out = (const char **)arr->items;
+        *out = arr->items;
         *count = arr->count;
     } else {
         *out = NULL;
@@ -695,7 +721,7 @@ static cbm_resolution_t resolve_same_module(const cbm_registry_t *r, const char 
 /* Strategy 4: multiple candidates with import filtering. */
 static cbm_resolution_t resolve_multi_with_imports(const qn_array_t *arr, const char *module_qn,
                                                    const char **import_vals, int import_count) {
-    const char *filtered[CBM_SZ_256];
+    char *filtered[CBM_SZ_256];
     int fcount = 0;
     for (int i = 0; i < arr->count && fcount < CBM_SZ_256; i++) {
         if (is_import_reachable(arr->items[i], import_vals, import_count)) {
@@ -714,7 +740,7 @@ static cbm_resolution_t resolve_multi_with_imports(const qn_array_t *arr, const 
         }
     }
     /* No import-reachable — use all candidates with penalty */
-    const char *best = best_by_import_distance((const char **)arr->items, arr->count, module_qn);
+    const char *best = best_by_import_distance(arr->items, arr->count, module_qn);
     if (best) {
         double conf = candidate_count_penalty(CONF_SUFFIX_MATCH * REG_HALF_PENALTY, arr->count);
         return (cbm_resolution_t){best, "suffix_match", conf, arr->count};
@@ -816,7 +842,7 @@ static cbm_resolution_t resolve_name_lookup(const cbm_registry_t *r, const char 
     if (import_vals && import_count > 0) {
         return resolve_multi_with_imports(arr, module_qn, import_vals, import_count);
     }
-    const char *best = best_by_import_distance((const char **)arr->items, arr->count, module_qn);
+    const char *best = best_by_import_distance(arr->items, arr->count, module_qn);
     if (best) {
         double conf = candidate_count_penalty(CONF_SUFFIX_MATCH, arr->count);
         return (cbm_resolution_t){best, "suffix_match", conf, arr->count};
@@ -858,7 +884,9 @@ cbm_resolution_t cbm_registry_resolve(const cbm_registry_t *r, const char *calle
         sep_len = 2; /* length of "::" */
     }
     if (sep) {
-        size_t plen = sep - callee_name;
+        /* sep is either dot or colons, both found by a scan starting at
+         * callee_name, so sep >= callee_name always holds here. */
+        size_t plen = (size_t)(sep - callee_name);
         if (plen >= sizeof(prefix)) {
             plen = sizeof(prefix) - SKIP_ONE;
         }
@@ -901,8 +929,8 @@ cbm_resolution_t cbm_registry_resolve(const cbm_registry_t *r, const char *calle
 /* ── Fuzzy Resolve ──────────────────────────────────────────────── */
 
 /* Filter candidates by import reachability. Returns count of reachable. */
-static int filter_import_reachable(const char **candidates, int count, const char **import_vals,
-                                   int import_count, const char **out, int max_out) {
+static int filter_import_reachable(char *const *candidates, int count, const char **import_vals,
+                                   int import_count, char **out, int max_out) {
     int n = 0;
     for (int i = 0; i < count && n < max_out; i++) {
         if (is_import_reachable(candidates[i], import_vals, import_count)) {
@@ -944,20 +972,19 @@ cbm_fuzzy_result_t cbm_registry_fuzzy_resolve(const cbm_registry_t *r, const cha
     }
 
     /* Multiple candidates: filter by import reachability */
-    const char *filtered[CBM_SZ_256];
+    char *filtered[CBM_SZ_256];
     int fcount = arr->count;
-    const char **fptr = (const char **)arr->items;
+    char **fptr = arr->items;
 
     if (have_imports) {
-        fcount = filter_import_reachable((const char **)arr->items, arr->count, import_map_vals,
+        fcount = filter_import_reachable(arr->items, arr->count, import_map_vals,
                                          import_map_count, filtered, CBM_SZ_256);
         fptr = filtered;
     }
 
     if (fcount == 0) {
         /* No import-reachable — use originals with penalty */
-        const char *best =
-            best_by_import_distance((const char **)arr->items, arr->count, module_qn);
+        const char *best = best_by_import_distance(arr->items, arr->count, module_qn);
         if (!best) {
             return no_match;
         }

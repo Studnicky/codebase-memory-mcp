@@ -4,6 +4,7 @@
  */
 #include "../src/foundation/compat.h"
 #include "test_framework.h"
+#include "suites.h"
 #include "test_helpers.h"
 #include "../src/foundation/mem.h"
 #include "../src/foundation/arena.h"
@@ -1139,7 +1140,7 @@ TEST(parallel_extract_with_slab) {
     int64_t gbuf_next = cbm_gbuf_next_id(gbuf);
     atomic_init(&shared_ids, gbuf_next);
 
-    CBMFileResult **result_cache = calloc(file_count, sizeof(CBMFileResult *));
+    CBMFileResult **result_cache = calloc((size_t)file_count, sizeof(CBMFileResult *));
     ASSERT_NOT_NULL(result_cache);
 
     int rc = cbm_parallel_extract(&ctx, files, file_count, result_cache, &shared_ids, 2);

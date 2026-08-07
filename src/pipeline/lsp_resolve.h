@@ -240,7 +240,7 @@ static inline bool cbm_pipeline_invocation_targets_equal(const char *left_qn, co
     const cbm_gbuf_node_t *right_exact =
         cbm_pipeline_lsp_target_node_policy(gbuf, project_name, right_qn, false, false);
     if (left_exact && right_exact) {
-        return left_exact->id == right_exact->id;
+        return cbm_node_id_eq(left_exact->id, right_exact->id);
     }
     if (!allow_tail_match) {
         return false;
@@ -262,7 +262,7 @@ static inline bool cbm_pipeline_invocation_targets_equal(const char *left_qn, co
     const cbm_gbuf_node_t *right =
         right_exact ? right_exact
                     : cbm_pipeline_lsp_target_node_policy(gbuf, project_name, right_qn, true, true);
-    return left && right && left->id == right->id;
+    return left && right && cbm_node_id_eq(left->id, right->id);
 }
 
 /* A semantic join is occurrence-exact only when both producers recorded the
@@ -561,7 +561,7 @@ static inline bool cbm_pipeline_reference_targets_equal(const char *left_qn, con
     const cbm_gbuf_node_t *left = cbm_pipeline_lsp_target_node(gbuf, project_name, left_qn, false);
     const cbm_gbuf_node_t *right =
         cbm_pipeline_lsp_target_node(gbuf, project_name, right_qn, false);
-    return left && right && left->id == right->id;
+    return left && right && cbm_node_id_eq(left->id, right->id);
 }
 
 typedef struct {
@@ -916,13 +916,13 @@ static inline const cbm_gbuf_node_t *cbm_pipeline_lsp_target_node_policy(
         }
         if (!unique_callable) {
             unique_callable = cand;
-        } else if (unique_callable->id != cand->id) {
+        } else if (!cbm_node_id_eq(unique_callable->id, cand->id)) {
             callable_ambiguous = true;
         }
         if (!cbm_pipeline_qn_class_method_tail_eq(cand->qualified_name, callee_tail)) {
             continue;
         }
-        if (match && match->id != cand->id) {
+        if (match && !cbm_node_id_eq(match->id, cand->id)) {
             tail_ambiguous = true;
             continue;
         }

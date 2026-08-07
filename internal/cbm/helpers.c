@@ -31,8 +31,13 @@ enum {
 // Hand-rolled memmem: does not rely on the system memmem (GNU/BSD-only;
 // msys2-clang on Windows lacks it), so it compiles identically everywhere.
 void *cbm_memmem(const void *haystack, size_t haystack_len, const void *needle, size_t needle_len) {
+    /* Mirrors the memchr()/strchr() contract: takes a const haystack but
+     * returns non-const, leaving mutability of the match up to the caller.
+     * memcpy the pointer value itself rather than cast away const. */
     if (needle_len == 0) {
-        return (void *)haystack;
+        void *result;
+        memcpy(&result, &haystack, sizeof(result));
+        return result;
     }
     if (needle_len > haystack_len) {
         return NULL;
@@ -41,7 +46,10 @@ void *cbm_memmem(const void *haystack, size_t haystack_len, const void *needle, 
     size_t last = haystack_len - needle_len;
     for (size_t i = 0; i <= last; i++) {
         if (memcmp(h + i, needle, needle_len) == 0) {
-            return (void *)(h + i);
+            const char *match = h + i;
+            void *result;
+            memcpy(&result, &match, sizeof(result));
+            return result;
         }
     }
     return NULL;
@@ -1373,7 +1381,8 @@ static char *append_path_segments(char *out, const char *rel_path, size_t plen, 
     const char *start = rel_path;
     const char *end_ptr = rel_path + plen;
     while (start < end_ptr) {
-        const char *slash = (const char *)memchr(start, '/', end_ptr - start);
+        /* start < end_ptr per the loop condition, so the cast is safe. */
+        const char *slash = (const char *)memchr(start, '/', (size_t)(end_ptr - start));
         const char *part_end = slash ? slash : end_ptr;
         size_t part_len = (size_t)(part_end - start);
 
@@ -1507,7 +1516,8 @@ char *cbm_fqn_folder(CBMArena *a, const char *project, const char *rel_dir) {
         const char *start = rel_dir;
         const char *end_ptr = rel_dir + dir_len;
         while (start < end_ptr) {
-            const char *slash = (const char *)memchr(start, '/', end_ptr - start);
+            /* start < end_ptr per the loop condition, so the cast is safe. */
+        const char *slash = (const char *)memchr(start, '/', (size_t)(end_ptr - start));
             const char *part_end = slash ? slash : end_ptr;
             size_t part_len = (size_t)(part_end - start);
             if (part_len > 0) {

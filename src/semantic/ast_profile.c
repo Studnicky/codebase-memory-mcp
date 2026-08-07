@@ -386,8 +386,17 @@ void cbm_ast_profile_to_vector(const cbm_ast_profile_t *p, float *out) {
     if (!p || !out) {
         return;
     }
-    /* Normalize each field to [0,1] range using reasonable maximums. */
-    enum { MAX_COUNT = 100, MAX_DEPTH = 20, MAX_HALSTEAD = 200, MAX_TOKENS = 2000 };
+    /*
+     * Normalize each field to [0,1] range using reasonable maximums. Every use
+     * below is float division, so these are declared `float` rather than as
+     * enumerators: an enum of integral constants would make each of the 24
+     * divisions mixed enum/float arithmetic, and nothing here treats them as
+     * enumerators.
+     */
+    static const float MAX_COUNT = 100.0f;
+    static const float MAX_DEPTH = 20.0f;
+    static const float MAX_HALSTEAD = 200.0f;
+    static const float MAX_TOKENS = 2000.0f;
     int i = 0;
     out[i++] = (float)p->if_count / MAX_COUNT;
     out[i++] = (float)p->for_count / MAX_COUNT;
@@ -396,7 +405,9 @@ void cbm_ast_profile_to_vector(const cbm_ast_profile_t *p, float *out) {
     out[i++] = (float)p->try_count / MAX_COUNT;
     out[i++] = (float)p->return_count / MAX_COUNT;
     out[i++] = (float)p->max_nesting_depth / MAX_DEPTH;
-    out[i++] = (float)p->avg_nesting_depth_x10 / (MAX_DEPTH * DEPTH_SCALE);
+    /* DEPTH_SCALE is int by declaration (also used in integer accumulation at
+     * cbm_ast_profile_from_node()); cast to float only for this one float-context use. */
+    out[i++] = (float)p->avg_nesting_depth_x10 / (MAX_DEPTH * (float)DEPTH_SCALE);
     out[i++] = (float)p->comparison_ops / MAX_COUNT;
     out[i++] = (float)p->arithmetic_ops / MAX_COUNT;
     out[i++] = (float)p->logical_ops / MAX_COUNT;

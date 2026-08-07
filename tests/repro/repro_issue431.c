@@ -46,6 +46,7 @@
 
 #include <foundation/compat.h>
 #include "test_framework.h"
+#include "suites.h"
 #include "test_helpers.h"
 #include <cli/cli.h>
 
@@ -107,7 +108,7 @@ TEST(repro_issue431_vscode_profile_inherits_mcp_json) {
     ASSERT_EQ(0, th_mkdir_p(profile_dir));
 
     /* --- Precondition: VSCode is detected --- */
-    cbm_detected_agents_t agents = cbm_detect_agents(tmpdir);
+    cbm_detected_agents_t agents = cbm_detect_agents(tmpdir, CBM_SCAN_SYNTHETIC);
     if (!agents.vscode) {
         /* #431 IS FIXED: install_vscode_profile_configs() (cli.c:3211) scans
          * Code/User/profiles/ and plans a per-profile mcp.json, so the assertion

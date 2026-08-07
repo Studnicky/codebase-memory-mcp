@@ -8,6 +8,7 @@
  */
 #include "../src/foundation/compat.h"
 #include "test_framework.h"
+#include "suites.h"
 #include "test_helpers.h"
 #include "pipeline/pipeline.h"
 #include "pipeline/pipeline_internal.h"
@@ -149,7 +150,8 @@ static void seed_test_file_nodes(cbm_gbuf_t *gbuf, const char *project,
         const char *slash = strrchr(rel, '/');
         const char *basename = slash ? slash + 1 : rel;
         if (file_qn) {
-            cbm_gbuf_upsert_node(gbuf, "File", basename, file_qn, rel, 0, 0, "{}");
+            cbm_node_id_value(
+                cbm_gbuf_upsert_node(gbuf, "File", basename, file_qn, rel, 0, 0, "{}"));
         }
         free(file_qn);
     }
@@ -164,9 +166,16 @@ static void seed_test_file_nodes(cbm_gbuf_t *gbuf, const char *project,
 static void harness_ctx_free_tables(cbm_pipeline_ctx_t *ctx) {
     if (ctx->return_type_table) {
         for (int i = 0; i < ctx->return_type_table->count; i++) {
-            free((void *)ctx->return_type_table->entries[i].return_type);
+            const char *rt = ctx->return_type_table->entries[i].return_type;
+            safe_str_free(&rt);
         }
-        free((void *)ctx->return_type_table);
+        /* ctx holds this as const (read-only for the resolve passes); this
+         * harness is its sole owner and release point here, so the pointer
+         * is unwrapped via memcpy rather than a qualifier-discarding cast,
+         * mirroring the production teardown in pipeline.c. */
+        CBMReturnTypeTable *owned_rtt;
+        memcpy(&owned_rtt, &ctx->return_type_table, sizeof(owned_rtt));
+        free(owned_rtt);
         ctx->return_type_table = NULL;
     }
 }
@@ -607,8 +616,10 @@ TEST(gbuf_shared_ids_unique) {
     cbm_gbuf_t *ga = cbm_gbuf_new_shared_ids("proj", "/", &shared);
     cbm_gbuf_t *gb = cbm_gbuf_new_shared_ids("proj", "/", &shared);
 
-    int64_t id1 = cbm_gbuf_upsert_node(ga, "Function", "foo", "proj.foo", "a.go", 1, 5, "{}");
-    int64_t id2 = cbm_gbuf_upsert_node(gb, "Function", "bar", "proj.bar", "b.go", 1, 3, "{}");
+    int64_t id1 = cbm_node_id_value(
+        cbm_gbuf_upsert_node(ga, "Function", "foo", "proj.foo", "a.go", 1, 5, "{}"));
+    int64_t id2 = cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "Function", "bar", "proj.bar", "b.go", 1, 3, "{}"));
     ASSERT_GT(id1, 0);
     ASSERT_GT(id2, 0);
     ASSERT_NEQ(id1, id2);
@@ -623,10 +634,10 @@ TEST(gbuf_merge_nodes) {
     cbm_gbuf_t *dst = cbm_gbuf_new_shared_ids("proj", "/", &shared);
     cbm_gbuf_t *src = cbm_gbuf_new_shared_ids("proj", "/", &shared);
 
-    cbm_gbuf_upsert_node(dst, "Function", "a", "proj.a", "a.go", 1, 5, "{}");
-    cbm_gbuf_upsert_node(dst, "Function", "b", "proj.b", "a.go", 6, 10, "{}");
-    cbm_gbuf_upsert_node(src, "Function", "c", "proj.c", "b.go", 1, 5, "{}");
-    cbm_gbuf_upsert_node(src, "Function", "d", "proj.d", "b.go", 6, 10, "{}");
+    cbm_node_id_value(cbm_gbuf_upsert_node(dst, "Function", "a", "proj.a", "a.go", 1, 5, "{}"));
+    cbm_node_id_value(cbm_gbuf_upsert_node(dst, "Function", "b", "proj.b", "a.go", 6, 10, "{}"));
+    cbm_node_id_value(cbm_gbuf_upsert_node(src, "Function", "c", "proj.c", "b.go", 1, 5, "{}"));
+    cbm_node_id_value(cbm_gbuf_upsert_node(src, "Function", "d", "proj.d", "b.go", 6, 10, "{}"));
 
     ASSERT_EQ(cbm_gbuf_node_count(dst), 2);
     cbm_gbuf_merge(dst, src);
@@ -648,19 +659,23 @@ TEST(gbuf_merge_edges) {
     cbm_gbuf_t *dst = cbm_gbuf_new_shared_ids("proj", "/", &shared);
     cbm_gbuf_t *src = cbm_gbuf_new_shared_ids("proj", "/", &shared);
 
-    int64_t a = cbm_gbuf_upsert_node(dst, "Function", "a", "proj.a", "a.go", 1, 5, "{}");
-    int64_t b = cbm_gbuf_upsert_node(dst, "Function", "b", "proj.b", "a.go", 6, 10, "{}");
+    int64_t a =
+        cbm_node_id_value(cbm_gbuf_upsert_node(dst, "Function", "a", "proj.a", "a.go", 1, 5, "{}"));
+    int64_t b = cbm_node_id_value(
+        cbm_gbuf_upsert_node(dst, "Function", "b", "proj.b", "a.go", 6, 10, "{}"));
     /* Put an edge in src that references dst nodes (by ID) */
-    cbm_gbuf_insert_edge(src, a, b, "CALLS", "{}");
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        src, (cbm_edge_endpoints_t){.source = cbm_node_id(a), .target = cbm_node_id(b)}, "CALLS",
+        "{}"));
 
     cbm_gbuf_merge(dst, src);
     ASSERT_GT(cbm_gbuf_edge_count(dst), 0);
 
     const cbm_gbuf_edge_t **edges = NULL;
     int count = 0;
-    cbm_gbuf_find_edges_by_source_type(dst, a, "CALLS", &edges, &count);
+    cbm_gbuf_find_edges_by_source_type(dst, cbm_node_id(a), "CALLS", &edges, &count);
     ASSERT_EQ(count, 1);
-    ASSERT_EQ(edges[0]->target_id, b);
+    ASSERT_EQ(edges[0]->target_id.v, b);
 
     cbm_gbuf_free(src);
     cbm_gbuf_free(dst);
@@ -672,7 +687,7 @@ TEST(gbuf_merge_empty_src) {
     cbm_gbuf_t *dst = cbm_gbuf_new_shared_ids("proj", "/", &shared);
     cbm_gbuf_t *src = cbm_gbuf_new_shared_ids("proj", "/", &shared);
 
-    cbm_gbuf_upsert_node(dst, "Function", "a", "proj.a", "a.go", 1, 5, "{}");
+    cbm_node_id_value(cbm_gbuf_upsert_node(dst, "Function", "a", "proj.a", "a.go", 1, 5, "{}"));
     int before = cbm_gbuf_node_count(dst);
     cbm_gbuf_merge(dst, src);
     ASSERT_EQ(cbm_gbuf_node_count(dst), before);
@@ -687,7 +702,7 @@ TEST(gbuf_merge_src_free_safe) {
     cbm_gbuf_t *dst = cbm_gbuf_new_shared_ids("proj", "/", &shared);
     cbm_gbuf_t *src = cbm_gbuf_new_shared_ids("proj", "/", &shared);
 
-    cbm_gbuf_upsert_node(src, "Function", "x", "proj.x", "x.go", 1, 5, "{}");
+    cbm_node_id_value(cbm_gbuf_upsert_node(src, "Function", "x", "proj.x", "x.go", 1, 5, "{}"));
     cbm_gbuf_merge(dst, src);
     cbm_gbuf_free(src); /* must not crash */
 
@@ -701,11 +716,12 @@ TEST(gbuf_next_id_accessors) {
     cbm_gbuf_t *gb = cbm_gbuf_new("proj", "/");
     ASSERT_EQ(cbm_gbuf_next_id(gb), 1);
 
-    cbm_gbuf_upsert_node(gb, "Function", "foo", "proj.foo", "f.go", 1, 5, "{}");
+    cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", "foo", "proj.foo", "f.go", 1, 5, "{}"));
     ASSERT_GT(cbm_gbuf_next_id(gb), 1);
 
     cbm_gbuf_set_next_id(gb, 100);
-    int64_t id = cbm_gbuf_upsert_node(gb, "Function", "bar", "proj.bar", "f.go", 6, 10, "{}");
+    int64_t id = cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "Function", "bar", "proj.bar", "f.go", 6, 10, "{}"));
     ASSERT_GTE(id, 100);
 
     cbm_gbuf_free(gb);
@@ -856,7 +872,7 @@ static int count_edges_between_nodes(const cbm_gbuf_t *gbuf, const cbm_gbuf_node
     }
     int matches = 0;
     for (int i = 0; i < count; i++) {
-        if (edges[i] && edges[i]->target_id == target->id) {
+        if (edges[i] && cbm_node_id_eq(edges[i]->target_id, target->id)) {
             matches++;
         }
     }
@@ -875,7 +891,7 @@ static bool has_edge_from_callable_to_node(const cbm_gbuf_t *gbuf, const char *s
         return false;
     }
     for (int i = 0; i < count; i++) {
-        if (edges[i] && edges[i]->target_id == target->id) {
+        if (edges[i] && cbm_node_id_eq(edges[i]->target_id, target->id)) {
             return true;
         }
     }
@@ -897,7 +913,7 @@ static const cbm_gbuf_edge_t *find_calls_edge_by_tails(const cbm_gbuf_t *gbuf,
         return NULL;
     }
     for (int i = 0; i < count; i++) {
-        if (edges[i] && edges[i]->target_id == target->id) {
+        if (edges[i] && cbm_node_id_eq(edges[i]->target_id, target->id)) {
             return edges[i];
         }
     }
@@ -915,7 +931,7 @@ static bool has_edge_from_callable_to_qn(const cbm_gbuf_t *gbuf, const char *sou
     if (cbm_gbuf_find_edges_by_source_type(gbuf, source->id, edge_type, &edges, &count) != 0)
         return false;
     for (int i = 0; i < count; i++) {
-        if (edges[i] && edges[i]->target_id == target->id)
+        if (edges[i] && cbm_node_id_eq(edges[i]->target_id, target->id))
             return true;
     }
     return false;
@@ -2972,8 +2988,8 @@ TEST(parallel_lsp_tail_match_fallbacks_gated_to_jvm) {
      * "Helper.run" tail in an unrelated module. */
     cbm_gbuf_t *tgbuf = cbm_gbuf_new("proj", "/tmp");
     ASSERT_NOT_NULL(tgbuf);
-    int64_t nid = cbm_gbuf_upsert_node(tgbuf, "Method", "run", "proj.zeta.Helper.run",
-                                       "zeta/helper.py", 1, 3, NULL);
+    int64_t nid = cbm_node_id_value(cbm_gbuf_upsert_node(
+        tgbuf, "Method", "run", "proj.zeta.Helper.run", "zeta/helper.py", 1, 3, NULL));
     ASSERT_TRUE(nid != 0);
     ASSERT_TRUE(cbm_pipeline_lsp_target_node(tgbuf, "proj", "com.other.Helper.run", false) == NULL);
     const cbm_gbuf_node_t *jvm_hit =
@@ -3414,8 +3430,8 @@ TEST(lsp_resolve_project_prefixed_duplicate_is_not_ambiguous) {
     const char *project = "proj";
     cbm_gbuf_t *gbuf = cbm_gbuf_new(project, "/tmp");
     ASSERT_NOT_NULL(gbuf);
-    int64_t target_id = cbm_gbuf_upsert_node(gbuf, "Function", "handler",
-                                             "proj.mod.Target.handler", "target.py", 1, 1, "{}");
+    int64_t target_id = cbm_node_id_value(cbm_gbuf_upsert_node(
+        gbuf, "Function", "handler", "proj.mod.Target.handler", "target.py", 1, 1, "{}"));
     ASSERT_GT(target_id, 0);
 
     CBMCall call = make_call("proj.mod.Caller.run", "handler");
@@ -3424,8 +3440,7 @@ TEST(lsp_resolve_project_prefixed_duplicate_is_not_ambiguous) {
     CBMResolvedCall raw = make_rc("proj.mod.Caller.run", "mod.Target.handler", 0.75);
     raw.site_start_byte = call.site_start_byte;
     raw.site_end_byte = call.site_end_byte;
-    CBMResolvedCall prefixed =
-        make_rc("proj.mod.Caller.run", "proj.mod.Target.handler", 0.90);
+    CBMResolvedCall prefixed = make_rc("proj.mod.Caller.run", "proj.mod.Target.handler", 0.90);
     prefixed.site_start_byte = call.site_start_byte;
     prefixed.site_end_byte = call.site_end_byte;
     CBMResolvedCall items[] = {raw, prefixed};
@@ -3442,11 +3457,10 @@ TEST(lsp_resolve_project_prefix_spellings_stay_ambiguous_when_both_nodes_exist) 
     const char *project = "proj";
     cbm_gbuf_t *gbuf = cbm_gbuf_new(project, "/tmp");
     ASSERT_NOT_NULL(gbuf);
-    int64_t raw_id = cbm_gbuf_upsert_node(gbuf, "Function", "handler", "mod.Target.handler",
-                                          "raw.py", 1, 1, "{}");
-    int64_t prefixed_id = cbm_gbuf_upsert_node(gbuf, "Function", "handler",
-                                               "proj.mod.Target.handler", "prefixed.py", 1, 1,
-                                               "{}");
+    int64_t raw_id = cbm_node_id_value(cbm_gbuf_upsert_node(
+        gbuf, "Function", "handler", "mod.Target.handler", "raw.py", 1, 1, "{}"));
+    int64_t prefixed_id = cbm_node_id_value(cbm_gbuf_upsert_node(
+        gbuf, "Function", "handler", "proj.mod.Target.handler", "prefixed.py", 1, 1, "{}"));
     ASSERT_GT(raw_id, 0);
     ASSERT_GT(prefixed_id, 0);
     ASSERT(raw_id != prefixed_id);
@@ -3457,8 +3471,7 @@ TEST(lsp_resolve_project_prefix_spellings_stay_ambiguous_when_both_nodes_exist) 
     CBMResolvedCall raw = make_rc("proj.mod.Caller.run", "mod.Target.handler", 0.75);
     raw.site_start_byte = call.site_start_byte;
     raw.site_end_byte = call.site_end_byte;
-    CBMResolvedCall prefixed =
-        make_rc("proj.mod.Caller.run", "proj.mod.Target.handler", 0.90);
+    CBMResolvedCall prefixed = make_rc("proj.mod.Caller.run", "proj.mod.Target.handler", 0.90);
     prefixed.site_start_byte = call.site_start_byte;
     prefixed.site_end_byte = call.site_end_byte;
     CBMResolvedCall items[] = {raw, prefixed};
@@ -3475,8 +3488,8 @@ TEST(lsp_resolve_jvm_package_alias_of_materialized_target_is_not_ambiguous) {
     const char *project = "proj";
     cbm_gbuf_t *gbuf = cbm_gbuf_new(project, "/tmp");
     ASSERT_NOT_NULL(gbuf);
-    int64_t target_id =
-        cbm_gbuf_upsert_node(gbuf, "Method", "twice", "proj.Util.twice", "Util.java", 1, 1, "{}");
+    int64_t target_id = cbm_node_id_value(
+        cbm_gbuf_upsert_node(gbuf, "Method", "twice", "proj.Util.twice", "Util.java", 1, 1, "{}"));
     ASSERT_GT(target_id, 0);
 
     CBMCall call = make_call("proj.Client.run", "twice");
@@ -3502,8 +3515,8 @@ TEST(lsp_resolve_jvm_two_tail_only_packages_stay_ambiguous) {
     const char *project = "proj";
     cbm_gbuf_t *gbuf = cbm_gbuf_new(project, "/tmp");
     ASSERT_NOT_NULL(gbuf);
-    int64_t target_id = cbm_gbuf_upsert_node(gbuf, "Method", "run", "proj.generated.Service.run",
-                                             "Service.java", 1, 1, "{}");
+    int64_t target_id = cbm_node_id_value(cbm_gbuf_upsert_node(
+        gbuf, "Method", "run", "proj.generated.Service.run", "Service.java", 1, 1, "{}"));
     ASSERT_GT(target_id, 0);
 
     CBMCall call = make_call("proj.Client.call", "run");
@@ -3716,8 +3729,8 @@ TEST(lsp_reference_project_prefixed_duplicate_is_not_ambiguous) {
     const char *project = "proj";
     cbm_gbuf_t *gbuf = cbm_gbuf_new(project, "/tmp");
     ASSERT_NOT_NULL(gbuf);
-    int64_t target_id = cbm_gbuf_upsert_node(gbuf, "Function", "handler", "proj.mod.Target.handler",
-                                             "target.go", 1, 1, "{}");
+    int64_t target_id = cbm_node_id_value(cbm_gbuf_upsert_node(
+        gbuf, "Function", "handler", "proj.mod.Target.handler", "target.go", 1, 1, "{}"));
     ASSERT_GT(target_id, 0);
     const cbm_gbuf_node_t *raw_target =
         cbm_pipeline_lsp_target_node(gbuf, project, "mod.Target.handler", false);
@@ -3725,7 +3738,7 @@ TEST(lsp_reference_project_prefixed_duplicate_is_not_ambiguous) {
         cbm_pipeline_lsp_target_node(gbuf, project, "proj.mod.Target.handler", false);
     ASSERT_NOT_NULL(raw_target);
     ASSERT_NOT_NULL(prefixed_target);
-    ASSERT_EQ(raw_target->id, prefixed_target->id);
+    ASSERT_EQ(raw_target->id.v, prefixed_target->id.v);
 
     CBMUsage usage = make_reference_usage("proj.mod.Caller.run", "handler", 1050, 1057);
     CBMResolvedCall raw =
@@ -3746,10 +3759,10 @@ TEST(lsp_reference_project_prefix_spellings_stay_ambiguous_when_both_nodes_exist
     const char *project = "proj";
     cbm_gbuf_t *gbuf = cbm_gbuf_new(project, "/tmp");
     ASSERT_NOT_NULL(gbuf);
-    int64_t raw_id = cbm_gbuf_upsert_node(gbuf, "Function", "handler", "mod.Target.handler",
-                                          "raw.go", 1, 1, "{}");
-    int64_t prefixed_id = cbm_gbuf_upsert_node(
-        gbuf, "Function", "handler", "proj.mod.Target.handler", "prefixed.go", 1, 1, "{}");
+    int64_t raw_id = cbm_node_id_value(cbm_gbuf_upsert_node(
+        gbuf, "Function", "handler", "mod.Target.handler", "raw.go", 1, 1, "{}"));
+    int64_t prefixed_id = cbm_node_id_value(cbm_gbuf_upsert_node(
+        gbuf, "Function", "handler", "proj.mod.Target.handler", "prefixed.go", 1, 1, "{}"));
     ASSERT_GT(raw_id, 0);
     ASSERT_GT(prefixed_id, 0);
     ASSERT(raw_id != prefixed_id);
@@ -3779,8 +3792,8 @@ TEST(lsp_reference_jvm_distinct_packages_do_not_collapse_via_tail_node) {
     const char *project = "proj";
     cbm_gbuf_t *gbuf = cbm_gbuf_new(project, "/tmp");
     ASSERT_NOT_NULL(gbuf);
-    int64_t materialized_id = cbm_gbuf_upsert_node(
-        gbuf, "Method", "handler", "proj.generated.Service.handler", "Service.kt", 1, 1, "{}");
+    int64_t materialized_id = cbm_node_id_value(cbm_gbuf_upsert_node(
+        gbuf, "Method", "handler", "proj.generated.Service.handler", "Service.kt", 1, 1, "{}"));
     ASSERT_GT(materialized_id, 0);
 
     CBMUsage usage = make_reference_usage("proj.consumer.Caller.run", "handler", 1080, 1087);
@@ -3797,8 +3810,8 @@ TEST(lsp_reference_jvm_distinct_packages_do_not_collapse_via_tail_node) {
         cbm_pipeline_lsp_target_node(gbuf, project, pkg1.callee_qn, true);
     const cbm_gbuf_node_t *pkg2_tail =
         cbm_pipeline_lsp_target_node(gbuf, project, pkg2.callee_qn, true);
-    bool same_tail_node = pkg1_tail && pkg2_tail && pkg1_tail->id == materialized_id &&
-                          pkg2_tail->id == materialized_id;
+    bool same_tail_node = pkg1_tail && pkg2_tail && pkg1_tail->id.v == materialized_id &&
+                          pkg2_tail->id.v == materialized_id;
     const CBMResolvedCall *first_hit =
         cbm_pipeline_find_lsp_reference_in_graph(&first, &usage, true, gbuf, project);
     const CBMResolvedCall *second_hit =
@@ -3870,15 +3883,15 @@ TEST(lsp_target_node_supports_long_prefixed_qualified_name) {
 
     cbm_gbuf_t *gbuf = cbm_gbuf_new(project, "/tmp");
     ASSERT_NOT_NULL(gbuf);
-    int64_t id =
-        cbm_gbuf_upsert_node(gbuf, "Function", "target", qualified, "target.c", 1, 1, "{}");
+    int64_t id = cbm_node_id_value(
+        cbm_gbuf_upsert_node(gbuf, "Function", "target", qualified, "target.c", 1, 1, "{}"));
     ASSERT_GT(id, 0);
     const cbm_gbuf_node_t *found = cbm_pipeline_lsp_target_node(gbuf, project, callee, false);
     if (!found) {
         printf("  long target-QN diagnostic: project=%zu callee=%zu combined=%zu\n",
                strlen(project), strlen(callee), strlen(qualified));
     }
-    bool same_node = found && found->id == id;
+    bool same_node = found && found->id.v == id;
     cbm_gbuf_free(gbuf);
     free(qualified);
     free(callee);

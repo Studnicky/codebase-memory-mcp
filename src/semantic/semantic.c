@@ -747,7 +747,19 @@ void cbm_sem_corpus_add_docs_batch(cbm_sem_corpus_t *corpus, char **all_tokens,
         for (int d = 0; d < doc_count; d++) {
             int count = token_counts[d];
             char **tokens = &all_tokens[(ptrdiff_t)d * max_tokens_per_doc];
-            cbm_sem_corpus_add_doc(corpus, (const char **)tokens, count);
+            /* char** -> const char** isn't a safe implicit conversion in C
+             * (it would let a const value be written back through the
+             * non-const outer pointer), so copy pointers into a
+             * const-qualified array instead of casting. */
+            const char **const_tokens = malloc((size_t)count * sizeof(const char *));
+            if (!const_tokens) {
+                continue; /* already on the OOM path; skip this doc */
+            }
+            for (int i = 0; i < count; i++) {
+                const_tokens[i] = tokens[i];
+            }
+            cbm_sem_corpus_add_doc(corpus, const_tokens, count);
+            free(const_tokens);
         }
         return;
     }
@@ -1490,7 +1502,7 @@ const char *cbm_sem_corpus_token_at(const cbm_sem_corpus_t *corpus, int index,
 
 static void free_ht_kv(const char *key, void *value, void *userdata) {
     (void)userdata;
-    free((void *)key);
+    safe_str_free(&key);
     free(value);
 }
 

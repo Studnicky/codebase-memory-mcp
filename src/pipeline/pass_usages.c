@@ -73,7 +73,7 @@ static char *read_file(const char *path, int *out_len) {
         (void)fclose(f);
         return NULL;
     }
-    size_t nread = fread(buf, SKIP_ONE, size, f);
+    size_t nread = fread(buf, SKIP_ONE, (size_t)size, f);
     (void)fclose(f);
     if (nread > (size_t)size) {
         nread = (size_t)size;
@@ -206,7 +206,7 @@ static int resolve_usage_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *res
                 continue;
             }
         }
-        if (!tgt || src->id == tgt->id) {
+        if (!tgt || cbm_node_id_eq(src->id, tgt->id)) {
             continue;
         }
 
@@ -215,8 +215,9 @@ static int resolve_usage_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *res
             {.key = "callee", .kind = CBM_EDGE_PROP_STRING, .text = usage->ref_name},
         };
         const char *edge_type = precise_call_reference ? "CALL_REFERENCE" : "USAGE";
-        cbm_gbuf_insert_edge_props(ctx->gbuf, src->id, tgt->id, edge_type, uprops,
-                                   USAGE_PROP_COUNT);
+        cbm_gbuf_insert_edge_props(ctx->gbuf,
+                                   (cbm_edge_endpoints_t){.source = src->id, .target = tgt->id},
+                                   edge_type, uprops, USAGE_PROP_COUNT);
         resolved++;
     }
     cbm_pipeline_lsp_reference_index_free(&reference_index);
@@ -247,11 +248,13 @@ static int resolve_throw_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *res
         if (res.qualified_name && res.qualified_name[0]) {
             tgt = cbm_gbuf_find_by_qn(ctx->gbuf, res.qualified_name);
         }
-        if (!tgt || src->id == tgt->id) {
+        if (!tgt || cbm_node_id_eq(src->id, tgt->id)) {
             continue;
         }
 
-        cbm_gbuf_insert_edge_props(ctx->gbuf, src->id, tgt->id, edge_type, NULL, 0);
+        cbm_gbuf_insert_edge_props(ctx->gbuf,
+                                   (cbm_edge_endpoints_t){.source = src->id, .target = tgt->id},
+                                   edge_type, NULL, 0);
         resolved++;
     }
     return resolved;
@@ -280,12 +283,14 @@ static int resolve_rw_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *result
         }
 
         const cbm_gbuf_node_t *tgt = cbm_gbuf_find_by_qn(ctx->gbuf, res.qualified_name);
-        if (!tgt || src->id == tgt->id) {
+        if (!tgt || cbm_node_id_eq(src->id, tgt->id)) {
             continue;
         }
 
         const char *edge_type = rw->is_write ? "WRITES" : "READS";
-        cbm_gbuf_insert_edge_props(ctx->gbuf, src->id, tgt->id, edge_type, NULL, 0);
+        cbm_gbuf_insert_edge_props(ctx->gbuf,
+                                   (cbm_edge_endpoints_t){.source = src->id, .target = tgt->id},
+                                   edge_type, NULL, 0);
         resolved++;
     }
     return resolved;

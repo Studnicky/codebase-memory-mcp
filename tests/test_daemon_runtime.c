@@ -6,6 +6,7 @@
  * ordering; frontend bootstrap remains covered at its own layer.
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "test_helpers.h"
 #include "test_daemon_runtime_contract.h"
 
@@ -427,7 +428,13 @@ static pid_t runtime_test_spawn_blocked_executable(const char *path, int *releas
     if (input[0] != STDIN_FILENO) {
         (void)posix_spawn_file_actions_addclose(&actions, input[0]);
     }
-    char *const child_argv[] = {(char *)path, NULL};
+    /* posix_spawn's argv parameter is char *const[] by POSIX convention
+     * (mirroring main()'s argv) even though it never writes through it; the
+     * pointer is unwrapped via memcpy rather than a qualifier-discarding
+     * cast, matching the production teardown pattern in pipeline.c. */
+    char *path_arg;
+    memcpy(&path_arg, &path, sizeof(path_arg));
+    char *const child_argv[] = {path_arg, NULL};
     pid_t child = -1;
     if (posix_spawn(&child, path, &actions, NULL, child_argv, environ) != 0) {
         child = -1;

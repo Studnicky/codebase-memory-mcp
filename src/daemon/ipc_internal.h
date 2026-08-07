@@ -89,11 +89,14 @@ typedef enum {
     CBM_DAEMON_IPC_POSIX_PUBLICATION_MARKER_RECORD_LINKED = 9,
 } cbm_daemon_ipc_posix_publication_stage_t;
 
+/* The hook only reads its context, so it takes it as const. A non-const
+ * context would force every caller to strip the qualifier off a read-only
+ * fixture just to register the hook. */
 typedef void (*cbm_daemon_ipc_posix_publication_hook_fn)(
-    cbm_daemon_ipc_posix_publication_stage_t stage, void *context);
+    cbm_daemon_ipc_posix_publication_stage_t stage, const void *context);
 
 void cbm_daemon_ipc_posix_publication_hook_set_for_test(
-    cbm_daemon_ipc_posix_publication_hook_fn hook, void *context);
+    cbm_daemon_ipc_posix_publication_hook_fn hook, const void *context);
 void cbm_daemon_ipc_windows_legacy_guard_release_failures_set_for_test(unsigned int count);
 
 /* Deterministic-interleaving seam: fires on the Windows startup path once the

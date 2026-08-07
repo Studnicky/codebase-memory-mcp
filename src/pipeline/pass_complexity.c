@@ -75,8 +75,11 @@ static bool json_get_bool(const char *json, const char *key) {
     return *p == 't';
 }
 
-/* Append transitive_loop_depth + recursive to a node's properties JSON object. */
-static void append_complexity_props(cbm_gbuf_node_t *node, int tld, bool recursive) {
+/* Append transitive_loop_depth + recursive to a node's properties JSON object.
+ * The buffer owns node storage, so the rewritten object goes back through
+ * cbm_gbuf_set_node_properties_json rather than being assigned into the node. */
+static void append_complexity_props(cbm_gbuf_t *gb, const cbm_gbuf_node_t *node, int tld,
+                                    bool recursive) {
     const char *old = node->properties_json ? node->properties_json : "{}";
     size_t olen = strlen(old);
     if (olen < 2 || old[olen - 1] != '}') {
@@ -95,8 +98,8 @@ static void append_complexity_props(cbm_gbuf_node_t *node, int tld, bool recursi
         free(neu);
         return;
     }
-    free(node->properties_json);
-    node->properties_json = neu;
+    cbm_gbuf_set_node_properties_json(gb, node->id, neu);
+    free(neu);
 }
 
 /* Memoized DFS: tld(id) = loop_depth(id) + max over CALLS-callees of tld(callee).
@@ -120,9 +123,9 @@ static int tld_dfs(const cbm_gbuf_t *gb, int64_t id, const int *loop_depth, int 
     int best = 0;
     const cbm_gbuf_edge_t **edges = NULL;
     int ne = 0;
-    cbm_gbuf_find_edges_by_source_type(gb, id, "CALLS", &edges, &ne);
+    cbm_gbuf_find_edges_by_source_type(gb, cbm_node_id(id), "CALLS", &edges, &ne);
     for (int i = 0; i < ne; i++) {
-        int64_t c = edges[i]->target_id;
+        int64_t c = cbm_node_id_value(edges[i]->target_id);
         if (c == id) {
             recursive[id] = true; /* direct self-recursion */
             continue;
@@ -142,7 +145,7 @@ static int tld_dfs(const cbm_gbuf_t *gb, int64_t id, const int *loop_depth, int 
  * extraction) feeds the final recursive flag; tld_dfs additionally ORs in
  * mutual recursion discovered as a call-graph cycle. */
 static void seed_loop_depths(const cbm_gbuf_t *gb, const char *label, int *loop_depth,
-                             bool *recursive, cbm_gbuf_node_t **nptr, int64_t maxid) {
+                             bool *recursive, const cbm_gbuf_node_t **nptr, int64_t maxid) {
     const cbm_gbuf_node_t **nodes = NULL;
     int count = 0;
     if (cbm_gbuf_find_by_label(gb, label, &nodes, &count) != 0) {
@@ -150,10 +153,11 @@ static void seed_loop_depths(const cbm_gbuf_t *gb, const char *label, int *loop_
     }
     for (int i = 0; i < count; i++) {
         const cbm_gbuf_node_t *n = nodes[i];
-        if (n->id >= 1 && n->id <= maxid) {
-            loop_depth[n->id] = json_get_int(n->properties_json, "loop_depth", 0);
-            recursive[n->id] = json_get_bool(n->properties_json, "self_recursive");
-            nptr[n->id] = (cbm_gbuf_node_t *)n;
+        int64_t n_id_v = cbm_node_id_value(n->id);
+        if (n_id_v >= 1 && n_id_v <= maxid) {
+            loop_depth[n_id_v] = json_get_int(n->properties_json, "loop_depth", 0);
+            recursive[n_id_v] = json_get_bool(n->properties_json, "self_recursive");
+            nptr[n_id_v] = n;
         }
     }
 }
@@ -172,7 +176,7 @@ void cbm_pipeline_pass_complexity(cbm_pipeline_ctx_t *ctx) {
     int *tld = calloc(sz, sizeof(int));
     char *state = calloc(sz, sizeof(char));
     bool *recursive = calloc(sz, sizeof(bool));
-    cbm_gbuf_node_t **nptr = calloc(sz, sizeof(cbm_gbuf_node_t *));
+    const cbm_gbuf_node_t **nptr = calloc(sz, sizeof(const cbm_gbuf_node_t *));
     if (!loop_depth || !tld || !state || !recursive || !nptr) {
         free(loop_depth);
         free(tld);
@@ -193,7 +197,7 @@ void cbm_pipeline_pass_complexity(cbm_pipeline_ctx_t *ctx) {
         if (state[id] != 2) {
             tld_dfs(gb, id, loop_depth, tld, state, recursive, maxid, 0);
         }
-        append_complexity_props(nptr[id], tld[id], recursive[id]);
+        append_complexity_props(gb, nptr[id], tld[id], recursive[id]);
         updated++;
     }
 

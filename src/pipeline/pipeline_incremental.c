@@ -128,6 +128,24 @@ static const char *incr_mode_name(int mode) {
     }
 }
 
+/* Free a const-qualified pointer this function owns. Captures the pointer's
+ * bytes via memcpy into a local unqualified void* instead of casting away
+ * const, matching safe_str_free's pattern (foundation/platform.h). */
+static void free_owned(const void *p) {
+    void *owned;
+    memcpy(&owned, &p, sizeof(owned));
+    free(owned);
+}
+
+/* Copy a const-qualified pointer's bytes into a plain void* for storage in a
+ * generic container (e.g. cbm_ht_set's value parameter). The container never
+ * writes through the pointer; this is not an ownership transfer. */
+static void *nonowning_ptr(const void *p) {
+    void *v;
+    memcpy(&v, &p, sizeof(v));
+    return v;
+}
+
 /* ── Exact semantic manifest ───────────────────────────────────── */
 
 typedef struct {
@@ -153,9 +171,9 @@ void cbm_pipeline_free_semantic_manifest(cbm_file_hash_t *manifest, int count) {
         return;
     }
     for (int i = 0; i < count; i++) {
-        free((void *)manifest[i].project);
-        free((void *)manifest[i].rel_path);
-        free((void *)manifest[i].sha256);
+        free_owned(manifest[i].project);
+        free_owned(manifest[i].rel_path);
+        free_owned(manifest[i].sha256);
     }
     free(manifest);
 }
@@ -595,7 +613,7 @@ bool cbm_pipeline_semantic_manifests_equal(const cbm_file_hash_t *left, int left
             break;
         }
         uint32_t before = cbm_ht_count(by_path);
-        cbm_ht_set(by_path, right[i].rel_path, (void *)right[i].sha256);
+        cbm_ht_set(by_path, right[i].rel_path, nonowning_ptr(right[i].sha256));
         equal = cbm_ht_count(by_path) == before + 1U;
     }
     for (int i = 0; equal && i < left_count; i++) {
@@ -876,8 +894,8 @@ static void free_mode_skipped(cbm_file_hash_t *ms, int count) {
         return;
     }
     for (int i = 0; i < count; i++) {
-        free((void *)ms[i].rel_path);
-        free((void *)ms[i].sha256);
+        free_owned(ms[i].rel_path);
+        free_owned(ms[i].sha256);
     }
     free(ms);
 }
@@ -1058,7 +1076,9 @@ static int incr_restore_inbound_edges(cbm_gbuf_t *gbuf, cbm_edge_capture_t *cap)
         const cbm_gbuf_node_t *src = cbm_gbuf_find_by_qn(gbuf, s->source_qn);
         const cbm_gbuf_node_t *tgt = cbm_gbuf_find_by_qn(gbuf, s->target_qn);
         if (src && tgt) {
-            cbm_gbuf_insert_edge_props(gbuf, src->id, tgt->id, s->type, s->props, s->prop_count);
+            cbm_gbuf_insert_edge_props(gbuf,
+                                       (cbm_edge_endpoints_t){.source = src->id, .target = tgt->id},
+                                       s->type, s->props, s->prop_count);
             restored++;
         }
     }
@@ -1721,7 +1741,7 @@ static int closure_try_plan(cbm_pipeline_t *p, cbm_store_t *store, const char *p
     CBMHashTable *files_by_path = cbm_ht_create((size_t)file_count * PAIR_LEN + CBM_SZ_64);
     CBMHashTable *stored_by_path = cbm_ht_create((size_t)stored_count * PAIR_LEN + CBM_SZ_64);
     CBMHashTable *closure_set = cbm_ht_create(CBM_SZ_64);
-    char **changed_paths = NULL;
+    const char **changed_paths = NULL;
     char **dependents = NULL;
     int dependent_count = 0;
     cbm_lsp_surface_row_t *probe_rows = NULL;
@@ -1738,10 +1758,10 @@ static int closure_try_plan(cbm_pipeline_t *p, cbm_store_t *store, const char *p
         cbm_ht_set(files_by_path, files[i].rel_path, &files[i]);
     }
     for (int i = 0; i < fresh_count; i++) {
-        cbm_ht_set(fresh_by_path, fresh[i].rel_path, (void *)&fresh[i]);
+        cbm_ht_set(fresh_by_path, fresh[i].rel_path, nonowning_ptr(&fresh[i]));
     }
     for (int i = 0; i < stored_count; i++) {
-        cbm_ht_set(stored_by_path, stored[i].rel_path, (void *)&stored[i]);
+        cbm_ht_set(stored_by_path, stored[i].rel_path, nonowning_ptr(&stored[i]));
     }
 
     /* Delta classification straight from the semantic manifests (content
@@ -1749,7 +1769,8 @@ static int closure_try_plan(cbm_pipeline_t *p, cbm_store_t *store, const char *p
      * their effect on resolution is not file-local, so any delta there
      * declines. New files decline: yesterday's graph cannot know who would
      * reference a file that did not exist. */
-    changed_paths = (char **)calloc((size_t)fresh_count + (size_t)stored_count, sizeof(char *));
+    changed_paths =
+        (const char **)calloc((size_t)fresh_count + (size_t)stored_count, sizeof(char *));
     if (!changed_paths) {
         decline = "alloc";
         goto done;
@@ -1773,7 +1794,7 @@ static int closure_try_plan(cbm_pipeline_t *p, cbm_store_t *store, const char *p
                 decline = "new_file";
                 goto done;
             }
-            changed_paths[n_changed++] = (char *)fresh[i].rel_path;
+            changed_paths[n_changed++] = fresh[i].rel_path;
             continue;
         }
         if (closure_is_alias_config(plan_aliases, fresh[i].rel_path)) {
@@ -1799,7 +1820,7 @@ static int closure_try_plan(cbm_pipeline_t *p, cbm_store_t *store, const char *p
             }
             /* Gone from the manifest: deleted or newly ignored. Its nodes
              * will be purged; files with edges into it must re-resolve. */
-            changed_paths[n_changed + n_deleted] = (char *)stored[i].rel_path;
+            changed_paths[n_changed + n_deleted] = stored[i].rel_path;
             n_deleted++;
         }
     }
@@ -1906,7 +1927,7 @@ static int closure_try_plan(cbm_pipeline_t *p, cbm_store_t *store, const char *p
      * discovery (a dependent outside it cannot be re-resolved). */
     for (int i = 0; i < n_changed; i++) {
         if (!cbm_ht_get(closure_set, changed_paths[i])) {
-            cbm_ht_set(closure_set, changed_paths[i], changed_paths[i]);
+            cbm_ht_set(closure_set, changed_paths[i], nonowning_ptr(changed_paths[i]));
         }
     }
     for (int i = 0; i < dependent_count; i++) {
@@ -2218,12 +2239,12 @@ static int run_closure_delta(cbm_pipeline_t *p, const char *db_path, const char 
     }
     if (ctx.return_type_table) {
         for (int i = 0; i < ctx.return_type_table->count; i++) {
-            free((void *)ctx.return_type_table->entries[i].return_type);
+            free_owned(ctx.return_type_table->entries[i].return_type);
         }
-        free((void *)ctx.return_type_table);
+        free_owned(ctx.return_type_table);
     }
     if (ctx.macro_table) {
-        free((void *)ctx.macro_table);
+        free_owned(ctx.macro_table);
     }
     cbm_pkgmap_free(cbm_pipeline_get_pkgmap());
     cbm_pipeline_set_pkgmap(NULL);
@@ -2766,13 +2787,13 @@ int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_fil
     /* Free ObjectScript tables built by pass_calls during run_extract_resolve. */
     if (ctx.return_type_table) {
         for (int i = 0; i < ctx.return_type_table->count; i++) {
-            free((void *)ctx.return_type_table->entries[i].return_type);
+            free_owned(ctx.return_type_table->entries[i].return_type);
         }
-        free((void *)ctx.return_type_table);
+        free_owned(ctx.return_type_table);
         ctx.return_type_table = NULL;
     }
     if (ctx.macro_table) {
-        free((void *)ctx.macro_table);
+        free_owned(ctx.macro_table);
         ctx.macro_table = NULL;
     }
 

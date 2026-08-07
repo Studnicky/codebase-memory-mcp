@@ -16,10 +16,11 @@
 #include "../src/foundation/log.h"
 #include "../src/foundation/platform.h"
 #include "../src/cli/cli.h"
-#include "../src/daemon/host_internal.h"
+#include "../src/host/host_internal.h"
 #include "../src/git/git_context.h" /* #798 follow-up: live-socket git-resolve repro */
 #include "../src/ui/http_server.h"
 #include "test_framework.h"
+#include "suites.h"
 #include "test_helpers.h"
 #include "ui/httpd.h"
 #include "ui/http_server.h"
@@ -443,8 +444,7 @@ TEST(httpd_resolves_bare_binary_path_from_path) {
     cbm_setenv("PATH", td, 1);
 
     char resolved[1024];
-    ASSERT_TRUE(
-        cbm_http_server_resolve_binary_path("codebase-memory-mcp", resolved, sizeof(resolved)));
+    ASSERT_TRUE(cbm_resolve_executable_path("codebase-memory-mcp", resolved, sizeof(resolved)));
     ASSERT_STR_EQ(resolved, exe);
 
     if (old_path) {

@@ -6,6 +6,7 @@
  * domain sockets on POSIX and current-user named pipes on Windows.
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "test_helpers.h"
 
 #include "daemon/daemon.h"
@@ -2824,7 +2825,7 @@ static bool ipc_test_record_temp_path(char out[TEST_PATH_CAP], const char *runti
 #endif
 
 static void ipc_test_publication_crash_hook(cbm_daemon_ipc_posix_publication_stage_t stage,
-                                            void *opaque) {
+                                            const void *opaque) {
     const cbm_daemon_ipc_posix_publication_stage_t *target = opaque;
     if (target && stage == *target) {
         _exit(40 + (int)stage);
@@ -3290,7 +3291,7 @@ TEST(daemon_ipc_posix_record_publication_windows_recover_from_crash) {
                         ipc_test_socket_pending_path(pending_path, socket_path);
         if (paths_ok) {
             cbm_daemon_ipc_posix_publication_hook_set_for_test(ipc_test_publication_crash_hook,
-                                                               (void *)&cases[index].stage);
+                                                               &cases[index].stage);
             child = fork();
         }
         if (child == 0) {

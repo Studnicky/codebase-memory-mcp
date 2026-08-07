@@ -988,14 +988,14 @@ static void tf_extract_second_quoted(const char *trimmed, int consumed, char *ou
 }
 
 /* Try to parse a simple "keyword ident" block (variable, output, provider). */
-static bool tf_try_simple_block(const char *trimmed, const char *keyword, char *names, int name_sz,
+static bool tf_try_simple_block(const char *trimmed, const char *keyword, char *names, size_t name_sz,
                                 int *count, int max_count) {
     char ident[CBM_SZ_128];
     int consumed = tf_extract_ident(trimmed, keyword, ident, sizeof(ident));
     if (consumed <= 0 || *count >= max_count) {
         return false;
     }
-    snprintf(names + ((size_t)(*count) * (size_t)name_sz), name_sz, "%s", ident);
+    snprintf(names + ((size_t)(*count) * name_sz), name_sz, "%s", ident);
     (*count)++;
     return true;
 }
@@ -1045,13 +1045,13 @@ static bool tf_detect_block_header(const char *trimmed, cbm_terraform_result_t *
     }
 
     /* output "name" */
-    if (tf_try_simple_block(trimmed, "output", out->outputs[0], (int)sizeof(out->outputs[0]),
+    if (tf_try_simple_block(trimmed, "output", out->outputs[0], sizeof(out->outputs[0]),
                             &out->output_count, CBM_SZ_32)) {
         return true;
     }
 
     /* provider "name" */
-    if (tf_try_simple_block(trimmed, "provider", out->providers[0], (int)sizeof(out->providers[0]),
+    if (tf_try_simple_block(trimmed, "provider", out->providers[0], sizeof(out->providers[0]),
                             &out->provider_count, IS_MAX_STAGES)) {
         return true;
     }

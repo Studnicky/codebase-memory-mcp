@@ -18,6 +18,7 @@
 #ifndef CBM_DYN_ARRAY_H
 #define CBM_DYN_ARRAY_H
 
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -29,10 +30,18 @@
         int cap;         \
     }
 
-/* Push an element. Grows by 2x when full. */
+/* Push an element. Grows by 2x when full.
+ *
+ * cap is int, so the doubling is signed arithmetic and overflows before the
+ * (size_t) on the next line can widen it — the cast cannot rescue a value that
+ * is already undefined. Bounding cap first is what makes the widening
+ * meaningful. At the ceiling the push is dropped, the same outcome this macro
+ * already produces when realloc fails. */
 #define cbm_da_push(da, item)                                                           \
     do {                                                                                \
         if ((da)->count >= (da)->cap) {                                                 \
+            if ((da)->cap > INT_MAX / 2)                                                \
+                break;                                                                  \
             int _new_cap = (da)->cap ? (da)->cap * 2 : 8;                               \
             void *_new = realloc((da)->items, (size_t)_new_cap * sizeof(*(da)->items)); \
             if (!_new)                                                                  \
@@ -43,9 +52,15 @@
         (da)->items[(da)->count++] = (item);                                            \
     } while (0)
 
-/* Push an element with a pointer return (for in-place init). */
+/* Push an element with a pointer return (for in-place init).
+ *
+ * Returning the slot leaves this macro no way to report failure, so a failed
+ * realloc yields a pointer into NULL and the old buffer leaks. Only the test
+ * suite uses it; production code uses cbm_da_push, which can drop the push.
+ * Prefer cbm_da_push. The cap bound below at least keeps the growth itself
+ * defined. */
 #define cbm_da_push_ptr(da)                                                                        \
-    (((da)->count >= (da)->cap                                                                     \
+    (((da)->count >= (da)->cap && (da)->cap <= INT_MAX / 2                                          \
           ? ((void)((da)->cap = (da)->cap ? (da)->cap * 2 : 8),                                    \
              (void)((da)->items = realloc((da)->items, (size_t)(da)->cap * sizeof(*(da)->items)))) \
           : (void)0),                                                                              \

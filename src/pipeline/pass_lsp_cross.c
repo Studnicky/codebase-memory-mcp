@@ -32,7 +32,9 @@
 #include "foundation/hash_table.h"
 #include "foundation/log.h"
 #include "foundation/compat_fs.h"
+#include "foundation/platform.h"
 
+#include <limits.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -632,12 +634,12 @@ int cbm_pxc_build_import_map(const cbm_gbuf_t *gbuf, const char *project_name, c
 void cbm_pxc_free_import_map(const char **keys, const char **vals, int count) {
     if (keys) {
         for (int i = 0; i < count; i++)
-            free((void *)keys[i]);
+            safe_str_free(&keys[i]);
         free((void *)keys);
     }
     if (vals) {
         for (int i = 0; i < count; i++)
-            free((void *)vals[i]);
+            safe_str_free(&vals[i]);
         free((void *)vals);
     }
 }
@@ -843,7 +845,7 @@ static void pxc_append_synthetic_calls(CBMArena *dst_arena, CBMCallArray *dst_ca
  * where in-file resolution needs no workspace metadata). */
 static _Thread_local const CBMCargoManifest *g_pxc_rust_manifest = NULL;
 
-void cbm_pxc_set_rust_manifest(const CBMCargoManifest *m) {
+static void cbm_pxc_set_rust_manifest(const CBMCargoManifest *m) {
     g_pxc_rust_manifest = m;
 }
 
@@ -1358,6 +1360,11 @@ static void pxc_module_entry_add_index(pxc_module_entry_t *e, int index) {
         return;
     }
     if (e->count >= e->cap) {
+        /* Doubling an int overflows before the cast can widen it, so bound it
+         * first and take the same path as a failed allocation. */
+        if (e->cap > INT_MAX / 2) {
+            return;
+        }
         int new_cap = e->cap * 2;
         int *new_indices = (int *)realloc(e->indices, (size_t)new_cap * sizeof(*new_indices));
         if (!new_indices) {

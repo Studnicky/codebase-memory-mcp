@@ -62,6 +62,13 @@ cbm_gitignore_t *cbm_gitignore_load(const char *path);
  * Caller must call cbm_gitignore_free(). */
 cbm_gitignore_t *cbm_gitignore_parse(const char *content);
 
+/* Match a relative path against every gitignore pattern, returning the last
+ * pattern's verdict: positive for a match, negative for a negated (re-included)
+ * match, 0 for no match. rel_path should use '/' separators; is_dir indicates
+ * if path is a directory. cbm_gitignore_matches() is the boolean convenience
+ * wrapper for callers that only need "excluded or not". */
+int cbm_gitignore_match_result(const cbm_gitignore_t *gi, const char *rel_path, bool is_dir);
+
 /* Check if a relative path matches any gitignore pattern.
  * rel_path should use '/' separators. is_dir indicates if path is a directory. */
 bool cbm_gitignore_matches(const cbm_gitignore_t *gi, const char *rel_path, bool is_dir);

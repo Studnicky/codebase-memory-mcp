@@ -869,8 +869,18 @@ static bool bootstrap_production_spawn(void *context,
      * tiny detached waiter to prevent a crashed daemon from becoming a
      * long-lived zombie owned by the first frontend. */
     pid_t daemon = 0;
+    /* posix_spawn takes char *const argv[] for historical reasons; POSIX
+     * guarantees it does not modify the strings. spec->argv holds string
+     * literals and must stay const, so copy the pointer values into a mutable
+     * vector for the call. Each element is read from &spec->argv[i] — the
+     * address of that element — not from &spec->argv, which is the address of
+     * the array and would copy argv[0]'s bytes in place of the array. */
+    char *spawn_argv[CBM_DAEMON_BOOTSTRAP_LAUNCH_ARGC + 1U];
+    for (size_t i = 0; i < sizeof(spawn_argv) / sizeof(spawn_argv[0]); i++) {
+        memcpy(&spawn_argv[i], &spec->argv[i], sizeof(spawn_argv[i]));
+    }
     int spawn_status = posix_spawn(&daemon, spec->executable_path, &actions, &attributes,
-                                   (char *const *)spec->argv, environ);
+                                   spawn_argv, environ);
     (void)posix_spawnattr_destroy(&attributes);
     (void)posix_spawn_file_actions_destroy(&actions);
     if (production) {

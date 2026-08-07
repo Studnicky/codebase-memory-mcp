@@ -37,6 +37,7 @@
  */
 
 #include "test_framework.h"
+#include "suites.h"
 #include "cbm.h"
 #include "lsp/java_lsp.h"
 
@@ -2865,9 +2866,12 @@ TEST(cov_edge_unicode_string) {
 }
 TEST(cov_edge_huge_class_no_crash) {
     char buf[8192];
-    int len = snprintf(buf, sizeof(buf), "public class Main {\n");
-    for (int i = 0; i < 50 && len < (int)sizeof(buf) - 200; i++) {
-        len += snprintf(buf + len, sizeof(buf) - len,
+    /* Buffer offset as size_t: the format strings here are fixed ASCII
+     * text, so snprintf never returns negative (encoding error), and the
+     * loop bound below keeps `len` well clear of sizeof(buf). */
+    size_t len = (size_t)snprintf(buf, sizeof(buf), "public class Main {\n");
+    for (int i = 0; i < 50 && len < sizeof(buf) - 200; i++) {
+        len += (size_t)snprintf(buf + len, sizeof(buf) - len,
                          "  public int m%d(int x) { return x + %d; }\n", i, i);
     }
     snprintf(buf + len, sizeof(buf) - len, "}\n");

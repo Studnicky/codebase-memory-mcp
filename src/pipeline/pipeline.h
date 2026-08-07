@@ -268,8 +268,12 @@ bool cbm_tsjs_suppress_weak_method_match(bool is_tsjs, bool is_method, const cha
 const char *cbm_registry_label_of(const cbm_registry_t *r, const char *qn);
 
 /* Find all QNs with a given simple name. Sets *out and *count.
- * Caller does NOT free the array (owned by registry). */
-int cbm_registry_find_by_name(const cbm_registry_t *r, const char *name, const char ***out,
+ * Caller does NOT free the array (owned by registry).
+ *
+ * `char *const *` is a read-only view of the registry's own `char **` storage.
+ * `const char **` would be a different type that `char **` cannot convert to
+ * without a cast, which is why this one is spelled the way it is. */
+int cbm_registry_find_by_name(const cbm_registry_t *r, const char *name, char *const **out,
                               int *count);
 
 /* Return total number of entries. */

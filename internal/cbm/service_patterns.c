@@ -761,7 +761,12 @@ static inline cbm_svc_kind_t svc_ptr_to_enum(void *p) {
 static void svc_cache_free_key(const char *key, void *val, void *ud) {
     (void)val;
     (void)ud;
-    free((char *)key);
+    /* This callback is the key's owner and sole release point; memcpy the
+     * pointer value rather than cast away const, matching safe_str_free's
+     * convention in foundation/platform.h. */
+    void *owned;
+    memcpy(&owned, &key, sizeof(owned));
+    free(owned);
 }
 
 void cbm_service_pattern_cache_begin(void) {

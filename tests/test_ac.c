@@ -5,6 +5,7 @@
  * against the existing ac.c implementation.
  */
 #include "test_framework.h"
+#include "suites.h"
 #include <stdint.h>
 #include <string.h>
 
@@ -234,7 +235,8 @@ TEST(ac_scan_lz4_bitmask) {
                          "    _ = resp\n    _ = err\n}\n";
     int src_len = (int)strlen(source);
     int bound = cbm_lz4_bound(src_len);
-    char *compressed = malloc(bound);
+    ASSERT_GT(bound, 0);
+    char *compressed = malloc((size_t)bound);
     ASSERT_NOT_NULL(compressed);
     int comp_len = cbm_lz4_compress_hc(source, src_len, compressed, bound);
     ASSERT_GT(comp_len, 0);
@@ -246,7 +248,8 @@ TEST(ac_scan_lz4_bitmask) {
     const char *no_http = "package main\nfunc main() { println(42) }\n";
     int nh_len = (int)strlen(no_http);
     int bound2 = cbm_lz4_bound(nh_len);
-    char *comp2 = malloc(bound2);
+    ASSERT_GT(bound2, 0);
+    char *comp2 = malloc((size_t)bound2);
     int comp2_len = cbm_lz4_compress_hc(no_http, nh_len, comp2, bound2);
     mask = cbm_ac_scan_lz4_bitmask(ac, comp2, comp2_len, nh_len);
     ASSERT_EQ(mask, 0ULL);
@@ -273,7 +276,8 @@ TEST(ac_scan_lz4_batch) {
     for (int i = 0; i < 3; i++) {
         int slen = (int)strlen(files[i]);
         int bound = cbm_lz4_bound(slen);
-        comp_bufs[i] = malloc(bound);
+        ASSERT_GT(bound, 0);
+        comp_bufs[i] = malloc((size_t)bound);
         int clen = cbm_lz4_compress_hc(files[i], slen, comp_bufs[i], bound);
         entries[i].data = comp_bufs[i];
         entries[i].compressed_len = clen;
@@ -327,7 +331,7 @@ TEST(ac_large_pattern_set) {
         "producer.send",   "producer.Send",
     };
     int count = sizeof(patterns) / sizeof(patterns[0]);
-    int *lengths = malloc(count * sizeof(int));
+    int *lengths = malloc((size_t)count * sizeof(int)); /* count > 0, fixed array size */
     for (int i = 0; i < count; i++)
         lengths[i] = (int)strlen(patterns[i]);
 

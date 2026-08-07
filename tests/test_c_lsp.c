@@ -19,6 +19,7 @@
  *   - DLL patterns, SFINAE, placement new
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "cbm.h"
 #include "lsp/c_lsp.h"
 #include "lsp/py_lsp.h"
@@ -7176,18 +7177,22 @@ TEST(clsp_nocrash_mixedcand_cpp_cast) {
 TEST(clsp_nocrash_extremely_large_function) {
     /* Dynamically build source with 50 local vars */
     char src[4096];
-    int off = 0;
-    off += snprintf(src + off, sizeof(src) - off, "struct W { void m() {} };\n");
-    off += snprintf(src + off, sizeof(src) - off, "void test() {\n");
+    /* Buffer offset as size_t: the format strings here are fixed ASCII
+     * text, so snprintf never returns negative (encoding error). The
+     * per-var loop still clamps against truncation since 50 vars can
+     * approach sizeof(src). */
+    size_t off = 0;
+    off += (size_t)snprintf(src + off, sizeof(src) - off, "struct W { void m() {} };\n");
+    off += (size_t)snprintf(src + off, sizeof(src) - off, "void test() {\n");
     for (int i = 0; i < 50; i++) {
-        off += snprintf(src + off, sizeof(src) - (size_t)off, "    W w%d;\n", i);
-        if (off >= (int)sizeof(src)) {
-            off = (int)sizeof(src) - 1;
+        off += (size_t)snprintf(src + off, sizeof(src) - off, "    W w%d;\n", i);
+        if (off >= sizeof(src)) {
+            off = sizeof(src) - 1;
         }
     }
-    off += snprintf(src + off, sizeof(src) - off, "    W w0;\n");
-    off += snprintf(src + off, sizeof(src) - off, "    w0.m();\n");
-    off += snprintf(src + off, sizeof(src) - off, "}\n");
+    off += (size_t)snprintf(src + off, sizeof(src) - off, "    W w0;\n");
+    off += (size_t)snprintf(src + off, sizeof(src) - off, "    w0.m();\n");
+    off += (size_t)snprintf(src + off, sizeof(src) - off, "}\n");
     CBMFileResult *r = extract_cpp(src);
     ASSERT_NOT_NULL(r);
     ASSERT_GTE(find_resolved(r, "test", ".m"), 0);

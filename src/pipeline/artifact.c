@@ -10,9 +10,16 @@ enum {
     ART_DIR_PERMS = 0755,
     ART_ZSTD_FAST = 3,
     ART_ZSTD_BEST = 9,
-    ART_RATIO_SCALE = 10, /* multiply ratio by 10 for integer logging */
-    ART_NUL = 1,          /* NUL terminator byte */
+    ART_NUL = 1, /* NUL terminator byte */
 };
+
+/*
+ * Multiplies a double compression ratio before truncating to int for
+ * integer-only logging. Declared `double` rather than as an enumerator
+ * alongside the integral constants above, since its only use is double
+ * arithmetic.
+ */
+static const double ART_RATIO_SCALE = 10.0;
 #define ART_BYTES_PER_MB ((size_t)1024 * 1024)
 
 /* Generous ceiling on an imported artifact's decompressed size. Real indexes

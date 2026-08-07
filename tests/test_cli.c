@@ -12,6 +12,7 @@
 #include "../src/foundation/compat.h"
 #include "../src/foundation/compat_thread.h"
 #include "test_framework.h"
+#include "suites.h"
 #include "test_helpers.h"
 #include <cli/agent_profiles.h>
 #include <cli/activation_transaction.h>
@@ -20,6 +21,7 @@
 #include <daemon/bootstrap.h>
 #include <daemon/runtime.h>
 #include <daemon/version_cohort.h>
+#include <foundation/build_version.h>
 #include <foundation/constants.h>
 #include <foundation/platform.h>
 #include <mcp/mcp.h>
@@ -46,12 +48,8 @@
 /* Internal prompt seam used to restore process-global state after command
  * tests that exercise --yes. */
 void cbm_set_auto_answer_for_test(int value);
-int cbm_cli_sha256_file(const char *path, char *out, size_t out_size);
-int cbm_cli_checksum_manifest_digest(const char *manifest_path, const char *archive_name, char *out,
-                                     size_t out_size);
 void cbm_cli_set_activation_cleanup_failure_for_test(bool enabled);
 int cbm_cli_activation_abort_cleanup_probe_for_test(void);
-bool cbm_cli_activation_test_ops_installed(void);
 
 TEST(cli_progress_visibility_policy) {
     ASSERT_TRUE(cbm_cli_progress_enabled(true, false));
@@ -1813,10 +1811,10 @@ TEST(cli_compare_versions) {
  * ═══════════════════════════════════════════════════════════════════ */
 
 TEST(cli_version_get_set) {
-    cbm_cli_set_version("1.2.3");
-    ASSERT_STR_EQ(cbm_cli_get_version(), "1.2.3");
-    cbm_cli_set_version("dev");
-    ASSERT_STR_EQ(cbm_cli_get_version(), "dev");
+    cbm_build_version_set("1.2.3");
+    ASSERT_STR_EQ(cbm_build_version_get(), "1.2.3");
+    cbm_build_version_set("dev");
+    ASSERT_STR_EQ(cbm_build_version_get(), "dev");
     PASS();
 }
 
@@ -3099,7 +3097,7 @@ TEST(cli_openclaw_profile_uses_profile_state_and_default_workspace) {
     cbm_setenv("PATH", tmpdir, 1);
     cbm_setenv("OPENCLAW_PROFILE", "work", 1);
 
-    cbm_detected_agents_t agents = cbm_detect_agents(tmpdir);
+    cbm_detected_agents_t agents = cbm_detect_agents(tmpdir, CBM_SCAN_SYNTHETIC);
     char *plan = cbm_build_install_plan_json(tmpdir, "/usr/local/bin/codebase-memory-mcp");
     bool correct = agents.openclaw && plan && strstr(plan, "/.openclaw-work/openclaw.json") &&
                    strstr(plan, "/.openclaw/workspace-work/AGENTS.md") &&
@@ -3614,7 +3612,7 @@ TEST(cli_extract_binary_from_targz) {
     unsigned char *extracted = cbm_extract_binary_from_targz(gz, gz_len, &out_len);
     ASSERT_NOT_NULL(extracted);
     ASSERT_EQ(out_len, (int)strlen(content));
-    ASSERT_MEM_EQ(extracted, content, out_len);
+    ASSERT_MEM_EQ(extracted, content, (size_t)out_len);
 
     free(extracted);
     free(gz);
@@ -4150,7 +4148,7 @@ TEST(cli_detect_agents_finds_claude) {
     char *saved_ccd_copy = saved_ccd ? strdup(saved_ccd) : NULL;
     cbm_unsetenv("CLAUDE_CONFIG_DIR");
 
-    cbm_detected_agents_t agents = cbm_detect_agents(tmpdir);
+    cbm_detected_agents_t agents = cbm_detect_agents(tmpdir, CBM_SCAN_SYNTHETIC);
     ASSERT_TRUE(agents.claude_code);
 
     if (saved_ccd_copy) {
@@ -4178,7 +4176,7 @@ TEST(cli_detect_agents_finds_claude_via_env) {
     cbm_setenv("CLAUDE_CONFIG_DIR", ccd, 1);
 
     /* home_dir has no .claude, but detection must still find Claude via the env var. */
-    cbm_detected_agents_t agents = cbm_detect_agents(tmpdir);
+    cbm_detected_agents_t agents = cbm_detect_agents(tmpdir, CBM_SCAN_SYNTHETIC);
     ASSERT_TRUE(agents.claude_code);
 
     if (saved_ccd_copy) {
@@ -4202,7 +4200,7 @@ TEST(cli_detect_agents_finds_codex) {
     snprintf(dir, sizeof(dir), "%s/.codex", tmpdir);
     test_mkdirp(dir);
 
-    cbm_detected_agents_t agents = cbm_detect_agents(tmpdir);
+    cbm_detected_agents_t agents = cbm_detect_agents(tmpdir, CBM_SCAN_SYNTHETIC);
     ASSERT_TRUE(agents.codex);
 
     test_rmdir_r(tmpdir);
@@ -4221,7 +4219,7 @@ TEST(cli_detect_agents_finds_cursor_issue222) {
     snprintf(dir, sizeof(dir), "%s/.cursor", tmpdir);
     test_mkdirp(dir);
 
-    cbm_detected_agents_t agents = cbm_detect_agents(tmpdir);
+    cbm_detected_agents_t agents = cbm_detect_agents(tmpdir, CBM_SCAN_SYNTHETIC);
     ASSERT_TRUE(agents.cursor);
 
     test_rmdir_r(tmpdir);
@@ -7053,7 +7051,7 @@ TEST(cli_codex_respects_codex_home) {
     char *saved = save_test_env("CODEX_HOME");
     cbm_setenv("CODEX_HOME", codex_home, 1);
 
-    cbm_detected_agents_t agents = cbm_detect_agents(tmpdir);
+    cbm_detected_agents_t agents = cbm_detect_agents(tmpdir, CBM_SCAN_SYNTHETIC);
     char *json = cbm_build_install_plan_json(tmpdir, "/usr/local/bin/codebase-memory-mcp");
     char expected_config[640];
     char expected_instructions[640];
@@ -7176,7 +7174,7 @@ TEST(cli_antigravity_does_not_imply_gemini) {
 
     char *saved_path = save_test_env("PATH");
     cbm_setenv("PATH", tmpdir, 1);
-    cbm_detected_agents_t agents = cbm_detect_agents(tmpdir);
+    cbm_detected_agents_t agents = cbm_detect_agents(tmpdir, CBM_SCAN_SYNTHETIC);
     restore_test_env("PATH", saved_path);
     test_rmdir_r(tmpdir);
     if (!agents.antigravity)
@@ -7257,7 +7255,7 @@ TEST(cli_opencode_config_dir_detects_without_retargeting_global_json) {
     cbm_unsetenv("OPENCODE_CONFIG");
     cbm_setenv("OPENCODE_CONFIG_DIR", custom_dir, 1);
 
-    cbm_detected_agents_t agents = cbm_detect_agents(tmpdir);
+    cbm_detected_agents_t agents = cbm_detect_agents(tmpdir, CBM_SCAN_SYNTHETIC);
     char *json = cbm_build_install_plan_json(tmpdir, "/usr/local/bin/codebase-memory-mcp");
     bool correct = agents.opencode && json && strstr(json, "/.config/opencode/opencode.json") &&
                    strstr(json, "/.config/opencode/AGENTS.md") &&
@@ -7292,7 +7290,7 @@ TEST(cli_kiro_and_hermes_homes_are_honored) {
     cbm_setenv("KIRO_HOME", kiro_home, 1);
     cbm_setenv("HERMES_HOME", hermes_home, 1);
 
-    cbm_detected_agents_t agents = cbm_detect_agents(tmpdir);
+    cbm_detected_agents_t agents = cbm_detect_agents(tmpdir, CBM_SCAN_SYNTHETIC);
     char *json = cbm_build_install_plan_json(tmpdir, "/usr/local/bin/codebase-memory-mcp");
     bool correct = agents.kiro && agents.hermes && json && strstr(json, kiro_home) &&
                    strstr(json, "/steering/codebase-memory.md") && strstr(json, hermes_home) &&
@@ -7322,7 +7320,7 @@ TEST(cli_detect_agents_finds_official_kiro_cli_executable) {
     char *saved_home = save_test_env("KIRO_HOME");
     cbm_setenv("PATH", tmpdir, 1);
     cbm_unsetenv("KIRO_HOME");
-    cbm_detected_agents_t agents = cbm_detect_agents(tmpdir);
+    cbm_detected_agents_t agents = cbm_detect_agents(tmpdir, CBM_SCAN_SYNTHETIC);
 
     restore_test_env("PATH", saved_path);
     restore_test_env("KIRO_HOME", saved_home);
@@ -9790,7 +9788,7 @@ TEST(cli_detect_agents_finds_gemini) {
     snprintf(settings, sizeof(settings), "%s/settings.json", dir);
     write_test_file(settings, "{}\n");
 
-    cbm_detected_agents_t agents = cbm_detect_agents(tmpdir);
+    cbm_detected_agents_t agents = cbm_detect_agents(tmpdir, CBM_SCAN_SYNTHETIC);
     ASSERT_TRUE(agents.gemini);
 
     test_rmdir_r(tmpdir);
@@ -9817,7 +9815,7 @@ TEST(cli_detect_agents_finds_zed) {
     char xdg_dir[640];
     snprintf(xdg_dir, sizeof(xdg_dir), "%s/.config", tmpdir);
     cbm_setenv("XDG_CONFIG_HOME", xdg_dir, 1); /* Linux resolver prefers XDG */
-    cbm_detected_agents_t agents = cbm_detect_agents(tmpdir);
+    cbm_detected_agents_t agents = cbm_detect_agents(tmpdir, CBM_SCAN_SYNTHETIC);
     restore_test_env("XDG_CONFIG_HOME", saved_xdg);
     ASSERT_TRUE(agents.zed);
 
@@ -9839,7 +9837,7 @@ TEST(cli_detect_agents_finds_zed_via_xdg_config_home) {
     char *saved = save_test_env("XDG_CONFIG_HOME");
     cbm_setenv("XDG_CONFIG_HOME", xdg, 1);
 
-    cbm_detected_agents_t agents = cbm_detect_agents(tmpdir);
+    cbm_detected_agents_t agents = cbm_detect_agents(tmpdir, CBM_SCAN_SYNTHETIC);
     restore_test_env("XDG_CONFIG_HOME", saved);
     test_rmdir_r(tmpdir);
     if (!agents.zed)
@@ -9857,7 +9855,7 @@ TEST(cli_detect_agents_finds_zed_in_roaming_appdata) {
     char zed_dir[512];
     snprintf(zed_dir, sizeof(zed_dir), "%s/AppData/Roaming/Zed", tmpdir);
     test_mkdirp(zed_dir);
-    cbm_detected_agents_t agents = cbm_detect_agents(tmpdir);
+    cbm_detected_agents_t agents = cbm_detect_agents(tmpdir, CBM_SCAN_SYNTHETIC);
     test_rmdir_r(tmpdir);
     if (!agents.zed)
         FAIL("Zed detection on Windows must use Roaming AppData, not Local AppData");
@@ -9878,7 +9876,7 @@ TEST(cli_detect_agents_finds_antigravity) {
 
     char *saved_path = save_test_env("PATH");
     cbm_setenv("PATH", tmpdir, 1);
-    cbm_detected_agents_t agents = cbm_detect_agents(tmpdir);
+    cbm_detected_agents_t agents = cbm_detect_agents(tmpdir, CBM_SCAN_SYNTHETIC);
     restore_test_env("PATH", saved_path);
     test_rmdir_r(tmpdir);
     if (!agents.antigravity || agents.gemini)
@@ -9904,7 +9902,7 @@ TEST(cli_detect_agents_finds_kilocode) {
 #endif
     test_mkdirp(dir);
 
-    cbm_detected_agents_t agents = cbm_detect_agents(tmpdir);
+    cbm_detected_agents_t agents = cbm_detect_agents(tmpdir, CBM_SCAN_SYNTHETIC);
     ASSERT_TRUE(agents.kilocode);
 
     test_rmdir_r(tmpdir);
@@ -9920,7 +9918,7 @@ TEST(cli_detect_agents_finds_modern_kilo) {
     snprintf(dir, sizeof(dir), "%s/.config/kilo", tmpdir);
     test_mkdirp(dir);
 
-    cbm_detected_agents_t agents = cbm_detect_agents(tmpdir);
+    cbm_detected_agents_t agents = cbm_detect_agents(tmpdir, CBM_SCAN_SYNTHETIC);
     char *json = cbm_build_install_plan_json(tmpdir, "/usr/local/bin/codebase-memory-mcp");
     bool modern_config = json && strstr(json, "/.config/kilo/kilo.jsonc") != NULL;
     bool legacy_config =
@@ -9945,7 +9943,7 @@ TEST(cli_detect_agents_finds_kiro) {
     snprintf(dir, sizeof(dir), "%s/.kiro", tmpdir);
     test_mkdirp(dir);
 
-    cbm_detected_agents_t agents = cbm_detect_agents(tmpdir);
+    cbm_detected_agents_t agents = cbm_detect_agents(tmpdir, CBM_SCAN_SYNTHETIC);
     ASSERT_TRUE(agents.kiro);
 
     test_rmdir_r(tmpdir);
@@ -9962,7 +9960,7 @@ TEST(cli_detect_agents_finds_junie_issue651) {
     char dir[512];
     snprintf(dir, sizeof(dir), "%s/.junie", tmpdir);
     test_mkdirp(dir);
-    cbm_detected_agents_t agents = cbm_detect_agents(tmpdir);
+    cbm_detected_agents_t agents = cbm_detect_agents(tmpdir, CBM_SCAN_SYNTHETIC);
     ASSERT_TRUE(agents.junie);
     test_rmdir_r(tmpdir);
     PASS();
@@ -9982,7 +9980,7 @@ TEST(cli_detect_agents_none_found) {
     cbm_unsetenv("CODEX_HOME");
     cbm_setenv("PATH", tmpdir, 1);
 
-    cbm_detected_agents_t agents = cbm_detect_agents(tmpdir);
+    cbm_detected_agents_t agents = cbm_detect_agents(tmpdir, CBM_SCAN_SYNTHETIC);
     bool none = !agents.claude_code && !agents.codex && !agents.gemini && !agents.zed &&
                 !agents.antigravity && !agents.kilocode && !agents.kiro;
     restore_test_env("CLAUDE_CONFIG_DIR", saved_ccd);

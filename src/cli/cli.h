@@ -15,14 +15,6 @@
 
 typedef struct cbm_mcp_server cbm_mcp_server_t;
 
-/* ── Version ──────────────────────────────────────────────────── */
-
-/* Set the version string (called from main). */
-void cbm_cli_set_version(const char *ver);
-
-/* Get the version string. */
-const char *cbm_cli_get_version(void);
-
 /* ── CLI tool arguments (flags / --args-file / --help) ────────── */
 
 /* Convert `--flag value` / `--flag=value` / bare-boolean `--flag` arguments for
@@ -158,6 +150,20 @@ int cbm_remove_zed_mcp_owned(const char *binary_path, const char *config_path);
 
 /* ── Agent detection ──────────────────────────────────────────── */
 
+/* Which machine surface an agent scan is allowed to consult.
+ * CBM_SCAN_REAL_HOME: a real scan of the actual machine — may consult
+ * machine-global install locations (/usr/local/bin, /opt/homebrew/bin) in
+ * addition to PATH and home-local bin directories.
+ * CBM_SCAN_SYNTHETIC: a dry-run/plan scan against a synthetic home — limited
+ * to PATH and home-local bin directories (~/.npm/bin, ~/.local/bin,
+ * ~/.cargo/bin) so the host machine's real agents never leak into a
+ * hypothetical plan.
+ *
+ * Synthetic is zero so that a zero-initialized options struct confines the
+ * scan. Consulting the real machine is the consequential mode and must be
+ * named at the call site, never reached by forgetting to set the field. */
+typedef enum { CBM_SCAN_SYNTHETIC = 0, CBM_SCAN_REAL_HOME } cbm_scan_mode_t;
+
 /* Detected coding agents on the system. */
 typedef struct {
     bool claude_code;   /* ~/.claude/ exists */
@@ -188,8 +194,9 @@ typedef struct {
 } cbm_detected_agents_t;
 
 /* Detect which coding agents are installed.
- * Checks config dirs and PATH. home_dir is used for config dir checks. */
-cbm_detected_agents_t cbm_detect_agents(const char *home_dir);
+ * Checks config dirs and PATH. home_dir is used for config dir checks. mode
+ * controls whether machine-global install locations are also consulted. */
+cbm_detected_agents_t cbm_detect_agents(const char *home_dir, cbm_scan_mode_t mode);
 
 /* Install or refresh every detected agent integration below home. */
 int cbm_install_agent_configs(const char *home, const char *binary_path, bool force, bool dry_run);
@@ -363,39 +370,6 @@ int cbm_list_indexes(const char *home_dir);
 /* Remove all .db files in the cache directory. Returns count removed. */
 int cbm_remove_indexes(const char *home_dir);
 
-/* ── Config store (persistent key-value, backed by _config.db) ── */
-
-typedef struct cbm_config cbm_config_t;
-
-/* Open the config store in the given cache directory.
- * Creates _config.db if it doesn't exist. Returns NULL on error. */
-cbm_config_t *cbm_config_open(const char *cache_dir);
-
-/* Close the config store. */
-void cbm_config_close(cbm_config_t *cfg);
-
-/* Get a config value. Returns default_val if key not found. Database-backed
- * results remain valid until the next call on the same thread. */
-const char *cbm_config_get(cbm_config_t *cfg, const char *key, const char *default_val);
-
-/* Get a config value as bool. "true"/"1"/"on" → true. */
-bool cbm_config_get_bool(cbm_config_t *cfg, const char *key, bool default_val);
-
-/* Get a config value as int. Returns default_val if not found or invalid. */
-int cbm_config_get_int(cbm_config_t *cfg, const char *key, int default_val);
-
-/* Set a config value. Returns 0 on success. */
-int cbm_config_set(cbm_config_t *cfg, const char *key, const char *value);
-
-/* Delete a config key. Returns 0 on success. */
-int cbm_config_delete(cbm_config_t *cfg, const char *key);
-
-/* Well-known config keys */
-#define CBM_CONFIG_AUTO_INDEX "auto_index"
-#define CBM_CONFIG_AUTO_INDEX_LIMIT "auto_index_limit"
-#define CBM_CONFIG_AUTO_WATCH "auto_watch"
-#define CBM_CONFIG_UI_LANG "ui-lang"
-
 /* ── Binary activation safety ─────────────────────────────────── */
 
 typedef void *cbm_cli_activation_lock_t;
@@ -435,10 +409,27 @@ int cbm_cli_activation_guard_with_ops(const cbm_cli_activation_ops_t *ops,
  * through deterministic callbacks. NULL restores the production daemon IPC path. */
 void cbm_cli_set_activation_ops_for_test(const cbm_cli_activation_ops_t *ops);
 
+/* True when a test seam installed via cbm_cli_set_activation_ops_for_test() is
+ * currently active. Used only by the C suite to decide whether a scenario needs
+ * to install its own seam or one is already in place. */
+bool cbm_cli_activation_test_ops_installed(void);
+
 /* Internal integration-test seam: isolate the stable endpoint beneath a
  * private runtime parent. NULL restores the platform default. This is not a
  * command-line or environment override. */
 void cbm_cli_set_activation_runtime_parent_for_test(const char *runtime_parent);
+
+/* Compute the SHA-256 of a file in-process. Writes a 64-char hex digest + NUL
+ * to out. Returns 0 on success. Not static: exercised directly by the
+ * self-update checksum regression test. */
+int cbm_cli_sha256_file(const char *path, char *out, size_t out_size);
+
+/* Parse one downloaded checksum manifest without trusting line truncation or
+ * substring matches. Not static: exercised directly by the focused CLI
+ * regression tests. Duplicate entries are accepted only when they name the
+ * exact artifact and normalize to the same SHA-256 digest. */
+int cbm_cli_checksum_manifest_digest(const char *manifest_path, const char *archive_name, char *out,
+                                     size_t out_size);
 
 /* ── Subcommands (wired from main.c) ─────────────────────────── */
 

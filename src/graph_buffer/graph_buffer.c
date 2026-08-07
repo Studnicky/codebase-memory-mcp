@@ -52,6 +52,17 @@ static inline void *intptr_to_ptr(intptr_t v) {
     return p;
 }
 
+/* Free a const-qualified pointer this code owns and is releasing (e.g. a
+ * hash-table key handed back as const char*). Reading the pointer value out
+ * with memcpy transfers ownership without a qualifier-discarding cast, which
+ * -Wcast-qual would otherwise report at every one of this file's release
+ * sites rather than once here. Mirrors foundation/platform.h's safe_str_free. */
+static inline void free_owned_const(const void *p) {
+    void *owned;
+    memcpy(&owned, &p, sizeof(owned));
+    free(owned);
+}
+
 /* ── Internal types ──────────────────────────────────────────────── */
 
 /* Edge key for dedup hash table — composite key as string "srcID:tgtID:type",
@@ -145,8 +156,8 @@ static const char *gb_intern(cbm_gbuf_t *gb, const char *s) {
     return copy;
 }
 
-static void make_id_key(char *buf, size_t bufsz, int64_t id) {
-    snprintf(buf, bufsz, "%lld", (long long)id);
+static void make_id_key(char *buf, size_t bufsz, cbm_node_id_t id) {
+    snprintf(buf, bufsz, "%lld", (long long)cbm_node_id_value(id));
 }
 
 /* FNV-1a 64-bit over a byte slice — for re-keying oversized local_names. */
@@ -195,26 +206,28 @@ static const cbm_gbuf_prop_t *find_prop(const cbm_gbuf_prop_t *props, int prop_c
  * hashed/keyed on now, which only differs from the prior strstr-based key
  * when local_name itself contains a JSON escape sequence (never true for the
  * identifier-like names this codebase emits). */
-static void make_edge_key(char *buf, size_t bufsz, int64_t src, int64_t tgt, const char *type,
-                          const cbm_gbuf_prop_t *props, int prop_count) {
+static void make_edge_key(char *buf, size_t bufsz, cbm_node_id_t src, cbm_node_id_t tgt,
+                          const char *type, const cbm_gbuf_prop_t *props, int prop_count) {
+    long long src_v = (long long)cbm_node_id_value(src);
+    long long tgt_v = (long long)cbm_node_id_value(tgt);
     if (strcmp(type, "IMPORTS") == 0) {
         const cbm_gbuf_prop_t *ln = find_prop(props, prop_count, "local_name");
         if (ln && ln->kind == CBM_EDGE_PROP_STRING && ln->text) {
             size_t ln_len = strlen(ln->text);
-            int n = snprintf(buf, bufsz, "%lld:%lld:%s:%.*s", (long long)src, (long long)tgt, type,
-                             (int)ln_len, ln->text);
+            int n = snprintf(buf, bufsz, "%lld:%lld:%s:%.*s", src_v, tgt_v, type, (int)ln_len,
+                             ln->text);
             if (n < 0 || (size_t)n >= bufsz) {
-                snprintf(buf, bufsz, "%lld:%lld:%s:\x01%016llx", (long long)src, (long long)tgt,
-                         type, (unsigned long long)fnv1a64(ln->text, ln_len));
+                snprintf(buf, bufsz, "%lld:%lld:%s:\x01%016llx", src_v, tgt_v, type,
+                         (unsigned long long)fnv1a64(ln->text, ln_len));
             }
             return;
         }
     }
-    snprintf(buf, bufsz, "%lld:%lld:%s", (long long)src, (long long)tgt, type);
+    snprintf(buf, bufsz, "%lld:%lld:%s", src_v, tgt_v, type);
 }
 
-static void make_src_type_key(char *buf, size_t bufsz, int64_t src, const char *type) {
-    snprintf(buf, bufsz, "%lld:%s", (long long)src, type);
+static void make_src_type_key(char *buf, size_t bufsz, cbm_node_id_t src, const char *type) {
+    snprintf(buf, bufsz, "%lld:%s", (long long)cbm_node_id_value(src), type);
 }
 
 /* Get or create a node_ptr_array_t in a hash table */
@@ -245,7 +258,7 @@ static void free_node_array(const char *key, void *value, void *ud) {
         cbm_da_free(arr);
         free(arr);
     }
-    free((void *)key);
+    free_owned_const(key);
 }
 
 /* Free an edge_ptr_array_t (callback) */
@@ -256,14 +269,14 @@ static void free_edge_array(const char *key, void *value, void *ud) {
         cbm_da_free(arr);
         free(arr);
     }
-    free((void *)key);
+    free_owned_const(key);
 }
 
 /* Free keys only (for edge_by_key, deleted_set) */
 static void free_key_only(const char *key, void *value, void *ud) {
     (void)value;
     (void)ud;
-    free((void *)key);
+    free_owned_const(key);
 }
 
 /* Free a single node's owned strings. label and file_path are interned
@@ -279,8 +292,8 @@ static void free_node_strings(cbm_gbuf_node_t *n) {
  * frees it once in cbm_gbuf_free. */
 static void free_edge_props(cbm_gbuf_prop_t *props, int prop_count) {
     for (int i = 0; i < prop_count; i++) {
-        free((void *)props[i].key);
-        free((void *)props[i].text);
+        free_owned_const(props[i].key);
+        free_owned_const(props[i].text);
     }
     free(props);
 }
@@ -300,12 +313,12 @@ static int64_t alloc_next_id(cbm_gbuf_t *gb) {
 }
 
 /* Swap-remove an edge from a pointer array by ID. */
-static void remove_edge_from_ptr_array(edge_ptr_array_t *arr, int64_t edge_id) {
+static void remove_edge_from_ptr_array(edge_ptr_array_t *arr, cbm_edge_id_t edge_id) {
     if (!arr) {
         return;
     }
     for (int j = 0; j < arr->count; j++) {
-        if (arr->items[j]->id == edge_id) {
+        if (cbm_edge_id_eq(arr->items[j]->id, edge_id)) {
             arr->items[j] = arr->items[--arr->count];
             return;
         }
@@ -313,12 +326,12 @@ static void remove_edge_from_ptr_array(edge_ptr_array_t *arr, int64_t edge_id) {
 }
 
 /* Swap-remove a node from a node_ptr_array by ID. */
-static void remove_node_from_ptr_array(node_ptr_array_t *arr, int64_t node_id) {
+static void remove_node_from_ptr_array(node_ptr_array_t *arr, cbm_node_id_t node_id) {
     if (!arr) {
         return;
     }
     for (int j = 0; j < arr->count; j++) {
-        if (arr->items[j]->id == node_id) {
+        if (cbm_node_id_eq(arr->items[j]->id, node_id)) {
             arr->items[j] = arr->items[--arr->count];
             return;
         }
@@ -332,7 +345,7 @@ static void unindex_edge(cbm_gbuf_t *gb, const cbm_gbuf_edge_t *e) {
     make_edge_key(key, sizeof(key), e->source_id, e->target_id, e->type, e->props, e->prop_count);
     const char *ekey = cbm_ht_get_key(gb->edge_by_key, key);
     cbm_ht_delete(gb->edge_by_key, key);
-    free((void *)ekey);
+    free_owned_const(ekey);
 
     make_src_type_key(key, sizeof(key), e->source_id, e->type);
     remove_edge_from_ptr_array(cbm_ht_get(gb->edges_by_source_type, key), e->id);
@@ -368,9 +381,10 @@ static void cascade_delete_edges(cbm_gbuf_t *gb, CBMHashTable *deleted_set) {
 static void register_node_in_indexes(cbm_gbuf_t *gb, cbm_gbuf_node_t *node) {
     cbm_ht_set(gb->node_by_qn, node->qualified_name, node);
 
-    if (node->id >= gb->by_id_cap) {
+    int64_t node_id_v = cbm_node_id_value(node->id);
+    if (node_id_v >= gb->by_id_cap) {
         int64_t nc = gb->by_id_cap > 0 ? gb->by_id_cap : CBM_SZ_1K;
-        while (nc <= node->id) {
+        while (nc <= node_id_v) {
             nc *= 2;
         }
         cbm_gbuf_node_t **grown = realloc(gb->by_id, (size_t)nc * sizeof(*grown));
@@ -380,8 +394,8 @@ static void register_node_in_indexes(cbm_gbuf_t *gb, cbm_gbuf_node_t *node) {
             gb->by_id_cap = nc;
         }
     }
-    if (node->id >= 0 && node->id < gb->by_id_cap) {
-        gb->by_id[node->id] = node;
+    if (node_id_v >= 0 && node_id_v < gb->by_id_cap) {
+        gb->by_id[node_id_v] = node;
     }
 
     node_ptr_array_t *by_label =
@@ -553,14 +567,14 @@ void cbm_gbuf_free(cbm_gbuf_t *gb) {
 
     /* Free vector storage */
     for (int i = 0; i < gb->dump_vector_count; i++) {
-        free((void *)gb->dump_vectors[i].vector);
+        free_owned_const(gb->dump_vectors[i].vector);
     }
     free(gb->dump_vectors);
 
     /* Free token vector storage */
     for (int i = 0; i < gb->dump_token_vec_count; i++) {
-        free((void *)gb->dump_token_vecs[i].token);
-        free((void *)gb->dump_token_vecs[i].vector);
+        free_owned_const(gb->dump_token_vecs[i].token);
+        free_owned_const(gb->dump_token_vecs[i].vector);
     }
     free(gb->dump_token_vecs);
 
@@ -579,7 +593,8 @@ void cbm_gbuf_free(cbm_gbuf_t *gb) {
 
 /* ── Vector storage ──────────────────────────────────────────────── */
 
-int cbm_gbuf_store_vector(cbm_gbuf_t *gb, int64_t node_id, const uint8_t *vector, int vector_len) {
+int cbm_gbuf_store_vector(cbm_gbuf_t *gb, cbm_node_id_t node_id, const uint8_t *vector,
+                          int vector_len) {
     if (!gb || !vector || vector_len <= 0) {
         return GB_ERR;
     }
@@ -602,7 +617,7 @@ int cbm_gbuf_store_vector(cbm_gbuf_t *gb, int64_t node_id, const uint8_t *vector
     memcpy(vec_copy, vector, (size_t)vector_len);
 
     gb->dump_vectors[gb->dump_vector_count++] = (CBMDumpVector){
-        .node_id = node_id,
+        .node_id = cbm_node_id_value(node_id),
         .project = gb->project, /* borrowed — valid until gbuf_free */
         .vector = vec_copy,
         .vector_len = vector_len,
@@ -667,11 +682,11 @@ void cbm_gbuf_set_next_id(cbm_gbuf_t *gb, int64_t next_id) {
 
 /* ── Node operations ─────────────────────────────────────────────── */
 
-int64_t cbm_gbuf_upsert_node(cbm_gbuf_t *gb, const char *label, const char *name,
-                             const char *qualified_name, const char *file_path, int start_line,
-                             int end_line, const char *properties_json) {
+cbm_node_id_t cbm_gbuf_upsert_node(cbm_gbuf_t *gb, const char *label, const char *name,
+                                   const char *qualified_name, const char *file_path,
+                                   int start_line, int end_line, const char *properties_json) {
     if (!gb || !qualified_name) {
-        return 0;
+        return CBM_NODE_ID_INVALID;
     }
 
     /* Check if node already exists */
@@ -747,10 +762,10 @@ int64_t cbm_gbuf_upsert_node(cbm_gbuf_t *gb, const char *label, const char *name
             remove_node_from_ptr_array(
                 cbm_ht_get(gb->nodes_by_name, existing->name ? existing->name : ""), existing->id);
         }
-        existing->label = (char *)new_label_interned;
+        existing->label = new_label_interned;
         free(existing->name);
         existing->name = new_name;
-        existing->file_path = (char *)gb_intern(gb, file_path);
+        existing->file_path = gb_intern(gb, file_path);
         existing->start_line = start_line;
         existing->end_line = end_line;
         if (new_props) {
@@ -773,15 +788,15 @@ int64_t cbm_gbuf_upsert_node(cbm_gbuf_t *gb, const char *label, const char *name
     /* Heap-allocate a new node (pointer stays stable across array growth) */
     cbm_gbuf_node_t *node = calloc(CBM_ALLOC_ONE, sizeof(cbm_gbuf_node_t));
     if (!node) {
-        return 0;
+        return CBM_NODE_ID_INVALID;
     }
 
-    int64_t id = alloc_next_id(gb);
+    cbm_node_id_t id = cbm_node_id(alloc_next_id(gb));
     node->id = id;
-    node->label = (char *)gb_intern(gb, label);
+    node->label = gb_intern(gb, label);
     node->name = heap_strdup(name);
     node->qualified_name = heap_strdup(qualified_name);
-    node->file_path = (char *)gb_intern(gb, file_path);
+    node->file_path = gb_intern(gb, file_path);
     node->start_line = start_line;
     node->end_line = end_line;
     node->properties_json = heap_strdup(properties_json);
@@ -800,11 +815,31 @@ const cbm_gbuf_node_t *cbm_gbuf_find_by_qn(const cbm_gbuf_t *gb, const char *qn)
     return cbm_ht_get(gb->node_by_qn, qn);
 }
 
-const cbm_gbuf_node_t *cbm_gbuf_find_by_id(const cbm_gbuf_t *gb, int64_t id) {
-    if (!gb || !gb->by_id || id < 0 || id >= gb->by_id_cap) {
+const cbm_gbuf_node_t *cbm_gbuf_find_by_id(const cbm_gbuf_t *gb, cbm_node_id_t id) {
+    int64_t id_v = cbm_node_id_value(id);
+    if (!gb || !gb->by_id || id_v < 0 || id_v >= gb->by_id_cap) {
         return NULL;
     }
-    return gb->by_id[id];
+    return gb->by_id[id_v];
+}
+
+bool cbm_gbuf_set_node_properties_json(cbm_gbuf_t *gb, cbm_node_id_t id,
+                                       const char *properties_json) {
+    int64_t id_v = cbm_node_id_value(id);
+    if (!gb || !gb->by_id || id_v < 0 || id_v >= gb->by_id_cap) {
+        return false;
+    }
+    cbm_gbuf_node_t *node = gb->by_id[id_v];
+    if (!node) {
+        return false;
+    }
+    char *copy = heap_strdup(properties_json ? properties_json : "{}");
+    if (!copy) {
+        return false;
+    }
+    free(node->properties_json);
+    node->properties_json = copy;
+    return true;
 }
 
 int cbm_gbuf_find_by_label(const cbm_gbuf_t *gb, const char *label, const cbm_gbuf_node_t ***out,
@@ -855,7 +890,8 @@ int cbm_gbuf_delete_by_label(cbm_gbuf_t *gb, const char *label) {
     }
 
     /* Build hash set of deleted node IDs for O(1) lookup */
-    CBMHashTable *deleted_set = cbm_ht_create(arr->count);
+    /* arr->count is never negative (it's a live element count). */
+    CBMHashTable *deleted_set = cbm_ht_create((size_t)arr->count);
     for (int i = 0; i < arr->count; i++) {
         const cbm_gbuf_node_t *n = arr->items[i];
 
@@ -865,8 +901,9 @@ int cbm_gbuf_delete_by_label(cbm_gbuf_t *gb, const char *label) {
 
         /* Remove from primary indexes */
         cbm_ht_delete(gb->node_by_qn, n->qualified_name);
-        if (n->id >= 0 && n->id < gb->by_id_cap) {
-            gb->by_id[n->id] = NULL;
+        int64_t n_id_v = cbm_node_id_value(n->id);
+        if (n_id_v >= 0 && n_id_v < gb->by_id_cap) {
+            gb->by_id[n_id_v] = NULL;
         }
     }
 
@@ -911,8 +948,9 @@ int cbm_gbuf_delete_by_file(cbm_gbuf_t *gb, const char *file_path) {
 
         /* Remove from primary indexes */
         cbm_ht_delete(gb->node_by_qn, n->qualified_name);
-        if (n->id >= 0 && n->id < gb->by_id_cap) {
-            gb->by_id[n->id] = NULL;
+        int64_t n_id_v = cbm_node_id_value(n->id);
+        if (n_id_v >= 0 && n_id_v < gb->by_id_cap) {
+            gb->by_id[n_id_v] = NULL;
         }
 
         /* NULL out QN so dump's liveness check (cbm_ht_get by QN) fails
@@ -1000,7 +1038,8 @@ int cbm_gbuf_load_from_db(cbm_gbuf_t *gb, const char *db_path, const char *proje
         int el = sqlite3_column_int(stmt, GB_COL_6);
         const char *props = (const char *)sqlite3_column_text(stmt, GB_COL_7);
 
-        int64_t new_id = cbm_gbuf_upsert_node(gb, label, name, qn, fp, sl, el, props);
+        int64_t new_id =
+            cbm_node_id_value(cbm_gbuf_upsert_node(gb, label, name, qn, fp, sl, el, props));
         if (new_id > 0 && old_id <= max_old_id) {
             old_to_new[old_id] = new_id;
         }
@@ -1027,7 +1066,10 @@ int cbm_gbuf_load_from_db(cbm_gbuf_t *gb, const char *db_path, const char *proje
         int64_t new_src = (old_src <= max_old_id) ? old_to_new[old_src] : 0;
         int64_t new_tgt = (old_tgt <= max_old_id) ? old_to_new[old_tgt] : 0;
         if (new_src > 0 && new_tgt > 0) {
-            cbm_gbuf_insert_edge(gb, new_src, new_tgt, type, props);
+            cbm_gbuf_insert_edge(gb,
+                                 (cbm_edge_endpoints_t){.source = cbm_node_id(new_src),
+                                                        .target = cbm_node_id(new_tgt)},
+                                 type, props);
         }
     }
     sqlite3_finalize(stmt);
@@ -1310,11 +1352,14 @@ static bool edge_props_should_replace(const cbm_gbuf_edge_t *existing, const cbm
 
 /* ── Edge operations ─────────────────────────────────────────────── */
 
-int64_t cbm_gbuf_insert_edge_props(cbm_gbuf_t *gb, int64_t source_id, int64_t target_id,
-                                   const char *type, const cbm_gbuf_prop_t *props, int prop_count) {
+cbm_edge_id_t cbm_gbuf_insert_edge_props(cbm_gbuf_t *gb, cbm_edge_endpoints_t endpoints,
+                                         const char *type, const cbm_gbuf_prop_t *props,
+                                         int prop_count) {
     if (!gb || !type) {
-        return 0;
+        return CBM_EDGE_ID_INVALID;
     }
+    cbm_node_id_t source_id = endpoints.source;
+    cbm_node_id_t target_id = endpoints.target;
 
     /* Check for dedup */
     char key[EDGE_KEY_BUF];
@@ -1335,14 +1380,14 @@ int64_t cbm_gbuf_insert_edge_props(cbm_gbuf_t *gb, int64_t source_id, int64_t ta
     /* Heap-allocate a new edge (pointer stays stable) */
     cbm_gbuf_edge_t *edge = calloc(CBM_ALLOC_ONE, sizeof(cbm_gbuf_edge_t));
     if (!edge) {
-        return 0;
+        return CBM_EDGE_ID_INVALID;
     }
 
-    int64_t id = alloc_next_id(gb);
+    cbm_edge_id_t id = cbm_edge_id(alloc_next_id(gb));
     edge->id = id;
     edge->source_id = source_id;
     edge->target_id = target_id;
-    edge->type = (char *)gb_intern(gb, type);
+    edge->type = gb_intern(gb, type);
     edge->props = gb_copy_props(props, prop_count, &edge->prop_count);
 
     /* Store pointer in array */
@@ -1456,20 +1501,20 @@ static cbm_gbuf_prop_t *gb_parse_props_json(const char *json, int *out_count) {
 
 /* JSON shim: parses `properties_json` into typed props, delegates to
  * cbm_gbuf_insert_edge_props, then releases the temporary parse. Kept for
- * the 66 existing call sites that build a JSON string directly. */
-int64_t cbm_gbuf_insert_edge(cbm_gbuf_t *gb, int64_t source_id, int64_t target_id, const char *type,
-                             const char *properties_json) {
+ * the call sites that build a JSON string directly. */
+cbm_edge_id_t cbm_gbuf_insert_edge(cbm_gbuf_t *gb, cbm_edge_endpoints_t endpoints, const char *type,
+                                   const char *properties_json) {
     int prop_count = 0;
     cbm_gbuf_prop_t *props = gb_parse_props_json(properties_json, &prop_count);
 
-    int64_t id = cbm_gbuf_insert_edge_props(gb, source_id, target_id, type, props, prop_count);
+    cbm_edge_id_t id = cbm_gbuf_insert_edge_props(gb, endpoints, type, props, prop_count);
 
     free_edge_props(props, prop_count);
     return id;
 }
 
-int cbm_gbuf_find_edges_by_source_type(const cbm_gbuf_t *gb, int64_t source_id, const char *type,
-                                       const cbm_gbuf_edge_t ***out, int *count) {
+int cbm_gbuf_find_edges_by_source_type(const cbm_gbuf_t *gb, cbm_node_id_t source_id,
+                                       const char *type, const cbm_gbuf_edge_t ***out, int *count) {
     if (!gb || !out || !count) {
         return CBM_NOT_FOUND;
     }
@@ -1486,8 +1531,8 @@ int cbm_gbuf_find_edges_by_source_type(const cbm_gbuf_t *gb, int64_t source_id, 
     return 0;
 }
 
-int cbm_gbuf_find_edges_by_target_type(const cbm_gbuf_t *gb, int64_t target_id, const char *type,
-                                       const cbm_gbuf_edge_t ***out, int *count) {
+int cbm_gbuf_find_edges_by_target_type(const cbm_gbuf_t *gb, cbm_node_id_t target_id,
+                                       const char *type, const cbm_gbuf_edge_t ***out, int *count) {
     if (!gb || !out || !count) {
         return CBM_NOT_FOUND;
     }
@@ -1547,7 +1592,7 @@ int cbm_gbuf_delete_edges_by_type(cbm_gbuf_t *gb, const char *type) {
                           e->prop_count);
             const char *ekey = cbm_ht_get_key(gb->edge_by_key, key);
             cbm_ht_delete(gb->edge_by_key, key);
-            free((void *)ekey);
+            free_owned_const(ekey);
             free_edge_strings(e);
             free(e);
         } else {
@@ -1567,7 +1612,7 @@ int cbm_gbuf_delete_edges_by_type(cbm_gbuf_t *gb, const char *type) {
 /* Free remap hash table entries (key = heap string, value = heap int64_t*) */
 static void free_remap_entry(const char *key, void *val, void *ud) {
     (void)ud;
-    free((void *)key);
+    free_owned_const(key);
     free(val);
 }
 
@@ -1628,10 +1673,10 @@ static void merge_update_existing(cbm_gbuf_t *dst, cbm_gbuf_node_t *existing,
                     cbm_ht_get(dst->nodes_by_name, existing->name ? existing->name : ""),
                     existing->id);
             }
-            existing->label = (char *)new_label;
+            existing->label = new_label;
             free(existing->name);
             existing->name = heap_strdup(sn->name);
-            existing->file_path = (char *)gb_intern(dst, sn->file_path);
+            existing->file_path = gb_intern(dst, sn->file_path);
             existing->start_line = sn->start_line;
             existing->end_line = sn->end_line;
             if (sn->properties_json) {
@@ -1651,14 +1696,14 @@ static void merge_update_existing(cbm_gbuf_t *dst, cbm_gbuf_node_t *existing,
         }
     }
 
-    if (sn->id != existing->id) {
+    if (!cbm_node_id_eq(sn->id, existing->id)) {
         if (!*remap) {
             *remap = cbm_ht_create(CBM_SZ_32);
         }
         char key[CBM_SZ_32];
         make_id_key(key, sizeof(key), sn->id);
         int64_t *val = malloc(sizeof(int64_t));
-        *val = existing->id;
+        *val = cbm_node_id_value(existing->id);
         cbm_ht_set(*remap, strdup(key), val);
     }
 }
@@ -1671,10 +1716,10 @@ static void merge_copy_new_node(cbm_gbuf_t *dst, const cbm_gbuf_node_t *sn) {
     }
 
     node->id = sn->id;
-    node->label = (char *)gb_intern(dst, sn->label);
+    node->label = gb_intern(dst, sn->label);
     node->name = heap_strdup(sn->name);
     node->qualified_name = heap_strdup(sn->qualified_name);
-    node->file_path = (char *)gb_intern(dst, sn->file_path);
+    node->file_path = gb_intern(dst, sn->file_path);
     node->start_line = sn->start_line;
     node->end_line = sn->end_line;
     node->properties_json = heap_strdup(sn->properties_json);
@@ -1682,8 +1727,9 @@ static void merge_copy_new_node(cbm_gbuf_t *dst, const cbm_gbuf_node_t *sn) {
     cbm_da_push(&dst->nodes, node);
     register_node_in_indexes(dst, node);
 
-    if (node->id >= dst->next_id) {
-        dst->next_id = node->id + SKIP_ONE;
+    int64_t node_id_v = cbm_node_id_value(node->id);
+    if (node_id_v >= dst->next_id) {
+        dst->next_id = node_id_v + SKIP_ONE;
     }
 }
 
@@ -1692,8 +1738,8 @@ static void merge_remap_edges(cbm_gbuf_t *dst, cbm_gbuf_t *src, CBMHashTable *re
     for (int i = 0; i < src->edges.count; i++) {
         cbm_gbuf_edge_t *se = src->edges.items[i];
 
-        int64_t new_src = se->source_id;
-        int64_t new_tgt = se->target_id;
+        int64_t new_src = cbm_node_id_value(se->source_id);
+        int64_t new_tgt = cbm_node_id_value(se->target_id);
 
         if (remap) {
             char key[CBM_SZ_32];
@@ -1710,7 +1756,10 @@ static void merge_remap_edges(cbm_gbuf_t *dst, cbm_gbuf_t *src, CBMHashTable *re
             }
         }
 
-        cbm_gbuf_insert_edge_props(dst, new_src, new_tgt, se->type, se->props, se->prop_count);
+        cbm_gbuf_insert_edge_props(
+            dst,
+            (cbm_edge_endpoints_t){.source = cbm_node_id(new_src), .target = cbm_node_id(new_tgt)},
+            se->type, se->props, se->prop_count);
     }
 }
 
@@ -1796,8 +1845,9 @@ static CBMDumpNode *build_dump_nodes(cbm_gbuf_t *gb, int live_count, int64_t *te
         }
 
         int64_t final_id = idx + SKIP_ONE; /* 1-based sequential */
-        if (n->id < max_temp_id) {
-            temp_to_final[n->id] = final_id;
+        int64_t n_id_v = cbm_node_id_value(n->id);
+        if (n_id_v < max_temp_id) {
+            temp_to_final[n_id_v] = final_id;
         }
 
         const char *fp = n->file_path ? n->file_path : "";
@@ -1834,8 +1884,8 @@ static CBMDumpEdge *build_dump_edges(cbm_gbuf_t *gb, const int64_t *temp_to_fina
     int valid_edges = 0;
     for (int i = 0; i < gb->edges.count; i++) {
         cbm_gbuf_edge_t *e = gb->edges.items[i];
-        if (remap_id(temp_to_final, max_temp_id, e->source_id) > 0 &&
-            remap_id(temp_to_final, max_temp_id, e->target_id) > 0) {
+        if (remap_id(temp_to_final, max_temp_id, cbm_node_id_value(e->source_id)) > 0 &&
+            remap_id(temp_to_final, max_temp_id, cbm_node_id_value(e->target_id)) > 0) {
             valid_edges++;
         }
     }
@@ -1849,8 +1899,8 @@ static CBMDumpEdge *build_dump_edges(cbm_gbuf_t *gb, const int64_t *temp_to_fina
 
     for (int i = 0; i < gb->edges.count; i++) {
         cbm_gbuf_edge_t *e = gb->edges.items[i];
-        int64_t src = remap_id(temp_to_final, max_temp_id, e->source_id);
-        int64_t tgt = remap_id(temp_to_final, max_temp_id, e->target_id);
+        int64_t src = remap_id(temp_to_final, max_temp_id, cbm_node_id_value(e->source_id));
+        int64_t tgt = remap_id(temp_to_final, max_temp_id, cbm_node_id_value(e->target_id));
         if (src == 0 || tgt == 0) {
             continue;
         }
@@ -2105,7 +2155,9 @@ int cbm_gbuf_flush_to_store(cbm_gbuf_t *gb, cbm_store_t *store) {
      * Temp IDs start at 1 and are sequential, but can have gaps from edge inserts.
      * Use max_id as size. */
     int64_t max_temp_id = gb->next_id;
-    int64_t *temp_to_real = calloc(max_temp_id, sizeof(int64_t));
+    /* max_temp_id is a bounded, non-negative count (next_id starts at 1 and
+     * only increments). */
+    int64_t *temp_to_real = calloc((size_t)max_temp_id, sizeof(int64_t));
 
     for (int i = 0; i < gb->nodes.count; i++) {
         cbm_gbuf_node_t *n = gb->nodes.items[i];
@@ -2126,16 +2178,19 @@ int cbm_gbuf_flush_to_store(cbm_gbuf_t *gb, cbm_store_t *store) {
             .properties_json = n->properties_json,
         };
         int64_t real_id = cbm_store_upsert_node(store, &sn);
-        if (real_id > 0 && n->id < max_temp_id) {
-            temp_to_real[n->id] = real_id;
+        int64_t n_id_v = cbm_node_id_value(n->id);
+        if (real_id > 0 && n_id_v < max_temp_id) {
+            temp_to_real[n_id_v] = real_id;
         }
     }
 
     /* Insert all edges with remapped IDs */
     for (int i = 0; i < gb->edges.count; i++) {
         cbm_gbuf_edge_t *e = gb->edges.items[i];
-        int64_t real_src = (e->source_id < max_temp_id) ? temp_to_real[e->source_id] : 0;
-        int64_t real_tgt = (e->target_id < max_temp_id) ? temp_to_real[e->target_id] : 0;
+        int64_t e_src_v = cbm_node_id_value(e->source_id);
+        int64_t e_tgt_v = cbm_node_id_value(e->target_id);
+        int64_t real_src = (e_src_v < max_temp_id) ? temp_to_real[e_src_v] : 0;
+        int64_t real_tgt = (e_tgt_v < max_temp_id) ? temp_to_real[e_tgt_v] : 0;
         if (real_src == 0 || real_tgt == 0) {
             continue;
         }
@@ -2170,7 +2225,9 @@ int cbm_gbuf_merge_into_store(cbm_gbuf_t *gb, cbm_store_t *store) {
 
     /* Build temp_id → real_id map */
     int64_t max_temp_id = gb->next_id;
-    int64_t *temp_to_real = calloc(max_temp_id, sizeof(int64_t));
+    /* max_temp_id is a bounded, non-negative count (next_id starts at 1 and
+     * only increments). */
+    int64_t *temp_to_real = calloc((size_t)max_temp_id, sizeof(int64_t));
 
     for (int i = 0; i < gb->nodes.count; i++) {
         cbm_gbuf_node_t *n = gb->nodes.items[i];
@@ -2190,15 +2247,18 @@ int cbm_gbuf_merge_into_store(cbm_gbuf_t *gb, cbm_store_t *store) {
             .properties_json = n->properties_json,
         };
         int64_t real_id = cbm_store_upsert_node(store, &sn);
-        if (real_id > 0 && n->id < max_temp_id) {
-            temp_to_real[n->id] = real_id;
+        int64_t n_id_v = cbm_node_id_value(n->id);
+        if (real_id > 0 && n_id_v < max_temp_id) {
+            temp_to_real[n_id_v] = real_id;
         }
     }
 
     for (int i = 0; i < gb->edges.count; i++) {
         cbm_gbuf_edge_t *e = gb->edges.items[i];
-        int64_t real_src = (e->source_id < max_temp_id) ? temp_to_real[e->source_id] : 0;
-        int64_t real_tgt = (e->target_id < max_temp_id) ? temp_to_real[e->target_id] : 0;
+        int64_t e_src_v = cbm_node_id_value(e->source_id);
+        int64_t e_tgt_v = cbm_node_id_value(e->target_id);
+        int64_t real_src = (e_src_v < max_temp_id) ? temp_to_real[e_src_v] : 0;
+        int64_t real_tgt = (e_tgt_v < max_temp_id) ? temp_to_real[e_tgt_v] : 0;
         if (real_src == 0 || real_tgt == 0) {
             continue;
         }

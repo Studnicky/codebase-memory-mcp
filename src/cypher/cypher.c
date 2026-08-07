@@ -71,10 +71,17 @@ static char *heap_strndup(const char *s, size_t n) {
  *  LEXER
  * ══════════════════════════════════════════════════════════════════ */
 
+/* count/capacity are `int` in cbm_lex_result_t (cypher.h). Every push consumes
+ * at least one input byte, and cbm_lex() already casts strlen(input) to `int`
+ * up front, so count can never exceed that — but guard the doubling against
+ * signed overflow anyway rather than lean solely on that bound. */
 static void lex_push(cbm_lex_result_t *r, cbm_token_type_t type, const char *text, int pos) {
     if (r->count >= r->capacity) {
+        if (r->capacity > INT_MAX / PAIR_LEN) {
+            return; /* unreachable: capacity is bounded by input length */
+        }
         r->capacity = r->capacity ? r->capacity * PAIR_LEN : CBM_SZ_32;
-        r->tokens = safe_realloc(r->tokens, r->capacity * sizeof(cbm_token_t));
+        r->tokens = safe_realloc(r->tokens, (size_t)r->capacity * sizeof(cbm_token_t));
     }
     r->tokens[r->count++] = (cbm_token_t){.type = type, .text = heap_strdup(text), .pos = pos};
 }
@@ -82,8 +89,11 @@ static void lex_push(cbm_lex_result_t *r, cbm_token_type_t type, const char *tex
 static void lex_push_n(cbm_lex_result_t *r, cbm_token_type_t type, const char *start, size_t len,
                        int pos) {
     if (r->count >= r->capacity) {
+        if (r->capacity > INT_MAX / PAIR_LEN) {
+            return; /* unreachable: capacity is bounded by input length */
+        }
         r->capacity = r->capacity ? r->capacity * PAIR_LEN : CBM_SZ_32;
-        r->tokens = safe_realloc(r->tokens, r->capacity * sizeof(cbm_token_t));
+        r->tokens = safe_realloc(r->tokens, (size_t)r->capacity * sizeof(cbm_token_t));
     }
     r->tokens[r->count++] =
         (cbm_token_t){.type = type, .text = heap_strndup(start, len), .pos = pos};
@@ -300,10 +310,12 @@ static bool lex_try_ident(const char *input, int len, int *i, cbm_lex_result_t *
     if (wlen >= (int)sizeof(word)) {
         wlen = (int)sizeof(word) - SKIP_ONE;
     }
-    memcpy(word, input + start, wlen);
+    /* wlen is clamped above to [0, sizeof(word) - 1]. */
+    memcpy(word, input + start, (size_t)wlen);
     word[wlen] = '\0';
     cbm_token_type_t type = keyword_lookup(word);
-    lex_push_n(out, type, input + start, *i - start, start);
+    /* *i only ever advances forward from start in the loop above. */
+    lex_push_n(out, type, input + start, (size_t)(*i - start), start);
     return true;
 }
 
@@ -319,7 +331,8 @@ static bool lex_try_number(const char *input, int len, int *i, cbm_lex_result_t 
                         (input[*i] == '.' && *i + SKIP_ONE < len && input[*i + SKIP_ONE] != '.'))) {
         (*i)++;
     }
-    lex_push_n(out, TOK_NUMBER, input + start, *i - start, start);
+    /* *i only ever advances forward from start in the loop above. */
+    lex_push_n(out, TOK_NUMBER, input + start, (size_t)(*i - start), start);
     return true;
 }
 
@@ -482,8 +495,8 @@ static int parse_props(parser_t *p, cbm_prop_filter_t **out, int *count) {
         return 0;
     }
 
-    int cap = CYP_INIT_CAP4;
-    int n = 0;
+    size_t cap = CYP_INIT_CAP4;
+    size_t n = 0;
     cbm_prop_filter_t *arr = malloc(cap * sizeof(cbm_prop_filter_t));
     if (!arr) {
         return CBM_NOT_FOUND;
@@ -506,10 +519,10 @@ static int parse_props(parser_t *p, cbm_prop_filter_t **out, int *count) {
         }
 
         if (n >= cap) {
-            int new_cap = cap * PAIR_LEN;
+            size_t new_cap = cap * PAIR_LEN;
             void *tmp = realloc(arr, new_cap * sizeof(cbm_prop_filter_t));
             if (!tmp) {
-                for (int i = 0; i < n; i++) {
+                for (size_t i = 0; i < n; i++) {
                     safe_str_free(&arr[i].key);
                     safe_str_free(&arr[i].value);
                 }
@@ -524,7 +537,7 @@ static int parse_props(parser_t *p, cbm_prop_filter_t **out, int *count) {
         if (!new_key || !new_val) {
             safe_str_free(&new_key);
             safe_str_free(&new_val);
-            for (int i = 0; i < n; i++) {
+            for (size_t i = 0; i < n; i++) {
                 safe_str_free(&arr[i].key);
                 safe_str_free(&arr[i].value);
             }
@@ -539,8 +552,19 @@ static int parse_props(parser_t *p, cbm_prop_filter_t **out, int *count) {
     }
     expect(p, TOK_RBRACE);
 
+    if (n > (size_t)INT_MAX) {
+        /* prop_count is `int` in cbm_node_pattern_t (cypher.h). A brace-delimited
+         * property list can never realistically approach this, but truncating
+         * the count silently would corrupt it rather than fail loudly. */
+        for (size_t i = 0; i < n; i++) {
+            safe_str_free(&arr[i].key);
+            safe_str_free(&arr[i].value);
+        }
+        free(arr);
+        return CBM_NOT_FOUND;
+    }
     *out = arr;
-    *count = n;
+    *count = (int)n;
     return 0;
 }
 
@@ -624,8 +648,8 @@ static void parse_hop_range(parser_t *p, int *min_hops, int *max_hops) {
 
 /* Parse relationship type list after ':' inside brackets. Returns -1 on error. */
 static int parse_rel_types(parser_t *p, cbm_rel_pattern_t *out) {
-    int cap = CYP_INIT_CAP4;
-    int n = 0;
+    size_t cap = CYP_INIT_CAP4;
+    size_t n = 0;
     const char **types = malloc(cap * sizeof(const char *));
     if (!types) {
         return CBM_NOT_FOUND;
@@ -646,17 +670,17 @@ static int parse_rel_types(parser_t *p, cbm_rel_pattern_t *out) {
     while (match(p, TOK_PIPE)) {
         t = expect(p, TOK_IDENT);
         if (!t) {
-            for (int i = 0; i < n; i++) {
+            for (size_t i = 0; i < n; i++) {
                 safe_str_free(&types[i]);
             }
             free(types);
             return CBM_NOT_FOUND;
         }
         if (n >= cap) {
-            int new_cap = cap * PAIR_LEN;
+            size_t new_cap = cap * PAIR_LEN;
             void *tmp = realloc(types, new_cap * sizeof(const char *));
             if (!tmp) {
-                for (int i = 0; i < n; i++) {
+                for (size_t i = 0; i < n; i++) {
                     safe_str_free(&types[i]);
                 }
                 free(types);
@@ -667,7 +691,7 @@ static int parse_rel_types(parser_t *p, cbm_rel_pattern_t *out) {
         }
         const char *next_type = heap_strdup(t->text);
         if (!next_type) {
-            for (int i = 0; i < n; i++) {
+            for (size_t i = 0; i < n; i++) {
                 safe_str_free(&types[i]);
             }
             free(types);
@@ -676,8 +700,18 @@ static int parse_rel_types(parser_t *p, cbm_rel_pattern_t *out) {
         types[n++] = next_type;
     }
 
+    if (n > (size_t)INT_MAX) {
+        /* type_count is `int` in cbm_rel_pattern_t (cypher.h). A `|`-separated
+         * type list can never realistically approach this, but truncating the
+         * count silently would corrupt it rather than fail loudly. */
+        for (size_t i = 0; i < n; i++) {
+            safe_str_free(&types[i]);
+        }
+        free(types);
+        return CBM_NOT_FOUND;
+    }
     out->types = types;
-    out->type_count = n;
+    out->type_count = (int)n;
     return 0;
 }
 
@@ -894,8 +928,8 @@ static cbm_expr_t *parse_in_list(parser_t *p, cbm_condition_t *c) {
         safe_str_free(&c->op);
         return NULL;
     }
-    int vcap = CYP_INIT_CAP8;
-    int vn = 0;
+    size_t vcap = CYP_INIT_CAP8;
+    size_t vn = 0;
     const char **vals = malloc(vcap * sizeof(const char *));
     if (!vals) {
         safe_str_free(&c->variable);
@@ -909,10 +943,10 @@ static cbm_expr_t *parse_in_list(parser_t *p, cbm_condition_t *c) {
         }
         if (check(p, TOK_STRING) || check(p, TOK_NUMBER)) {
             if (vn >= vcap) {
-                int new_vcap = vcap * PAIR_LEN;
+                size_t new_vcap = vcap * PAIR_LEN;
                 void *tmp = realloc((void *)vals, new_vcap * sizeof(const char *));
                 if (!tmp) {
-                    for (int i = 0; i < vn; i++) {
+                    for (size_t i = 0; i < vn; i++) {
                         safe_str_free(&vals[i]);
                     }
                     safe_free(vals);
@@ -926,7 +960,7 @@ static cbm_expr_t *parse_in_list(parser_t *p, cbm_condition_t *c) {
             }
             const char *new_val = heap_strdup(advance(p)->text);
             if (!new_val) {
-                for (int i = 0; i < vn; i++) {
+                for (size_t i = 0; i < vn; i++) {
                     safe_str_free(&vals[i]);
                 }
                 safe_free(vals);
@@ -941,8 +975,21 @@ static cbm_expr_t *parse_in_list(parser_t *p, cbm_condition_t *c) {
         }
     }
     expect(p, TOK_RBRACKET);
+    if (vn > (size_t)INT_MAX) {
+        /* in_value_count is `int` in cbm_condition_t (cypher.h). An IN [...]
+         * list can never realistically approach this, but truncating the
+         * count silently would corrupt it rather than fail loudly. */
+        for (size_t i = 0; i < vn; i++) {
+            safe_str_free(&vals[i]);
+        }
+        safe_free(vals);
+        safe_str_free(&c->variable);
+        safe_str_free(&c->property);
+        safe_str_free(&c->op);
+        return NULL;
+    }
     c->in_values = vals;
-    c->in_value_count = vn;
+    c->in_value_count = (int)vn;
     return expr_leaf(*c);
 }
 
@@ -1369,7 +1416,7 @@ static cbm_case_expr_t *parse_case_expr(parser_t *p) {
     if (!kase) {
         return NULL;
     }
-    int bcap = CYP_INIT_CAP4;
+    size_t bcap = CYP_INIT_CAP4;
     kase->branches = malloc(bcap * sizeof(cbm_case_branch_t));
     if (!kase->branches) {
         free(kase);
@@ -1384,8 +1431,10 @@ static cbm_case_expr_t *parse_case_expr(parser_t *p) {
             break;
         }
         const char *then_val = parse_value_literal(p);
-        if (kase->branch_count >= bcap) {
-            int new_bcap = bcap * PAIR_LEN;
+        /* branch_count is `int` in cbm_case_expr_t (cypher.h) and always
+         * non-negative here; bcap is private bookkeeping and stays size_t. */
+        if ((size_t)kase->branch_count >= bcap) {
+            size_t new_bcap = bcap * PAIR_LEN;
             void *tmp = realloc(kase->branches, new_bcap * sizeof(cbm_case_branch_t));
             if (!tmp) {
                 expr_free(when);
@@ -1543,16 +1592,18 @@ static int parse_multiarg_func_item(parser_t *p, cbm_return_item_t *item) {
     const char *canon = multiarg_func_canonical(peek(p)->text);
     advance(p); /* function name */
     expect(p, TOK_LPAREN);
-    int cap = CYP_INIT_CAP4;
-    item->args = malloc((size_t)cap * sizeof(cbm_func_arg_t));
+    size_t cap = CYP_INIT_CAP4;
+    item->args = malloc(cap * sizeof(cbm_func_arg_t));
     item->arg_count = 0;
     while (!check(p, TOK_RPAREN) && !check(p, TOK_EOF)) {
         if (item->arg_count > 0 && !match(p, TOK_COMMA)) {
             break;
         }
-        if (item->arg_count >= cap) {
+        /* arg_count is `int` in cbm_return_item_t (cypher.h) and always
+         * non-negative here. */
+        if ((size_t)item->arg_count >= cap) {
             cap *= PAIR_LEN;
-            item->args = safe_realloc(item->args, (size_t)cap * sizeof(cbm_func_arg_t));
+            item->args = safe_realloc(item->args, cap * sizeof(cbm_func_arg_t));
         }
         if (parse_func_arg(p, &item->args[item->arg_count]) < 0) {
             return CBM_NOT_FOUND;
@@ -1736,7 +1787,7 @@ static int parse_return_or_with(parser_t *p, cbm_return_clause_t **out, bool is_
      * and must return 0 rows — distinguishing the two requires a sentinel, since
      * calloc zeroes limit and `limit > 0` would treat LIMIT 0 as "no limit". */
     r->limit = -1;
-    int cap = CYP_INIT_CAP8;
+    size_t cap = CYP_INIT_CAP8;
     r->items = malloc(cap * sizeof(cbm_return_item_t));
 
     r->distinct = match(p, TOK_DISTINCT);
@@ -1759,7 +1810,9 @@ static int parse_return_or_with(parser_t *p, cbm_return_clause_t **out, bool is_
             return CBM_NOT_FOUND;
         }
 
-        if (r->count >= cap) {
+        /* r->count is `int` in cbm_return_clause_t (cypher.h) and always
+         * non-negative here; cap is private bookkeeping and stays size_t. */
+        if ((size_t)r->count >= cap) {
             cap *= PAIR_LEN;
             r->items = safe_realloc(r->items, cap * sizeof(cbm_return_item_t));
         }
@@ -1813,8 +1866,11 @@ static int parse_return(parser_t *p, cbm_return_clause_t **out) {
 /* Parse a single MATCH pattern into pat */
 static int parse_match_pattern(parser_t *p, cbm_pattern_t *pat) {
     memset(pat, 0, sizeof(*pat));
-    int node_cap = CYP_INIT_CAP4;
-    int rel_cap = CYP_INIT_CAP4;
+    /* node_count/rel_count are `int` in cbm_pattern_t (cypher.h) and always
+     * non-negative here; node_cap/rel_cap are private bookkeeping and stay
+     * size_t. */
+    size_t node_cap = CYP_INIT_CAP4;
+    size_t rel_cap = CYP_INIT_CAP4;
     pat->nodes = malloc(node_cap * sizeof(cbm_node_pattern_t));
     pat->rels = calloc(rel_cap, sizeof(cbm_rel_pattern_t));
 
@@ -1824,7 +1880,7 @@ static int parse_match_pattern(parser_t *p, cbm_pattern_t *pat) {
     pat->node_count = SKIP_ONE;
 
     while (check(p, TOK_DASH) || check(p, TOK_LT)) {
-        if (pat->rel_count >= rel_cap) {
+        if ((size_t)pat->rel_count >= rel_cap) {
             rel_cap *= PAIR_LEN;
             pat->rels = safe_realloc(pat->rels, rel_cap * sizeof(cbm_rel_pattern_t));
         }
@@ -1833,7 +1889,7 @@ static int parse_match_pattern(parser_t *p, cbm_pattern_t *pat) {
         }
         pat->rel_count++;
 
-        if (pat->node_count >= node_cap) {
+        if ((size_t)pat->node_count >= node_cap) {
             node_cap *= PAIR_LEN;
             pat->nodes = safe_realloc(pat->nodes, node_cap * sizeof(cbm_node_pattern_t));
         }
@@ -1894,7 +1950,7 @@ static void parse_unwind_clause(parser_t *p, cbm_query_t *q) {
 
 /* Parse a chain of MATCH / OPTIONAL MATCH patterns into query.
  * Returns -1 on error (fills p->error). */
-static int parse_match_chain(parser_t *p, cbm_query_t *q, int *pat_cap) {
+static int parse_match_chain(parser_t *p, cbm_query_t *q, size_t *pat_cap) {
     while (check(p, TOK_MATCH) || check(p, TOK_OPTIONAL)) {
         bool opt = false;
         if (check(p, TOK_OPTIONAL)) {
@@ -1904,7 +1960,9 @@ static int parse_match_chain(parser_t *p, cbm_query_t *q, int *pat_cap) {
         if (!expect(p, TOK_MATCH)) {
             break;
         }
-        if (q->pattern_count >= *pat_cap) {
+        /* pattern_count is `int` in cbm_query_t (cypher.h) and always
+         * non-negative here; pat_cap is private bookkeeping and stays size_t. */
+        if ((size_t)q->pattern_count >= *pat_cap) {
             *pat_cap *= PAIR_LEN;
             q->patterns = safe_realloc(q->patterns, *pat_cap * sizeof(cbm_pattern_t));
             q->pattern_optional = safe_realloc(q->pattern_optional, *pat_cap * sizeof(bool));
@@ -1920,7 +1978,7 @@ static int parse_match_chain(parser_t *p, cbm_query_t *q, int *pat_cap) {
 
 /* Parse post-WHERE clauses: additional MATCH, WITH, RETURN, UNION */
 static int parse_post_where(parser_t *p, cbm_query_t *q, // NOLINT(misc-no-recursion)
-                            int *pat_cap) {
+                            size_t *pat_cap) {
     /* More MATCH / OPTIONAL MATCH after WHERE */
     if (parse_match_chain(p, q, pat_cap) < 0) {
         return CBM_NOT_FOUND;
@@ -1993,7 +2051,7 @@ int cbm_parse(const cbm_token_t *tokens, int token_count, // NOLINT(misc-no-recu
         return CBM_NOT_FOUND;
     }
 
-    int pat_cap = CYP_INIT_CAP4;
+    size_t pat_cap = CYP_INIT_CAP4;
     q->patterns = malloc(pat_cap * sizeof(cbm_pattern_t));
     q->pattern_optional = malloc(pat_cap * sizeof(bool));
 
@@ -2201,7 +2259,12 @@ static const char *node_string_field(const cbm_node_t *n, const char *prop) {
     };
     for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
         if (strcmp(prop, fields[i].key) == 0) {
-            const char *val = *(const char **)((const char *)n + fields[i].offset);
+            /* Every field reachable via this offset table is a `const char *`
+             * (see cbm_node_t); memcpy the pointer value out instead of
+             * reinterpret-casting through `char *`, which would claim
+             * pointer alignment on a byte address and drop const. */
+            const char *val;
+            memcpy(&val, (const char *)n + fields[i].offset, sizeof(val));
             return val ? val : "";
         }
     }
@@ -2753,7 +2816,7 @@ static bool check_inline_props(const cbm_node_t *n, const cbm_prop_filter_t *pro
 typedef struct {
     const char ***rows;
     int row_count;
-    int row_cap;
+    size_t row_cap;
     const char **columns;
     int col_count;
 } result_builder_t;
@@ -2773,7 +2836,7 @@ static void rb_set_columns(result_builder_t *rb, const char **cols, int count) {
 }
 
 static void rb_add_row(result_builder_t *rb, const char **values) {
-    if (rb->row_count >= rb->row_cap) {
+    if ((size_t)rb->row_count >= rb->row_cap) {
         rb->row_cap *= PAIR_LEN;
         rb->rows = safe_realloc(rb->rows, rb->row_cap * sizeof(const char **));
     }
@@ -3017,7 +3080,7 @@ static void scan_alternation_labels(cbm_store_t *store, const char *project, con
                                     cbm_node_t **out_nodes, int *out_count) {
     *out_nodes = NULL;
     *out_count = 0;
-    int cap = 0;
+    size_t cap = 0;
     char *copy = heap_strdup(labels);
     if (!copy) {
         return;
@@ -3028,9 +3091,11 @@ static void scan_alternation_labels(cbm_store_t *store, const char *project, con
         int pc = 0;
         cbm_store_find_nodes_by_label(store, project, tok, &part, &pc);
         if (pc > 0 && part) {
-            if (*out_count + pc > cap) {
-                cap = (*out_count + pc) * PAIR_LEN;
-                *out_nodes = safe_realloc(*out_nodes, (size_t)cap * sizeof(cbm_node_t));
+            /* *out_count/pc are per-label result counts (cbm_store_find_nodes_by_label),
+             * never negative. */
+            if ((size_t)(*out_count + pc) > cap) {
+                cap = (size_t)(*out_count + pc) * PAIR_LEN;
+                *out_nodes = safe_realloc(*out_nodes, cap * sizeof(cbm_node_t));
             }
             memcpy(*out_nodes + *out_count, part, (size_t)pc * sizeof(cbm_node_t));
             *out_count += pc;
@@ -3054,7 +3119,9 @@ static void scan_pattern_nodes(cbm_store_t *store, const char *project, int max_
         cbm_search_output_t sout = {0};
         cbm_store_search(store, &params, &sout);
         *out_count = sout.count;
-        *out_nodes = malloc(sout.count * sizeof(cbm_node_t));
+        /* sout.count is `int` in cbm_search_output_t (store.h, owned by another
+         * module) — a result count from cbm_store_search, never negative. */
+        *out_nodes = malloc((size_t)sout.count * sizeof(cbm_node_t));
         for (int i = 0; i < sout.count; i++) {
             (*out_nodes)[i] = sout.results[i].node;
             sout.results[i].node.name = NULL;
@@ -3417,7 +3484,9 @@ static void rb_apply_skip_limit(result_builder_t *rb, int skip_n, int limit) {
             }
             free(rb->rows[i]);
         }
-        memmove(rb->rows, rb->rows + skip_n, (rb->row_count - skip_n) * sizeof(const char **));
+        /* guarded above: skip_n < rb->row_count, so the subtraction stays positive. */
+        memmove(rb->rows, rb->rows + skip_n,
+               (size_t)(rb->row_count - skip_n) * sizeof(const char **));
         rb->row_count -= skip_n;
     } else if (skip_n >= rb->row_count) {
         for (int i = 0; i < rb->row_count; i++) {
@@ -3704,6 +3773,7 @@ static void distinct_list_add(char ***list, int *count, const char *val) {
             return;
         }
     }
+    /* *count is a running distinct-value tally — never negative. */
     int idx = (*count)++;
     *list = safe_realloc(*list, (size_t)(idx + SKIP_ONE) * sizeof(char *));
     (*list)[idx] = heap_strdup(val);
@@ -3743,7 +3813,8 @@ static void bindings_skip_limit(binding_t *vbindings, int *count, int skip, int 
         for (int i = 0; i < skip; i++) {
             binding_free(&vbindings[i]);
         }
-        memmove(vbindings, vbindings + skip, (*count - skip) * sizeof(binding_t));
+        /* guarded above: skip < *count, so the subtraction stays positive. */
+        memmove(vbindings, vbindings + skip, (size_t)(*count - skip) * sizeof(binding_t));
         *count -= skip;
     } else if (skip >= *count) {
         for (int i = 0; i < *count; i++) {
@@ -3812,10 +3883,12 @@ static int with_agg_build_key(cbm_return_clause_t *wc, binding_t *b, char *key, 
     return kl;
 }
 
-/* Find or create an aggregation group. Returns index. */
-static int with_agg_find_or_create(with_agg_t **aggs, int *agg_cnt, int *agg_cap,
-                                   cbm_return_clause_t *wc, binding_t *b, const char *key) {
-    for (int a = 0; a < *agg_cnt; a++) {
+/* Find or create an aggregation group. Returns index. agg_cnt/agg_cap are
+ * pure bookkeeping — never a sentinel, always a valid index on return — so
+ * both stay size_t along with the index itself. */
+static size_t with_agg_find_or_create(with_agg_t **aggs, size_t *agg_cnt, size_t *agg_cap,
+                                      cbm_return_clause_t *wc, binding_t *b, const char *key) {
+    for (size_t a = 0; a < *agg_cnt; a++) {
         if (strcmp((*aggs)[a].group_key, key) == 0) {
             return a;
         }
@@ -3824,16 +3897,19 @@ static int with_agg_find_or_create(with_agg_t **aggs, int *agg_cnt, int *agg_cap
         *agg_cap *= PAIR_LEN;
         *aggs = safe_realloc(*aggs, *agg_cap * sizeof(with_agg_t));
     }
-    int found = (*agg_cnt)++;
+    size_t found = (*agg_cnt)++;
     snprintf((*aggs)[found].group_key, sizeof((*aggs)[found].group_key), "%s", key);
-    (*aggs)[found].group_vals = calloc(wc->count, sizeof(const char *));
-    (*aggs)[found].sums = calloc(wc->count, sizeof(double));
-    (*aggs)[found].counts = calloc(wc->count, sizeof(int));
-    (*aggs)[found].mins = calloc(wc->count, sizeof(double));
-    (*aggs)[found].maxs = calloc(wc->count, sizeof(double));
-    (*aggs)[found].distinct_lists = calloc(wc->count, sizeof(char **));
-    (*aggs)[found].distinct_n = calloc(wc->count, sizeof(int));
-    (*aggs)[found].group_node_ids = calloc(wc->count, sizeof(int64_t));
+    /* wc->count is `int` in cbm_return_clause_t (cypher.h); parse_return_or_with
+     * rejects any RETURN/WITH item count above CBM_SZ_32, so this is bounded
+     * and non-negative. */
+    (*aggs)[found].group_vals = calloc((size_t)wc->count, sizeof(const char *));
+    (*aggs)[found].sums = calloc((size_t)wc->count, sizeof(double));
+    (*aggs)[found].counts = calloc((size_t)wc->count, sizeof(int));
+    (*aggs)[found].mins = calloc((size_t)wc->count, sizeof(double));
+    (*aggs)[found].maxs = calloc((size_t)wc->count, sizeof(double));
+    (*aggs)[found].distinct_lists = calloc((size_t)wc->count, sizeof(char **));
+    (*aggs)[found].distinct_n = calloc((size_t)wc->count, sizeof(int));
+    (*aggs)[found].group_node_ids = calloc((size_t)wc->count, sizeof(int64_t));
     for (int ci = 0; ci < wc->count; ci++) {
         (*aggs)[found].mins[ci] = CYP_DBL_MAX;
         (*aggs)[found].maxs[ci] = -CYP_DBL_MAX;
@@ -3911,8 +3987,8 @@ static void with_add_vbinding_var(binding_t *vb, const char *alias, const char *
 }
 
 /* Free with_agg_t array */
-static void with_agg_free(with_agg_t *aggs, int agg_cnt, int item_count) {
-    for (int a = 0; a < agg_cnt; a++) {
+static void with_agg_free(with_agg_t *aggs, size_t agg_cnt, int item_count) {
+    for (size_t a = 0; a < agg_cnt; a++) {
         for (int ci = 0; ci < item_count; ci++) {
             safe_str_free(&aggs[a].group_vals[ci]);
             if (aggs[a].distinct_lists && aggs[a].distinct_lists[ci]) {
@@ -3937,14 +4013,14 @@ static void with_agg_free(with_agg_t *aggs, int agg_cnt, int item_count) {
 /* Execute WITH aggregation path */
 static void execute_with_aggregate(cbm_return_clause_t *wc, binding_t *bindings, int bind_count,
                                    binding_t **vbindings, int *vcount) {
-    int agg_cap = CBM_SZ_256;
+    size_t agg_cap = CBM_SZ_256;
     with_agg_t *aggs = calloc(agg_cap, sizeof(with_agg_t));
-    int agg_cnt = 0;
+    size_t agg_cnt = 0;
 
     for (int bi = 0; bi < bind_count; bi++) {
         char key[CBM_SZ_1K] = "";
         with_agg_build_key(wc, &bindings[bi], key, sizeof(key));
-        int found = with_agg_find_or_create(&aggs, &agg_cnt, &agg_cap, wc, &bindings[bi], key);
+        size_t found = with_agg_find_or_create(&aggs, &agg_cnt, &agg_cap, wc, &bindings[bi], key);
         with_agg_accumulate(&aggs[found], wc, &bindings[bi]);
     }
 
@@ -3953,7 +4029,7 @@ static void execute_with_aggregate(cbm_return_clause_t *wc, binding_t *bindings,
         with_agg_free(aggs, agg_cnt, wc->count);
         return;
     }
-    for (int a = 0; a < agg_cnt; a++) {
+    for (size_t a = 0; a < agg_cnt; a++) {
         binding_t vb = {0};
         /* Carry the store so node_prop can re-fetch a carried node's properties
          * (and compute in_degree/out_degree) on the projected virtual binding. */
@@ -4073,7 +4149,9 @@ static void execute_with_clause(cbm_query_t *q, binding_t **bindings_ptr, int *b
     binding_t *bindings = *bindings_ptr;
     int bind_count = *bind_count_ptr;
 
-    binding_t *vbindings = malloc((bind_count + SKIP_ONE) * sizeof(binding_t));
+    /* bind_count is a running binding tally maintained by the caller — never
+     * negative — sized here to the upper bound of one row per binding. */
+    binding_t *vbindings = malloc((size_t)(bind_count + SKIP_ONE) * sizeof(binding_t));
     int vcount = 0;
 
     bool has_agg = false;
@@ -4243,16 +4321,18 @@ typedef struct {
 static void ret_agg_init_group(ret_agg_entry_t *entry, const char *key, int item_count,
                                const char **vals) {
     snprintf(entry->group_key, sizeof(entry->group_key), "%s", key);
-    entry->group_vals = calloc(item_count, sizeof(const char *));
-    entry->sums = calloc(item_count, sizeof(double));
-    entry->counts = calloc(item_count, sizeof(int));
+    /* item_count is always ret->count (cbm_return_clause_t.count, cypher.h),
+     * which parse_return_or_with bounds to CBM_SZ_32 — non-negative and small. */
+    entry->group_vals = calloc((size_t)item_count, sizeof(const char *));
+    entry->sums = calloc((size_t)item_count, sizeof(double));
+    entry->counts = calloc((size_t)item_count, sizeof(int));
     /* calloc: the sentinel loop below overwrites every slot, but the bound
      * equality with the accumulate loop is invisible to path-sensitive
      * analysis; zeroed backing keeps any modeled mismatch defined. */
-    entry->mins = calloc(item_count, sizeof(double));
-    entry->maxs = calloc(item_count, sizeof(double));
-    entry->collect_lists = calloc(item_count, sizeof(char **));
-    entry->collect_counts = calloc(item_count, sizeof(int));
+    entry->mins = calloc((size_t)item_count, sizeof(double));
+    entry->maxs = calloc((size_t)item_count, sizeof(double));
+    entry->collect_lists = calloc((size_t)item_count, sizeof(char **));
+    entry->collect_counts = calloc((size_t)item_count, sizeof(int));
     for (int ci = 0; ci < item_count; ci++) {
         entry->mins[ci] = CYP_DBL_MAX;
         entry->maxs[ci] = -CYP_DBL_MAX;
@@ -4277,9 +4357,10 @@ static void ret_agg_accumulate(ret_agg_entry_t *entry, cbm_return_clause_t *ret,
             entry->maxs[ci] = dv;
         }
         if (strcmp(ret->items[ci].func, "COLLECT") == 0) {
+            /* collect_counts[ci] is a running per-item tally — never negative. */
             int idx = entry->collect_counts[ci]++;
             entry->collect_lists[ci] =
-                safe_realloc(entry->collect_lists[ci], (idx + SKIP_ONE) * sizeof(char *));
+                safe_realloc(entry->collect_lists[ci], (size_t)(idx + SKIP_ONE) * sizeof(char *));
             entry->collect_lists[ci][idx] = heap_strdup(raw);
         } else if (ret->items[ci].distinct && strcmp(ret->items[ci].func, "COUNT") == 0) {
             /* COUNT(DISTINCT x): track unique values; emit the set size (#239). */
@@ -4359,7 +4440,9 @@ static void ret_agg_emit_row(cbm_return_clause_t *ret, ret_agg_entry_t *agg, res
 
 static void execute_return_agg(cbm_return_clause_t *ret, binding_t *bindings, int bind_count,
                                result_builder_t *rb) {
-    int agg_cap = CBM_SZ_256;
+    /* agg_count doubles as a not-found sentinel via `found` (`< 0` below), so
+     * it stays signed `int`; agg_cap is private bookkeeping and stays size_t. */
+    size_t agg_cap = CBM_SZ_256;
     ret_agg_entry_t *aggs = calloc(agg_cap, sizeof(ret_agg_entry_t));
     int agg_count = 0;
 
@@ -4382,7 +4465,7 @@ static void execute_return_agg(cbm_return_clause_t *ret, binding_t *bindings, in
             }
         }
         if (found < 0) {
-            if (agg_count >= agg_cap) {
+            if ((size_t)agg_count >= agg_cap) {
                 agg_cap *= PAIR_LEN;
                 aggs = safe_realloc(aggs, agg_cap * sizeof(ret_agg_entry_t));
             }
@@ -4771,8 +4854,10 @@ static int execute_single(cbm_store_t *store, cbm_query_t *q, const char *projec
     scan_pattern_nodes(store, project, max_rows, &pat0->nodes[0], &scanned, &scan_count);
 
     /* Build initial bindings with early WHERE */
+    /* scan_count is a non-negative store result count (see scan_pattern_nodes);
+     * max_rows is a caller-supplied row limit, never negative. */
     int bind_cap = scan_count > max_rows ? scan_count : (max_rows > 0 ? max_rows : SKIP_ONE);
-    binding_t *bindings = malloc((bind_cap + SKIP_ONE) * sizeof(binding_t));
+    binding_t *bindings = malloc((size_t)(bind_cap + SKIP_ONE) * sizeof(binding_t));
     int bind_count = 0;
     const char *var_name = pat0->nodes[0].variable ? pat0->nodes[0].variable : "_n0";
 

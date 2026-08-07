@@ -7,6 +7,7 @@
  * Suite 4: Full pipeline integration with generated test project
  */
 #include "test_framework.h"
+#include "suites.h"
 #include "test_helpers.h"
 #include "simhash/minhash.h"
 #include "cbm.h"
@@ -69,118 +70,118 @@ static int count_similar_to_edges(const cbm_gbuf_t *gb) {
 /* Large Go function template for fingerprint tests.  Must have enough
  * structural diversity (>= 32 unique structural trigrams) after leaf-only
  * tokenisation and normalisation. */
-#define GO_VALIDATE_USER_SRC \
-    "package main\n" \
-    "import \"errors\"\n" \
-    "import \"strings\"\n" \
-    "func ValidateUser(u User) error {\n" \
-    "    if u.Name == \"\" {\n" \
-    "        return errors.New(\"name required\")\n" \
-    "    }\n" \
-    "    if len(u.Name) > 100 {\n" \
-    "        return errors.New(\"name too long\")\n" \
-    "    }\n" \
-    "    if u.Age < 0 {\n" \
-    "        return errors.New(\"invalid age\")\n" \
-    "    }\n" \
-    "    if u.Age > 200 {\n" \
-    "        return errors.New(\"age too high\")\n" \
-    "    }\n" \
-    "    if u.Email == \"\" {\n" \
-    "        return errors.New(\"email required\")\n" \
-    "    }\n" \
-    "    if !strings.Contains(u.Email, \"@\") {\n" \
-    "        return errors.New(\"invalid email\")\n" \
-    "    }\n" \
-    "    if u.Phone == \"\" {\n" \
-    "        return errors.New(\"phone required\")\n" \
-    "    }\n" \
-    "    if len(u.Phone) < 7 {\n" \
-    "        return errors.New(\"phone too short\")\n" \
-    "    }\n" \
-    "    if u.Country == \"\" {\n" \
+#define GO_VALIDATE_USER_SRC                            \
+    "package main\n"                                    \
+    "import \"errors\"\n"                               \
+    "import \"strings\"\n"                              \
+    "func ValidateUser(u User) error {\n"               \
+    "    if u.Name == \"\" {\n"                         \
+    "        return errors.New(\"name required\")\n"    \
+    "    }\n"                                           \
+    "    if len(u.Name) > 100 {\n"                      \
+    "        return errors.New(\"name too long\")\n"    \
+    "    }\n"                                           \
+    "    if u.Age < 0 {\n"                              \
+    "        return errors.New(\"invalid age\")\n"      \
+    "    }\n"                                           \
+    "    if u.Age > 200 {\n"                            \
+    "        return errors.New(\"age too high\")\n"     \
+    "    }\n"                                           \
+    "    if u.Email == \"\" {\n"                        \
+    "        return errors.New(\"email required\")\n"   \
+    "    }\n"                                           \
+    "    if !strings.Contains(u.Email, \"@\") {\n"      \
+    "        return errors.New(\"invalid email\")\n"    \
+    "    }\n"                                           \
+    "    if u.Phone == \"\" {\n"                        \
+    "        return errors.New(\"phone required\")\n"   \
+    "    }\n"                                           \
+    "    if len(u.Phone) < 7 {\n"                       \
+    "        return errors.New(\"phone too short\")\n"  \
+    "    }\n"                                           \
+    "    if u.Country == \"\" {\n"                      \
     "        return errors.New(\"country required\")\n" \
-    "    }\n" \
-    "    for _, c := range u.Tags {\n" \
-    "        if c == \"\" {\n" \
-    "            return errors.New(\"empty tag\")\n" \
-    "        }\n" \
-    "    }\n" \
-    "    return nil\n" \
+    "    }\n"                                           \
+    "    for _, c := range u.Tags {\n"                  \
+    "        if c == \"\" {\n"                          \
+    "            return errors.New(\"empty tag\")\n"    \
+    "        }\n"                                       \
+    "    }\n"                                           \
+    "    return nil\n"                                  \
     "}\n"
 
 /* Same structure, different names/types — near-clone */
-#define GO_VALIDATE_ORDER_SRC \
-    "package main\n" \
-    "import \"errors\"\n" \
-    "import \"strings\"\n" \
-    "func ValidateOrder(o Order) error {\n" \
-    "    if o.Title == \"\" {\n" \
-    "        return errors.New(\"title required\")\n" \
-    "    }\n" \
-    "    if len(o.Title) > 100 {\n" \
-    "        return errors.New(\"title too long\")\n" \
-    "    }\n" \
-    "    if o.Amount < 0 {\n" \
-    "        return errors.New(\"invalid amount\")\n" \
-    "    }\n" \
-    "    if o.Amount > 200 {\n" \
-    "        return errors.New(\"amount too high\")\n" \
-    "    }\n" \
-    "    if o.Status == \"\" {\n" \
-    "        return errors.New(\"status required\")\n" \
-    "    }\n" \
-    "    if !strings.Contains(o.Status, \"@\") {\n" \
-    "        return errors.New(\"invalid status\")\n" \
-    "    }\n" \
-    "    if o.Region == \"\" {\n" \
-    "        return errors.New(\"region required\")\n" \
-    "    }\n" \
-    "    if len(o.Region) < 7 {\n" \
+#define GO_VALIDATE_ORDER_SRC                           \
+    "package main\n"                                    \
+    "import \"errors\"\n"                               \
+    "import \"strings\"\n"                              \
+    "func ValidateOrder(o Order) error {\n"             \
+    "    if o.Title == \"\" {\n"                        \
+    "        return errors.New(\"title required\")\n"   \
+    "    }\n"                                           \
+    "    if len(o.Title) > 100 {\n"                     \
+    "        return errors.New(\"title too long\")\n"   \
+    "    }\n"                                           \
+    "    if o.Amount < 0 {\n"                           \
+    "        return errors.New(\"invalid amount\")\n"   \
+    "    }\n"                                           \
+    "    if o.Amount > 200 {\n"                         \
+    "        return errors.New(\"amount too high\")\n"  \
+    "    }\n"                                           \
+    "    if o.Status == \"\" {\n"                       \
+    "        return errors.New(\"status required\")\n"  \
+    "    }\n"                                           \
+    "    if !strings.Contains(o.Status, \"@\") {\n"     \
+    "        return errors.New(\"invalid status\")\n"   \
+    "    }\n"                                           \
+    "    if o.Region == \"\" {\n"                       \
+    "        return errors.New(\"region required\")\n"  \
+    "    }\n"                                           \
+    "    if len(o.Region) < 7 {\n"                      \
     "        return errors.New(\"region too short\")\n" \
-    "    }\n" \
-    "    if o.Vendor == \"\" {\n" \
-    "        return errors.New(\"vendor required\")\n" \
-    "    }\n" \
-    "    for _, c := range o.Items {\n" \
-    "        if c == \"\" {\n" \
-    "            return errors.New(\"empty item\")\n" \
-    "        }\n" \
-    "    }\n" \
-    "    return nil\n" \
+    "    }\n"                                           \
+    "    if o.Vendor == \"\" {\n"                       \
+    "        return errors.New(\"vendor required\")\n"  \
+    "    }\n"                                           \
+    "    for _, c := range o.Items {\n"                 \
+    "        if c == \"\" {\n"                          \
+    "            return errors.New(\"empty item\")\n"   \
+    "        }\n"                                       \
+    "    }\n"                                           \
+    "    return nil\n"                                  \
     "}\n"
 
 /* Completely different structure */
-#define GO_HANDLE_REQUEST_SRC \
-    "package main\n" \
-    "import \"net/http\"\n" \
-    "import \"encoding/json\"\n" \
-    "import \"io\"\n" \
+#define GO_HANDLE_REQUEST_SRC                                        \
+    "package main\n"                                                 \
+    "import \"net/http\"\n"                                          \
+    "import \"encoding/json\"\n"                                     \
+    "import \"io\"\n"                                                \
     "func HandleRequest(w http.ResponseWriter, r *http.Request) {\n" \
-    "    body, err := io.ReadAll(r.Body)\n" \
-    "    if err != nil {\n" \
-    "        http.Error(w, err.Error(), 400)\n" \
-    "        return\n" \
-    "    }\n" \
-    "    defer r.Body.Close()\n" \
-    "    var data map[string]interface{}\n" \
-    "    if err := json.Unmarshal(body, &data); err != nil {\n" \
-    "        http.Error(w, err.Error(), 400)\n" \
-    "        return\n" \
-    "    }\n" \
-    "    result := make(map[string]interface{})\n" \
-    "    for k, v := range data {\n" \
-    "        switch val := v.(type) {\n" \
-    "        case string:\n" \
-    "            result[k] = strings.ToUpper(val)\n" \
-    "        case float64:\n" \
-    "            result[k] = val * 2\n" \
-    "        default:\n" \
-    "            result[k] = v\n" \
-    "        }\n" \
-    "    }\n" \
-    "    w.Header().Set(\"Content-Type\", \"application/json\")\n" \
-    "    json.NewEncoder(w).Encode(result)\n" \
+    "    body, err := io.ReadAll(r.Body)\n"                          \
+    "    if err != nil {\n"                                          \
+    "        http.Error(w, err.Error(), 400)\n"                      \
+    "        return\n"                                               \
+    "    }\n"                                                        \
+    "    defer r.Body.Close()\n"                                     \
+    "    var data map[string]interface{}\n"                          \
+    "    if err := json.Unmarshal(body, &data); err != nil {\n"      \
+    "        http.Error(w, err.Error(), 400)\n"                      \
+    "        return\n"                                               \
+    "    }\n"                                                        \
+    "    result := make(map[string]interface{})\n"                   \
+    "    for k, v := range data {\n"                                 \
+    "        switch val := v.(type) {\n"                             \
+    "        case string:\n"                                         \
+    "            result[k] = strings.ToUpper(val)\n"                 \
+    "        case float64:\n"                                        \
+    "            result[k] = val * 2\n"                              \
+    "        default:\n"                                             \
+    "            result[k] = v\n"                                    \
+    "        }\n"                                                    \
+    "    }\n"                                                        \
+    "    w.Header().Set(\"Content-Type\", \"application/json\")\n"   \
+    "    json.NewEncoder(w).Encode(result)\n"                        \
     "}\n"
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -205,8 +206,7 @@ TEST(minhash_identical_source_same_fingerprint) {
     ASSERT_EQ(d1->fingerprint_k, CBM_MINHASH_K);
 
     /* Identical source → identical fingerprint */
-    ASSERT_MEM_EQ(d1->fingerprint, d2->fingerprint,
-                  (size_t)CBM_MINHASH_K * sizeof(uint32_t));
+    ASSERT_MEM_EQ(d1->fingerprint, d2->fingerprint, (size_t)CBM_MINHASH_K * sizeof(uint32_t));
 
     cbm_free_result(r1);
     cbm_free_result(r2);
@@ -230,9 +230,8 @@ TEST(minhash_renamed_vars_same_fingerprint) {
     ASSERT_NOT_NULL(da->fingerprint);
     ASSERT_NOT_NULL(db->fingerprint);
 
-    double j = cbm_minhash_jaccard(
-        (const cbm_minhash_t *)da->fingerprint,
-        (const cbm_minhash_t *)db->fingerprint);
+    double j = cbm_minhash_jaccard((const cbm_minhash_t *)da->fingerprint,
+                                   (const cbm_minhash_t *)db->fingerprint);
     /* Renamed vars + same structure → very high Jaccard */
     ASSERT_TRUE(j >= 0.90);
 
@@ -258,9 +257,8 @@ TEST(minhash_different_code_different_fingerprint) {
     ASSERT_NOT_NULL(da->fingerprint);
     ASSERT_NOT_NULL(db->fingerprint);
 
-    double j = cbm_minhash_jaccard(
-        (const cbm_minhash_t *)da->fingerprint,
-        (const cbm_minhash_t *)db->fingerprint);
+    double j = cbm_minhash_jaccard((const cbm_minhash_t *)da->fingerprint,
+                                   (const cbm_minhash_t *)db->fingerprint);
     /* Different structure → low Jaccard */
     ASSERT_TRUE(j < 0.5);
 
@@ -274,48 +272,47 @@ TEST(minhash_minor_edit_high_jaccard) {
     const char *src_a = GO_VALIDATE_USER_SRC;
 
     /* ValidateUser with one extra check added at the end */
-    const char *src_b =
-        "package main\n"
-        "import \"errors\"\n"
-        "import \"strings\"\n"
-        "func ValidateUser(u User) error {\n"
-        "    if u.Name == \"\" {\n"
-        "        return errors.New(\"name required\")\n"
-        "    }\n"
-        "    if len(u.Name) > 100 {\n"
-        "        return errors.New(\"name too long\")\n"
-        "    }\n"
-        "    if u.Age < 0 {\n"
-        "        return errors.New(\"invalid age\")\n"
-        "    }\n"
-        "    if u.Age > 200 {\n"
-        "        return errors.New(\"age too high\")\n"
-        "    }\n"
-        "    if u.Email == \"\" {\n"
-        "        return errors.New(\"email required\")\n"
-        "    }\n"
-        "    if !strings.Contains(u.Email, \"@\") {\n"
-        "        return errors.New(\"invalid email\")\n"
-        "    }\n"
-        "    if u.Phone == \"\" {\n"
-        "        return errors.New(\"phone required\")\n"
-        "    }\n"
-        "    if len(u.Phone) < 7 {\n"
-        "        return errors.New(\"phone too short\")\n"
-        "    }\n"
-        "    if u.Country == \"\" {\n"
-        "        return errors.New(\"country required\")\n"
-        "    }\n"
-        "    for _, c := range u.Tags {\n"
-        "        if c == \"\" {\n"
-        "            return errors.New(\"empty tag\")\n"
-        "        }\n"
-        "    }\n"
-        "    if u.Active == false {\n"
-        "        return errors.New(\"user inactive\")\n"
-        "    }\n"
-        "    return nil\n"
-        "}\n";
+    const char *src_b = "package main\n"
+                        "import \"errors\"\n"
+                        "import \"strings\"\n"
+                        "func ValidateUser(u User) error {\n"
+                        "    if u.Name == \"\" {\n"
+                        "        return errors.New(\"name required\")\n"
+                        "    }\n"
+                        "    if len(u.Name) > 100 {\n"
+                        "        return errors.New(\"name too long\")\n"
+                        "    }\n"
+                        "    if u.Age < 0 {\n"
+                        "        return errors.New(\"invalid age\")\n"
+                        "    }\n"
+                        "    if u.Age > 200 {\n"
+                        "        return errors.New(\"age too high\")\n"
+                        "    }\n"
+                        "    if u.Email == \"\" {\n"
+                        "        return errors.New(\"email required\")\n"
+                        "    }\n"
+                        "    if !strings.Contains(u.Email, \"@\") {\n"
+                        "        return errors.New(\"invalid email\")\n"
+                        "    }\n"
+                        "    if u.Phone == \"\" {\n"
+                        "        return errors.New(\"phone required\")\n"
+                        "    }\n"
+                        "    if len(u.Phone) < 7 {\n"
+                        "        return errors.New(\"phone too short\")\n"
+                        "    }\n"
+                        "    if u.Country == \"\" {\n"
+                        "        return errors.New(\"country required\")\n"
+                        "    }\n"
+                        "    for _, c := range u.Tags {\n"
+                        "        if c == \"\" {\n"
+                        "            return errors.New(\"empty tag\")\n"
+                        "        }\n"
+                        "    }\n"
+                        "    if u.Active == false {\n"
+                        "        return errors.New(\"user inactive\")\n"
+                        "    }\n"
+                        "    return nil\n"
+                        "}\n";
 
     CBMFileResult *ra = extract_one(src_a, CBM_LANG_GO, "test", "a.go");
     CBMFileResult *rb = extract_one(src_b, CBM_LANG_GO, "test", "b.go");
@@ -329,9 +326,8 @@ TEST(minhash_minor_edit_high_jaccard) {
     ASSERT_NOT_NULL(da->fingerprint);
     ASSERT_NOT_NULL(db->fingerprint);
 
-    double j = cbm_minhash_jaccard(
-        (const cbm_minhash_t *)da->fingerprint,
-        (const cbm_minhash_t *)db->fingerprint);
+    double j = cbm_minhash_jaccard((const cbm_minhash_t *)da->fingerprint,
+                                   (const cbm_minhash_t *)db->fingerprint);
     /* Minor edit → moderately high Jaccard.  Trigram-based MinHash
      * is sensitive to insertions (shifts the trigram window), so a
      * single added statement may drop Jaccard more than expected.
@@ -348,9 +344,8 @@ TEST(minhash_minor_edit_high_jaccard) {
  * Note: even a 2-line Go function can have 15+ AST nodes (Go's AST is verbose).
  * Use a truly minimal function to test the threshold. */
 TEST(minhash_empty_body_skipped) {
-    const char *src =
-        "package main\n"
-        "func Noop() {}\n";
+    const char *src = "package main\n"
+                      "func Noop() {}\n";
 
     CBMFileResult *r = extract_one(src, CBM_LANG_GO, "test", "tiny.go");
     ASSERT_NOT_NULL(r);
@@ -384,9 +379,8 @@ TEST(minhash_type_annotation_normalized) {
     ASSERT_NOT_NULL(da->fingerprint);
     ASSERT_NOT_NULL(db->fingerprint);
 
-    double j = cbm_minhash_jaccard(
-        (const cbm_minhash_t *)da->fingerprint,
-        (const cbm_minhash_t *)db->fingerprint);
+    double j = cbm_minhash_jaccard((const cbm_minhash_t *)da->fingerprint,
+                                   (const cbm_minhash_t *)db->fingerprint);
     /* Type annotations normalised → high Jaccard */
     ASSERT_TRUE(j >= 0.90);
 
@@ -435,7 +429,7 @@ TEST(jaccard_partial_overlap) {
 TEST(minhash_hex_roundtrip) {
     cbm_minhash_t original;
     for (int i = 0; i < CBM_MINHASH_K; i++) {
-        original.values[i] = (uint32_t)(0xDEAD0000 + i);
+        original.values[i] = (uint32_t)(0xDEAD0000u + (unsigned int)i);
     }
     char hex[CBM_MINHASH_HEX_LEN + 1];
     cbm_minhash_to_hex(&original, hex, sizeof(hex));
@@ -556,7 +550,7 @@ TEST(lsh_index_build_and_query) {
  * ═══════════════════════════════════════════════════════════════════ */
 
 /* Helper: build a fingerprint hex string for a properties_json. */
-static void make_fp_props(char *buf, int bufsize, const cbm_minhash_t *fp) {
+static void make_fp_props(char *buf, size_t bufsize, const cbm_minhash_t *fp) {
     char hex[CBM_MINHASH_HEX_LEN + 1];
     cbm_minhash_to_hex(fp, hex, sizeof(hex));
     snprintf(buf, bufsize, "{\"fp\":\"%s\"}", hex);
@@ -571,8 +565,10 @@ TEST(pass_similarity_creates_edges) {
     make_fp_props(props, sizeof(props), &fp);
 
     cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
-    cbm_gbuf_upsert_node(gb, "Function", "foo", "test.a.foo", "a.go", 1, 10, props);
-    cbm_gbuf_upsert_node(gb, "Function", "bar", "test.b.bar", "b.go", 1, 10, props);
+    cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "Function", "foo", "test.a.foo", "a.go", 1, 10, props));
+    cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "Function", "bar", "test.b.bar", "b.go", 1, 10, props));
 
     atomic_int cancelled = 0;
     cbm_pipeline_ctx_t ctx = {
@@ -604,8 +600,10 @@ TEST(pass_similarity_no_edges_different) {
     make_fp_props(props_b, sizeof(props_b), &fp_b);
 
     cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
-    cbm_gbuf_upsert_node(gb, "Function", "foo", "test.a.foo", "a.go", 1, 10, props_a);
-    cbm_gbuf_upsert_node(gb, "Function", "bar", "test.b.bar", "b.go", 1, 10, props_b);
+    cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "Function", "foo", "test.a.foo", "a.go", 1, 10, props_a));
+    cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "Function", "bar", "test.b.bar", "b.go", 1, 10, props_b));
 
     atomic_int cancelled = 0;
     cbm_pipeline_ctx_t ctx = {
@@ -635,9 +633,10 @@ TEST(pass_similarity_same_file_tagged) {
     make_fp_props(props, sizeof(props), &fp);
 
     cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
-    cbm_gbuf_upsert_node(gb, "Function", "foo", "test.a.foo", "same.go", 1, 10, props);
-    int64_t id_b =
-        cbm_gbuf_upsert_node(gb, "Function", "bar", "test.a.bar", "same.go", 11, 20, props);
+    cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "Function", "foo", "test.a.foo", "same.go", 1, 10, props));
+    int64_t id_b = cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "Function", "bar", "test.a.bar", "same.go", 11, 20, props));
 
     atomic_int cancelled = 0;
     cbm_pipeline_ctx_t ctx = {
@@ -654,7 +653,7 @@ TEST(pass_similarity_same_file_tagged) {
      * "test.a.bar" < "test.a.foo", so bar owns the pair and is the source. */
     const cbm_gbuf_edge_t **edges = NULL;
     int edge_count = 0;
-    cbm_gbuf_find_edges_by_source_type(gb, id_b, "SIMILAR_TO", &edges, &edge_count);
+    cbm_gbuf_find_edges_by_source_type(gb, cbm_node_id(id_b), "SIMILAR_TO", &edges, &edge_count);
     ASSERT_EQ(edge_count, 1);
     /* Edge should have same_file property */
     {
@@ -676,8 +675,10 @@ TEST(pass_similarity_cross_language_skip) {
     make_fp_props(props, sizeof(props), &fp);
 
     cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
-    cbm_gbuf_upsert_node(gb, "Function", "foo", "test.a.foo", "a.go", 1, 10, props);
-    cbm_gbuf_upsert_node(gb, "Function", "bar", "test.b.bar", "b.py", 1, 10, props);
+    cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "Function", "foo", "test.a.foo", "a.go", 1, 10, props));
+    cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "Function", "bar", "test.b.bar", "b.py", 1, 10, props));
 
     atomic_int cancelled = 0;
     cbm_pipeline_ctx_t ctx = {
@@ -714,8 +715,10 @@ TEST(pass_similarity_edge_properties) {
     make_fp_props(props_b, sizeof(props_b), &fp_b);
 
     cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
-    int64_t id_a = cbm_gbuf_upsert_node(gb, "Function", "foo", "test.a.foo", "a.go", 1, 10, props_a);
-    cbm_gbuf_upsert_node(gb, "Function", "bar", "test.b.bar", "b.go", 1, 10, props_b);
+    int64_t id_a = cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "Function", "foo", "test.a.foo", "a.go", 1, 10, props_a));
+    cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "Function", "bar", "test.b.bar", "b.go", 1, 10, props_b));
 
     atomic_int cancelled = 0;
     cbm_pipeline_ctx_t ctx = {
@@ -730,7 +733,7 @@ TEST(pass_similarity_edge_properties) {
 
     const cbm_gbuf_edge_t **edges = NULL;
     int edge_count = 0;
-    cbm_gbuf_find_edges_by_source_type(gb, id_a, "SIMILAR_TO", &edges, &edge_count);
+    cbm_gbuf_find_edges_by_source_type(gb, cbm_node_id(id_a), "SIMILAR_TO", &edges, &edge_count);
     ASSERT_EQ(edge_count, 1);
     {
         double jaccard = 0.0;
@@ -759,7 +762,7 @@ TEST(pass_similarity_max_edges_cap) {
         snprintf(name, sizeof(name), "func_%d", i);
         snprintf(qn, sizeof(qn), "test.f%d.func_%d", i, i);
         snprintf(path, sizeof(path), "f%d.go", i);
-        cbm_gbuf_upsert_node(gb, "Function", name, qn, path, 1, 10, props);
+        cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", name, qn, path, 1, 10, props));
     }
 
     atomic_int cancelled = 0;
@@ -791,8 +794,10 @@ TEST(pass_similarity_max_edges_cap) {
 TEST(pass_similarity_short_funcs_skipped) {
     /* Nodes without "fp" in properties → no edges */
     cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
-    cbm_gbuf_upsert_node(gb, "Function", "tiny1", "test.t.tiny1", "t.go", 1, 3, "{}");
-    cbm_gbuf_upsert_node(gb, "Function", "tiny2", "test.t.tiny2", "t.go", 4, 6, "{}");
+    cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "Function", "tiny1", "test.t.tiny1", "t.go", 1, 3, "{}"));
+    cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "Function", "tiny2", "test.t.tiny2", "t.go", 4, 6, "{}"));
 
     atomic_int cancelled = 0;
     cbm_pipeline_ctx_t ctx = {
@@ -826,7 +831,8 @@ static int setup_sim_test_repo(void) {
 
     /* Near-clone: ValidateUser and ValidateOrder have same structure, different names.
      * Must be large enough (>= 30 leaf tokens, >= 32 unique structural trigrams). */
-    th_write_file(TH_PATH(g_sim_tmpdir, "pkg/validation/user_validator.go"),
+    th_write_file(
+        TH_PATH(g_sim_tmpdir, "pkg/validation/user_validator.go"),
         "package validation\n"
         "import \"errors\"\n"
         "import \"strings\"\n"
@@ -846,7 +852,8 @@ static int setup_sim_test_repo(void) {
         "    return nil\n"
         "}\n");
 
-    th_write_file(TH_PATH(g_sim_tmpdir, "pkg/validation/order_validator.go"),
+    th_write_file(
+        TH_PATH(g_sim_tmpdir, "pkg/validation/order_validator.go"),
         "package validation\n"
         "import \"errors\"\n"
         "import \"strings\"\n"
@@ -867,17 +874,15 @@ static int setup_sim_test_repo(void) {
         "}\n");
 
     /* Completely different function — also large enough for fingerprinting */
-    th_write_file(TH_PATH(g_sim_tmpdir, "pkg/handler/user_handler.go"),
-        GO_HANDLE_REQUEST_SRC);
+    th_write_file(TH_PATH(g_sim_tmpdir, "pkg/handler/user_handler.go"), GO_HANDLE_REQUEST_SRC);
 
     /* Tiny function — should be skipped */
-    th_write_file(TH_PATH(g_sim_tmpdir, "pkg/util/tiny_helper.go"),
-        "package util\n"
-        "\n"
-        "func Max(a, b int) int {\n"
-        "    if a > b { return a }\n"
-        "    return b\n"
-        "}\n");
+    th_write_file(TH_PATH(g_sim_tmpdir, "pkg/util/tiny_helper.go"), "package util\n"
+                                                                    "\n"
+                                                                    "func Max(a, b int) int {\n"
+                                                                    "    if a > b { return a }\n"
+                                                                    "    return b\n"
+                                                                    "}\n");
 
     return 0;
 }
@@ -946,44 +951,42 @@ TEST(pipeline_minhash_no_false_positives) {
     }
 
     /* 5 diverse functions — no clones */
-    th_write_file(TH_PATH(g_sim_tmpdir, "a.go"),
-        "package main\n"
-        "func SortSlice(s []int) {\n"
-        "    for i := 0; i < len(s); i++ {\n"
-        "        for j := i+1; j < len(s); j++ {\n"
-        "            if s[i] > s[j] {\n"
-        "                s[i], s[j] = s[j], s[i]\n"
-        "            }\n"
-        "        }\n"
-        "    }\n"
-        "}\n");
+    th_write_file(TH_PATH(g_sim_tmpdir, "a.go"), "package main\n"
+                                                 "func SortSlice(s []int) {\n"
+                                                 "    for i := 0; i < len(s); i++ {\n"
+                                                 "        for j := i+1; j < len(s); j++ {\n"
+                                                 "            if s[i] > s[j] {\n"
+                                                 "                s[i], s[j] = s[j], s[i]\n"
+                                                 "            }\n"
+                                                 "        }\n"
+                                                 "    }\n"
+                                                 "}\n");
 
     th_write_file(TH_PATH(g_sim_tmpdir, "b.go"),
-        "package main\n"
-        "import \"net/http\"\n"
-        "func ServeAPI(mux *http.ServeMux) {\n"
-        "    mux.HandleFunc(\"/health\", func(w http.ResponseWriter, r *http.Request) {\n"
-        "        w.WriteHeader(200)\n"
-        "        w.Write([]byte(\"ok\"))\n"
-        "    })\n"
-        "    mux.HandleFunc(\"/ready\", func(w http.ResponseWriter, r *http.Request) {\n"
-        "        w.WriteHeader(200)\n"
-        "        w.Write([]byte(\"ready\"))\n"
-        "    })\n"
-        "}\n");
+                  "package main\n"
+                  "import \"net/http\"\n"
+                  "func ServeAPI(mux *http.ServeMux) {\n"
+                  "    mux.HandleFunc(\"/health\", func(w http.ResponseWriter, r *http.Request) {\n"
+                  "        w.WriteHeader(200)\n"
+                  "        w.Write([]byte(\"ok\"))\n"
+                  "    })\n"
+                  "    mux.HandleFunc(\"/ready\", func(w http.ResponseWriter, r *http.Request) {\n"
+                  "        w.WriteHeader(200)\n"
+                  "        w.Write([]byte(\"ready\"))\n"
+                  "    })\n"
+                  "}\n");
 
-    th_write_file(TH_PATH(g_sim_tmpdir, "c.go"),
-        "package main\n"
-        "import \"fmt\"\n"
-        "func PrintTree(node *Node, depth int) {\n"
-        "    for i := 0; i < depth; i++ {\n"
-        "        fmt.Print(\"  \")\n"
-        "    }\n"
-        "    fmt.Println(node.Value)\n"
-        "    for _, child := range node.Children {\n"
-        "        PrintTree(child, depth+1)\n"
-        "    }\n"
-        "}\n");
+    th_write_file(TH_PATH(g_sim_tmpdir, "c.go"), "package main\n"
+                                                 "import \"fmt\"\n"
+                                                 "func PrintTree(node *Node, depth int) {\n"
+                                                 "    for i := 0; i < depth; i++ {\n"
+                                                 "        fmt.Print(\"  \")\n"
+                                                 "    }\n"
+                                                 "    fmt.Println(node.Value)\n"
+                                                 "    for _, child := range node.Children {\n"
+                                                 "        PrintTree(child, depth+1)\n"
+                                                 "    }\n"
+                                                 "}\n");
 
     char db_path[512];
     snprintf(db_path, sizeof(db_path), "%s/test.db", g_sim_tmpdir);
@@ -999,7 +1002,8 @@ TEST(pipeline_minhash_no_false_positives) {
 
     cbm_edge_t *edges = NULL;
     int edge_count = 0;
-    cbm_store_find_edges_by_type(s, cbm_pipeline_project_name(p), "SIMILAR_TO", &edges, &edge_count);
+    cbm_store_find_edges_by_type(s, cbm_pipeline_project_name(p), "SIMILAR_TO", &edges,
+                                 &edge_count);
 
     ASSERT_EQ(edge_count, 0); /* No clones → no SIMILAR_TO edges */
 
@@ -1042,17 +1046,17 @@ TEST(pipeline_minhash_incremental) {
 
     /* Step 2: Modify order_validator.go to be completely different */
     th_write_file(TH_PATH(g_sim_tmpdir, "pkg/validation/order_validator.go"),
-        "package validation\n"
-        "\n"
-        "import \"net/http\"\n"
-        "\n"
-        "func HandleOrder(w http.ResponseWriter, r *http.Request) {\n"
-        "    data := make(map[string]interface{})\n"
-        "    for k, v := range r.URL.Query() {\n"
-        "        data[k] = v[0]\n"
-        "    }\n"
-        "    w.Header().Set(\"Content-Type\", \"application/json\")\n"
-        "}\n");
+                  "package validation\n"
+                  "\n"
+                  "import \"net/http\"\n"
+                  "\n"
+                  "func HandleOrder(w http.ResponseWriter, r *http.Request) {\n"
+                  "    data := make(map[string]interface{})\n"
+                  "    for k, v := range r.URL.Query() {\n"
+                  "        data[k] = v[0]\n"
+                  "    }\n"
+                  "    w.Header().Set(\"Content-Type\", \"application/json\")\n"
+                  "}\n");
 
     /* Step 3: Incremental reindex */
     cbm_pipeline_t *p2 = cbm_pipeline_new(g_sim_tmpdir, db_path, CBM_MODE_FULL);
@@ -1102,7 +1106,8 @@ TEST(pipeline_minhash_incremental_new_clone) {
     cbm_pipeline_free(p1);
 
     /* Step 2: Add a new near-clone of ValidateUser */
-    th_write_file(TH_PATH(g_sim_tmpdir, "pkg/validation/address_validator.go"),
+    th_write_file(
+        TH_PATH(g_sim_tmpdir, "pkg/validation/address_validator.go"),
         "package validation\n"
         "import \"errors\"\n"
         "import \"strings\"\n"
