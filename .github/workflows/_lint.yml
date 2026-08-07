@@ -20,6 +20,14 @@ jobs:
       - name: No-skips policy (tests pass or fail)
         run: bash scripts/check-no-test-skips.sh
 
+      # The include graph must match layering.allow and externals.allow
+      # exactly, so a new cross-module #include — or a module reaching a
+      # third-party library directly instead of through an adapter — fails
+      # here rather than being found later as a cycle or a leaked foreign
+      # type. Needs no toolchain, so it runs before the deps install.
+      - name: Architecture policy (module + third-party include graph)
+        run: python3 scripts/check-layering.py
+
       - name: Install build deps
         run: sudo apt-get update && sudo apt-get install -y zlib1g-dev cmake
 

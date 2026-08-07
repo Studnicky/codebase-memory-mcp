@@ -1,0 +1,90 @@
+# layering.allow — module-include allow-list for scripts/check-layering.py
+#
+# This file captures the CURRENT include graph between src/ and internal/
+# modules (see scripts/check-layering.py --report), so the layering gate
+# lands green against the tree as it exists today.
+#
+# The list is an EXACT snapshot, not a ceiling. The gate fails both ways:
+# an edge in the source with no line here is a new violation, and a line
+# here with no matching edge is a permission that outlived its code. So
+# once an edge is engineered away, deleting its line is mandatory — and
+# that deletion is what makes the edge forbidden from then on. The next
+# `#include "..."` reintroducing it fails the gate, naming the file:line.
+#
+# Regenerate the body (never hand-edit the edge list) with:
+#     scripts/check-layering.py --report
+#
+# `host` is the composition root (src/host/): it wires the adapters (cli,
+# mcp, store, ui, watcher) onto the daemon client protocol, so host -> *
+# edges are the intended shape, not violations. cli -> daemon is the
+# client-protocol edge that adapter legitimately shares (daemon/bootstrap.h,
+# ipc.h, runtime.h, version_cohort.h); daemon itself depends on nothing but
+# foundation.
+#
+# `ui -> mcp` is an accepted, permanent edge, not a violation in progress:
+# the UI hosts its own private, read-only MCP server (a dedicated SQLite
+# connection wired to a UI-local index-rejection callback) constructed and
+# owned entirely inside src/ui/http_server.c. The composition root cannot
+# inject it without exposing that UI-local wiring outside the module, which
+# would trade a straightforward downward dependency for a worse one.
+cbm -> foundation
+cbm -> semantic
+cbm -> simhash
+cli -> daemon
+cli -> foundation
+cli -> mcp
+cli -> pipeline
+cli -> store
+cypher -> foundation
+cypher -> store
+daemon -> foundation
+discover -> cbm
+discover -> foundation
+git -> foundation
+graph_buffer -> cbm
+graph_buffer -> foundation
+graph_buffer -> store
+host -> cli
+host -> daemon
+host -> foundation
+host -> mcp
+host -> pipeline
+host -> store
+host -> ui
+host -> watcher
+main -> cbm
+main -> cli
+main -> daemon
+main -> foundation
+main -> host
+main -> mcp
+main -> store
+main -> ui
+mcp -> cypher
+mcp -> daemon
+mcp -> discover
+mcp -> foundation
+mcp -> git
+mcp -> pipeline
+mcp -> store
+mcp -> watcher
+pipeline -> cbm
+pipeline -> discover
+pipeline -> foundation
+pipeline -> git
+pipeline -> graph_buffer
+pipeline -> semantic
+pipeline -> simhash
+pipeline -> store
+semantic -> foundation
+semantic -> simhash
+simhash -> foundation
+store -> foundation
+traces -> foundation
+ui -> foundation
+ui -> git
+ui -> mcp                      # accepted: UI hosts its own private MCP server
+ui -> store
+ui -> watcher
+watcher -> foundation
+watcher -> store
