@@ -35,6 +35,7 @@
 #include "../helpers.h"
 
 #include <ctype.h>
+#include <limits.h> /* INT_MAX */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -293,6 +294,8 @@ void java_lsp_add_import(JavaLSPContext *ctx, const char *local_name, const char
     if (!ctx || !local_name || !target_qn)
         return;
     if (ctx->import_count >= ctx->import_cap) {
+        if (ctx->import_cap > INT_MAX / 2)
+            return;
         int new_cap = ctx->import_cap == 0 ? 16 : ctx->import_cap * 2;
         const char **new_names =
             (const char **)cbm_arena_alloc(ctx->arena, (size_t)new_cap * sizeof(*new_names));
@@ -320,6 +323,8 @@ void java_lsp_add_import(JavaLSPContext *ctx, const char *local_name, const char
 
 static void push_enclosing_class(JavaLSPContext *ctx, const char *class_qn) {
     if (ctx->enclosing_class_depth >= ctx->enclosing_class_cap) {
+        if (ctx->enclosing_class_cap > INT_MAX / 2)
+            return;
         int new_cap = ctx->enclosing_class_cap == 0 ? 8 : ctx->enclosing_class_cap * 2;
         const char **arr =
             (const char **)cbm_arena_alloc(ctx->arena, (size_t)new_cap * sizeof(*arr));

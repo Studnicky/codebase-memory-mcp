@@ -39,7 +39,7 @@ static const double ART_RATIO_SCALE = 10.0;
 
 #include "zstd_store.h"
 
-#include <sqlite3.h>
+#include "store/sql.h"
 #include <yyjson/yyjson.h>
 
 #include <errno.h>
@@ -502,37 +502,38 @@ static char *prepare_snapshot_db(const char *db_path, size_t *out_size, bool str
      * is gone with the fixed name it existed to clear. */
     const char *tmp_path = tmp.db;
 
-    /* VACUUM INTO: clean compacted copy. Use raw sqlite3 to bypass store authorizer
-     * (which blocks ATTACH, used internally by VACUUM INTO). */
-    sqlite3 *raw_db = NULL;
-    if (sqlite3_open_v2(db_path, &raw_db, SQLITE_OPEN_READWRITE, NULL) != SQLITE_OK) {
-        const char *err = raw_db ? sqlite3_errmsg(raw_db) : "sqlite_open";
-        artifact_export_fail("open_source_db", db_path, err, 0);
-        sqlite3_close(raw_db);
+    /* VACUUM INTO: clean compacted copy. Opened directly rather than through a
+     * store, because the store's authorizer blocks ATTACH, which VACUUM INTO
+     * uses internally. */
+    cbm_sql_t *raw_db = NULL;
+    if (!cbm_sql_open(db_path, &raw_db)) {
+        artifact_export_fail("open_source_db", db_path, "sqlite_open", 0);
         artifact_snapshot_tmp_close(&tmp);
         return NULL;
     }
 
     char vacuum_sql[CBM_SZ_4K];
     snprintf(vacuum_sql, sizeof(vacuum_sql), "VACUUM INTO '%s';", tmp_path);
-    char *errmsg = NULL;
-    int vrc = sqlite3_exec(raw_db, vacuum_sql, NULL, NULL, &errmsg);
-    sqlite3_close(raw_db);
+    bool vacuumed = cbm_sql_exec(raw_db, vacuum_sql);
+    /* Read the message before closing: it belongs to the connection. */
+    char vacuum_err[CBM_SZ_256];
+    snprintf(vacuum_err, sizeof(vacuum_err), "%s", cbm_sql_errmsg(raw_db));
+    cbm_sql_close(raw_db);
 
-    if (vrc != SQLITE_OK) {
-        artifact_export_fail("vacuum_into", tmp_path, errmsg ? errmsg : sqlite3_errstr(vrc), 0);
-        sqlite3_free(errmsg);
+    if (!vacuumed) {
+        artifact_export_fail("vacuum_into", tmp_path, vacuum_err[0] ? vacuum_err : "vacuum_into",
+                             0);
         artifact_snapshot_tmp_close(&tmp);
         return NULL;
     }
 
     /* Strip indexes from the copy for better compression (BEST only). */
     if (strip_indexes) {
-        sqlite3 *tmp_db = NULL;
-        if (sqlite3_open_v2(tmp_path, &tmp_db, SQLITE_OPEN_READWRITE, NULL) == SQLITE_OK) {
-            sqlite3_exec(tmp_db, DROP_INDEXES_SQL, NULL, NULL, NULL);
-            sqlite3_exec(tmp_db, "VACUUM;", NULL, NULL, NULL);
-            sqlite3_close(tmp_db);
+        cbm_sql_t *tmp_db = NULL;
+        if (cbm_sql_open(tmp_path, &tmp_db)) {
+            (void)cbm_sql_exec(tmp_db, DROP_INDEXES_SQL);
+            (void)cbm_sql_exec(tmp_db, "VACUUM;");
+            cbm_sql_close(tmp_db);
         }
     }
 

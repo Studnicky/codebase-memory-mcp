@@ -20,9 +20,6 @@
 #include "tree_sitter/api.h" // TSParser, TSNode, TSTree, TSInput, TSLanguage, TSPoint, TSParseOptions, TSParseState
 #include "foundation/constants.h"
 #include "mimalloc.h" // mi_malloc/mi_calloc/mi_realloc/mi_free/mi_usable_size — bind 3rd-party allocators (#424)
-#if defined(CBM_BIND_TS_ALLOCATOR) && CBM_BIND_TS_ALLOCATOR
-#include "sqlite3.h" // sqlite3_mem_methods, sqlite3_config, SQLITE_CONFIG_MALLOC — bind sqlite to mimalloc
-#endif
 #include <limits.h> // INT_MAX
 #include <stdint.h> // uint32_t, uint64_t, int64_t
 #include <stdlib.h>
@@ -243,7 +240,7 @@ static TSParser *get_thread_parser(const TSLanguage *ts_lang, CBMLanguage lang) 
 
 // --- Allocator binding (defense-in-depth, #424) ---
 
-/* Bind tree-sitter and sqlite3 to mimalloc explicitly so a correct
+/* Bind tree-sitter to mimalloc explicitly so a correct
  * binary does NOT depend on the fragile MI_OVERRIDE symbol override. Under
  * MI_OVERRIDE=1 — particularly the Windows static-MinGW link with
  * --allow-multiple-definition — `malloc`/`free` can resolve to DIFFERENT
@@ -258,37 +255,10 @@ static TSParser *get_thread_parser(const TSLanguage *ts_lang, CBMLanguage lang) 
  * no-ops and the build stays unchanged. */
 
 #if defined(CBM_BIND_TS_ALLOCATOR) && CBM_BIND_TS_ALLOCATOR
-#include <assert.h>
 
-/* sqlite3 mem methods backed by mimalloc. sqlite's xMalloc/xRealloc/xSize use
- * `int` sizes; wrap with size_t casts. xRoundup rounds to an 8-byte boundary
- * (sqlite requires 8-byte-aligned roundup, and mimalloc honors that alignment).
- * Field order matches struct sqlite3_mem_methods exactly:
- * xMalloc, xFree, xRealloc, xSize, xRoundup, xInit, xShutdown, pAppData. */
-/* Profiled: these bindings bypass the malloc interposer entirely, so without a
- * hook here the biggest per-request allocations in the process — SQLite's page
- * cache and its query working set — are invisible to the attribution profile
- * (#581). */
-static void *cbm_sqlite_malloc(int n) {
-    void *block = mi_malloc((size_t)n);
-    return block;
-}
-static void cbm_sqlite_free(void *p) {
-    mi_free(p);
-}
-static void *cbm_sqlite_realloc(void *p, int n) {
-    if (p) {}
-    void *grown = mi_realloc(p, (size_t)n);
-    return grown;
-}
-static int cbm_sqlite_size(void *p) {
-    return (int)mi_usable_size(p);
-}
-static int cbm_sqlite_roundup(int n) {
-    return (n + 7) & ~7; /* round up to 8-byte boundary */
-}
-/* Same reasoning as the sqlite bindings: tree-sitter allocates its parse trees
- * through these, and they too skip the interposer. */
+/* tree-sitter allocates its parse trees through these, and they skip the
+ * malloc interposer, so without a hook here they are invisible to the
+ * attribution profile (#581). */
 static void *cbm_ts_malloc(size_t n) {
     void *block = mi_malloc(n);
     return block;
@@ -306,13 +276,6 @@ static void cbm_ts_free(void *p) {
     mi_free(p);
 }
 
-static int cbm_sqlite_meminit(void *appdata) {
-    (void)appdata;
-    return SQLITE_OK;
-}
-static void cbm_sqlite_memshutdown(void *appdata) {
-    (void)appdata;
-}
 #endif /* CBM_BIND_TS_ALLOCATOR */
 
 void cbm_alloc_init(void) {
@@ -323,26 +286,8 @@ void cbm_alloc_init(void) {
     }
     alloc_bound = 1;
 
-    /* tree-sitter runtime (was previously bound in cbm_init; consolidated here). */
     ts_set_allocator(cbm_ts_malloc, cbm_ts_calloc, cbm_ts_realloc, cbm_ts_free);
 
-    /* sqlite3. SQLITE_CONFIG_MALLOC MUST run before sqlite3_initialize / the
-     * first sqlite3_open* — otherwise sqlite3_config returns SQLITE_MISUSE
-     * silently and the binding is ignored. cbm_alloc_init() runs as the very
-     * first statement of main(), before cbm_mcp_server_new → cbm_store_open*. */
-    static sqlite3_mem_methods cbm_sqlite_mem = {
-        cbm_sqlite_malloc,      /* xMalloc */
-        cbm_sqlite_free,        /* xFree */
-        cbm_sqlite_realloc,     /* xRealloc */
-        cbm_sqlite_size,        /* xSize */
-        cbm_sqlite_roundup,     /* xRoundup */
-        cbm_sqlite_meminit,     /* xInit */
-        cbm_sqlite_memshutdown, /* xShutdown */
-        NULL,                   /* pAppData */
-    };
-    int sqlite_rc = sqlite3_config(SQLITE_CONFIG_MALLOC, &cbm_sqlite_mem);
-    assert(sqlite_rc == SQLITE_OK && "SQLITE_CONFIG_MALLOC must run before sqlite3_initialize");
-    (void)sqlite_rc;
 #endif /* CBM_BIND_TS_ALLOCATOR */
 }
 
@@ -356,11 +301,9 @@ int cbm_init(void) {
     }
     enum { CBM_INIT_COMPLETE = 1 };
     cbm_initialized = CBM_INIT_COMPLETE;
-    /* Defense-in-depth allocator binds (idempotent). main() calls cbm_alloc_init
-     * first; this covers non-main entry points (pipeline passes call cbm_init).
-     * For sqlite the SQLITE_CONFIG_MALLOC bind only takes effect if it runs
-     * before sqlite initializes — main() guarantees that ordering; here it is a
-     * best-effort idempotent re-assert for paths that never hit main(). */
+    /* Defense-in-depth allocator bind (idempotent). main() calls
+     * cbm_alloc_init first; this covers non-main entry points, which reach
+     * extraction through cbm_init (pipeline passes). */
     cbm_alloc_init();
     return 0;
 }
@@ -1572,10 +1515,17 @@ CBMFileResult *cbm_extract_file_ex(const char *source, int source_len, CBMLangua
      * only: the absence of this flag is NOT a completeness guarantee. */
     if (ts_node_has_error(root)) {
         cbm_error_regions_t regs = {{0}, {0}, 0};
-        if (strcmp(ts_node_type(root), "ERROR") == 0) {
+        /* Collect the innermost failed regions, whatever the root's own type.
+         * A root labelled ERROR still parses most of its children — reporting
+         * its whole span would describe the error node rather than what was
+         * lost, and a file that recovered cleanly would read as one that did
+         * not index at all. The span is the honest answer only when the parse
+         * yielded no regions AND no definitions: nothing came back, so the
+         * loss really is the file. */
+        cbm_collect_error_regions(root, &regs);
+        if (regs.count == 0 && result->defs.count == 0 &&
+            strcmp(ts_node_type(root), "ERROR") == 0) {
             cbm_error_regions_push(&regs, root); /* whole file unparseable */
-        } else {
-            cbm_collect_error_regions(root, &regs);
         }
         cbm_subtract_recovered_regions(&regs, &result->defs);
         /* #1071: don't flag a benign function-like-macro call (defined in-file)

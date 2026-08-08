@@ -15,6 +15,7 @@
 #include "../helpers.h"
 #include "tree_sitter/api.h"
 #include <ctype.h>
+#include <limits.h> /* INT_MAX */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -675,6 +676,8 @@ static void py_register_lambda(PyLSPContext *ctx, const char *name, TSNode lambd
     if (!ctx || !name)
         return;
     if (ctx->lambda_count >= ctx->lambda_cap) {
+        if (ctx->lambda_cap > INT_MAX / 2)
+            return;
         int new_cap = ctx->lambda_cap == 0 ? 8 : ctx->lambda_cap * 2;
         CBMLambdaEntry *grown =
             (CBMLambdaEntry *)cbm_arena_alloc(ctx->arena, (size_t)new_cap * sizeof(CBMLambdaEntry));
@@ -759,6 +762,8 @@ static void py_register_dict_literal(PyLSPContext *ctx, const char *var, TSNode 
             continue;
 
         if (ctx->dict_literal_count >= ctx->dict_literal_cap) {
+            if (ctx->dict_literal_cap > INT_MAX / 2)
+                return;
             int new_cap = ctx->dict_literal_cap == 0 ? 16 : ctx->dict_literal_cap * 2;
             CBMDictLiteralEntry *grown = (CBMDictLiteralEntry *)cbm_arena_alloc(
                 ctx->arena, (size_t)new_cap * sizeof(CBMDictLiteralEntry));
@@ -1099,6 +1104,10 @@ static void py_overlay_register_field(PyLSPContext *ctx, const char *class_qn,
         }
     }
     if (ctx->field_overlay_count >= ctx->field_overlay_cap) {
+        if (ctx->field_overlay_cap > INT_MAX / 2) {
+            py_disable_callable_value_proof(ctx);
+            return;
+        }
         int new_cap = ctx->field_overlay_cap == 0 ? 16 : ctx->field_overlay_cap * 2;
         void *na = cbm_arena_alloc(ctx->arena, (size_t)new_cap * sizeof(*ctx->field_overlay));
         if (!na) {
@@ -3526,7 +3535,7 @@ static const char **py_split_subscript_args(CBMArena *arena, const char *s, int 
         else if (c == ',' && depth == 0) {
             char *part = py_trim_ws(arena, s + start, i - start);
             if (part && part[0]) {
-                if (n >= cap) {
+                if (n >= cap && cap <= INT_MAX / 2) {
                     int new_cap = cap * 2;
                     const char **grown = (const char **)cbm_arena_alloc(
                         arena, (size_t)(new_cap + 1) * sizeof(const char *));
@@ -4820,7 +4829,7 @@ static bool py_register_def(CBMArena *arena, CBMTypeRegistry *reg, CBMDefinition
                             if (bname) {
                                 memcpy(bname, raw + s, blen);
                                 bname[blen] = '\0';
-                                if (n >= cap) {
+                                if (n >= cap && cap <= INT_MAX / 2) {
                                     int new_cap = cap * 2;
                                     const char **grown = (const char **)cbm_arena_alloc(
                                         arena, (size_t)(new_cap + 1) * sizeof(const char *));

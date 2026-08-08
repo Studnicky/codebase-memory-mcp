@@ -18,7 +18,7 @@ enum { INCR_RING_BUF = 4, INCR_RING_MASK = 3, INCR_TS_BUF = 24 };
 #include "pipeline/artifact.h"
 #include "pipeline/lsp_surface.h"
 #include "pipeline/pass_lsp_cross.h"
-#include "sqlite3.h"
+#include "store/sql.h"
 #include "yyjson/yyjson.h"
 #include "pipeline/pipeline_internal.h"
 #include "store/store.h"
@@ -151,7 +151,7 @@ static void *nonowning_ptr(const void *p) {
 typedef struct {
     cbm_file_hash_t *items;
     int count;
-    int cap;
+    size_t cap;
     CBMHashTable *seen_paths;
 } semantic_manifest_builder_t;
 
@@ -238,9 +238,9 @@ static int semantic_manifest_add_digest(semantic_manifest_builder_t *builder, co
             return CBM_NOT_FOUND;
         }
     }
-    if (builder->count == builder->cap) {
-        int new_cap = builder->cap > 0 ? builder->cap * 2 : CBM_SZ_64;
-        cbm_file_hash_t *grown = realloc(builder->items, (size_t)new_cap * sizeof(*builder->items));
+    if ((size_t)builder->count == builder->cap) {
+        size_t new_cap = builder->cap > 0 ? builder->cap * 2 : (size_t)CBM_SZ_64;
+        cbm_file_hash_t *grown = realloc(builder->items, new_cap * sizeof(*builder->items));
         if (!grown) {
             return CBM_NOT_FOUND;
         }
@@ -786,8 +786,8 @@ static int find_deleted_files(const char *repo_path, cbm_file_info_t *files, int
     }
 
     int del_count = 0;
-    int del_cap = CBM_SZ_64;
-    char **deleted = malloc((size_t)del_cap * sizeof(char *));
+    size_t del_cap = (size_t)CBM_SZ_64;
+    char **deleted = malloc(del_cap * sizeof(char *));
     if (!deleted) {
         cbm_log_error("incremental.err", "msg", "find_deleted_files_oom");
         cbm_ht_free(current);
@@ -795,8 +795,8 @@ static int find_deleted_files(const char *repo_path, cbm_file_info_t *files, int
     }
 
     int ms_count = 0;
-    int ms_cap = CBM_SZ_64;
-    cbm_file_hash_t *mode_skipped = malloc((size_t)ms_cap * sizeof(cbm_file_hash_t));
+    size_t ms_cap = (size_t)CBM_SZ_64;
+    cbm_file_hash_t *mode_skipped = malloc(ms_cap * sizeof(cbm_file_hash_t));
     if (!mode_skipped) {
         cbm_log_error("incremental.err", "msg", "find_deleted_files_oom_ms");
         free(deleted);
@@ -837,9 +837,9 @@ static int find_deleted_files(const char *repo_path, cbm_file_info_t *files, int
         if (preserve) {
             /* Carry forward the existing hash row so subsequent reindexes
              * can correctly classify this file. */
-            if (ms_count >= ms_cap) {
+            if ((size_t)ms_count >= ms_cap) {
                 ms_cap *= PAIR_LEN;
-                cbm_file_hash_t *tmp = realloc(mode_skipped, (size_t)ms_cap * sizeof(*tmp));
+                cbm_file_hash_t *tmp = realloc(mode_skipped, ms_cap * sizeof(*tmp));
                 if (!tmp) {
                     cbm_log_error("incremental.err", "msg", "find_deleted_files_realloc_oom_ms");
                     break;
@@ -869,9 +869,9 @@ static int find_deleted_files(const char *repo_path, cbm_file_info_t *files, int
         }
 
         /* File is truly gone — record for purge. */
-        if (del_count >= del_cap) {
+        if ((size_t)del_count >= del_cap) {
             del_cap *= PAIR_LEN;
-            char **tmp = realloc(deleted, (size_t)del_cap * sizeof(char *));
+            char **tmp = realloc(deleted, del_cap * sizeof(char *));
             if (!tmp) {
                 cbm_log_error("incremental.err", "msg", "find_deleted_files_realloc_oom");
                 break;
@@ -938,7 +938,7 @@ typedef struct {
     CBMHashTable *changed_paths; /* rel_path -> non-NULL sentinel (membership set) */
     cbm_saved_edge_t *items;
     int count;
-    int cap;
+    size_t cap;
 } cbm_edge_capture_t;
 
 /* Edge types that must NOT be re-linked from the pre-purge snapshot, because a
@@ -1038,9 +1038,9 @@ static void incr_capture_inbound_edge(const cbm_gbuf_edge_t *edge, void *userdat
         cbm_ht_get(cap->changed_paths, src->file_path)) {
         return;
     }
-    if (cap->count >= cap->cap) {
-        int ncap = (cap->cap > 0) ? cap->cap * PAIR_LEN : CBM_SZ_64;
-        cbm_saved_edge_t *tmp = realloc(cap->items, (size_t)ncap * sizeof(*tmp));
+    if ((size_t)cap->count >= cap->cap) {
+        size_t ncap = (cap->cap > 0) ? cap->cap * PAIR_LEN : (size_t)CBM_SZ_64;
+        cbm_saved_edge_t *tmp = realloc(cap->items, ncap * sizeof(*tmp));
         if (!tmp) {
             cbm_log_warn("incremental.edge_snapshot_oom", "captured", itoa_buf(cap->count));
             return; /* best-effort: stop capturing, keep what we have */
@@ -2325,20 +2325,20 @@ static int run_closure_delta(cbm_pipeline_t *p, const char *db_path, const char 
      * ~all rows are already correct in the clone; rewriting them was the
      * largest single block of a kernel-scale delta publish. */
     {
-        sqlite3 *sdb = cbm_store_get_db(staging);
-        sqlite3_stmt *del = NULL;
+        cbm_sql_t *sdb = cbm_store_sql(staging);
+        cbm_sql_stmt_t *del = NULL;
         bool surf_ok = sdb != NULL;
-        if (surf_ok && sqlite3_prepare_v2(sdb,
-                                          "DELETE FROM lsp_surface WHERE project = ?1"
-                                          " AND rel_path = ?2",
-                                          CBM_NOT_FOUND, &del, NULL) == SQLITE_OK) {
+        if (surf_ok && cbm_sql_prepare(sdb,
+                                       "DELETE FROM lsp_surface WHERE project = ?1"
+                                       " AND rel_path = ?2",
+                                       &del)) {
             for (int i = 0; surf_ok && i < ci + deleted_count; i++) {
-                sqlite3_reset(del);
-                sqlite3_bind_text(del, 1, project, CBM_NOT_FOUND, SQLITE_TRANSIENT);
-                sqlite3_bind_text(del, 2, purge_paths[i], CBM_NOT_FOUND, SQLITE_TRANSIENT);
-                surf_ok = sqlite3_step(del) == SQLITE_DONE;
+                cbm_sql_reset(del);
+                cbm_sql_bind_text(del, 1, project);
+                cbm_sql_bind_text(del, 2, purge_paths[i]);
+                surf_ok = cbm_sql_step(del) == CBM_SQL_DONE;
             }
-            sqlite3_finalize(del);
+            cbm_sql_finalize(del);
         } else {
             surf_ok = false;
         }

@@ -7,8 +7,10 @@
 
 #include "foundation/compat.h"
 #include "foundation/constants.h"
+#include "foundation/log.h"
 #include "foundation/platform_internal.h"
 #include <fcntl.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -538,4 +540,33 @@ const char *cbm_resolve_cache_dir(void) {
         return NULL;
     }
     return buf;
+}
+
+/* ── Allocation growth ────────────────────────────────────────── */
+
+/* Growth failure is not recoverable at the call sites: each has already lost
+ * its old buffer to the realloc and writes through the result immediately.
+ * Naming the failure here beats a NULL dereference several frames later with
+ * nothing to attribute it to. */
+static atomic_bool g_fail_next_growth = false;
+
+void cbm_realloc_fail_next_growth_for_test(void) {
+    atomic_store(&g_fail_next_growth, true);
+}
+
+void *cbm_realloc_or_abort(void *ptr, size_t size) {
+    if (atomic_exchange(&g_fail_next_growth, false)) {
+        free(ptr);
+    } else {
+        void *grown = cbm_realloc_or_free(ptr, size);
+        if (grown) {
+            return grown;
+        }
+    }
+    char size_str[CBM_SZ_32];
+    snprintf(size_str, sizeof(size_str), "%zu", size);
+    cbm_log_error("mem.growth_failed", "bytes", size_str, "detail",
+                  "allocation growth failed and the previous buffer is already released; "
+                  "continuing would dereference NULL");
+    abort();
 }

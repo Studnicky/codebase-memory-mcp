@@ -21,6 +21,7 @@
 #include "lsp_node_iter.h"
 #include "../helpers.h"
 #include <ctype.h>
+#include <limits.h> /* INT_MAX */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -158,6 +159,8 @@ void php_lsp_add_use(PHPLSPContext *ctx, const char *local_name, const char *tar
     if (!local_name || !target_qn)
         return;
     if (ctx->use_count >= ctx->use_cap) {
+        if (ctx->use_cap > INT_MAX / 2)
+            return;
         int new_cap = ctx->use_cap ? ctx->use_cap * 2 : PHP_USE_INITIAL_CAP;
         const char **nl = (const char **)cbm_arena_alloc(ctx->arena, (size_t)new_cap * sizeof(*nl));
         const char **nq = (const char **)cbm_arena_alloc(ctx->arena, (size_t)new_cap * sizeof(*nq));
@@ -571,7 +574,7 @@ static int parse_phpdoc_template_args(PHPLSPContext *ctx, const char *p, const C
         if (arg_len > 0) {
             char *arg_text = cbm_arena_strndup(ctx->arena, arg_start, arg_len);
             const CBMType *arg_type = resolve_phpdoc_type(ctx, arg_text);
-            if (count >= cap) {
+            if (count >= cap && cap <= INT_MAX / 2) {
                 int new_cap = cap * 2;
                 const CBMType **new_buf = (const CBMType **)cbm_arena_alloc(
                     ctx->arena, (size_t)(new_cap + 1) * sizeof(*new_buf));
@@ -582,7 +585,12 @@ static int parse_phpdoc_template_args(PHPLSPContext *ctx, const char *p, const C
                     cap = new_cap;
                 }
             }
-            buf[count++] = arg_type;
+            /* The growth above is skipped when the arena is exhausted or the
+             * capacity is at its ceiling, so the write is only safe inside the
+             * capacity that actually exists. Dropping the argument keeps the
+             * partial list well-formed; buf[count] = NULL below terminates it. */
+            if (count < cap)
+                buf[count++] = arg_type;
         }
     }
     if (*p == '>')
@@ -602,6 +610,8 @@ static void php_add_phpstan_alias(PHPLSPContext *ctx, const char *name, const CB
             return;
     }
     if (ctx->phpstan_alias_count >= ctx->phpstan_alias_cap) {
+        if (ctx->phpstan_alias_cap > INT_MAX / 2)
+            return;
         int new_cap = ctx->phpstan_alias_cap ? ctx->phpstan_alias_cap * 2 : 8;
         const char **nn =
             (const char **)cbm_arena_alloc(ctx->arena, (size_t)(new_cap + 1) * sizeof(*nn));
@@ -3038,6 +3048,8 @@ static php_class_fields_t *fields_for(php_class_field_table_t *tab, const char *
             return &tab->items[i];
     }
     if (tab->count >= tab->cap) {
+        if (tab->cap > INT_MAX / 2)
+            return NULL;
         int new_cap = tab->cap ? tab->cap * 2 : 16;
         php_class_fields_t *next =
             (php_class_fields_t *)cbm_arena_alloc(arena, (size_t)new_cap * sizeof(*next));
@@ -3065,6 +3077,8 @@ static void add_field(php_class_fields_t *f, CBMArena *arena, const char *name,
             return;
     }
     if (f->count >= f->cap) {
+        if (f->cap > INT_MAX / 2)
+            return;
         int new_cap = f->cap ? f->cap * 2 : 8;
         const char **nn =
             (const char **)cbm_arena_alloc(arena, (size_t)(new_cap + 1) * sizeof(*nn));

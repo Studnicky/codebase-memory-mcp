@@ -6935,6 +6935,12 @@ static void plan_record(const char *agent, const char *kind, const char *path) {
     }
     cbm_install_plan_t *pl = g_install_plan;
     if (pl->count >= pl->cap) {
+        /* Doubling an int overflows before the cast can widen it, so bound it
+         * first and drop the record as this function already does when the
+         * allocation fails. */
+        if (pl->cap > INT_MAX / 2) {
+            return;
+        }
         int ncap = pl->cap ? pl->cap * 2 : CLI_BUF_16;
         cbm_plan_entry_t *ni = realloc(pl->items, (size_t)ncap * sizeof(*ni));
         if (!ni) {

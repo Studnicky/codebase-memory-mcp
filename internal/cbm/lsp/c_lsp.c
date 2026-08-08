@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <ctype.h>
+#include <limits.h> /* INT_MAX */
 
 /* Safe kind accessor — returns CBM_TYPE_UNKNOWN for NULL types.
  * Prevents SEGV in c_eval_expr_type_inner on unusual C++ AST shapes. */
@@ -99,6 +100,8 @@ void c_lsp_add_include(CLSPContext *ctx, const char *header_path, const char *ns
 // --- Helper: add using namespace ---
 static void c_add_using_namespace(CLSPContext *ctx, const char *ns_qn) {
     if (ctx->using_ns_count >= ctx->using_ns_cap) {
+        if (ctx->using_ns_cap > INT_MAX / 2)
+            return;
         int new_cap = ctx->using_ns_cap == 0 ? 16 : ctx->using_ns_cap * 2;
         const char **new_arr =
             (const char **)cbm_arena_alloc(ctx->arena, new_cap * sizeof(const char *));
@@ -115,6 +118,8 @@ static void c_add_using_namespace(CLSPContext *ctx, const char *ns_qn) {
 // --- Helper: add using declaration ---
 static void c_add_using_decl(CLSPContext *ctx, const char *short_name, const char *full_qn) {
     if (ctx->using_decl_count >= ctx->using_decl_cap) {
+        if (ctx->using_decl_cap > INT_MAX / 2)
+            return;
         int new_cap = ctx->using_decl_cap == 0 ? 16 : ctx->using_decl_cap * 2;
         const char **new_names =
             (const char **)cbm_arena_alloc(ctx->arena, new_cap * sizeof(const char *));
@@ -138,6 +143,8 @@ static void c_add_using_decl(CLSPContext *ctx, const char *short_name, const cha
 // --- Helper: add namespace alias ---
 static void c_add_ns_alias(CLSPContext *ctx, const char *alias, const char *full_qn) {
     if (ctx->ns_alias_count >= ctx->ns_alias_cap) {
+        if (ctx->ns_alias_cap > INT_MAX / 2)
+            return;
         int new_cap = ctx->ns_alias_cap == 0 ? 8 : ctx->ns_alias_cap * 2;
         const char **new_names =
             (const char **)cbm_arena_alloc(ctx->arena, new_cap * sizeof(const char *));
@@ -161,6 +168,8 @@ static void c_add_ns_alias(CLSPContext *ctx, const char *alias, const char *full
 // --- Helper: track function pointer target ---
 static void c_add_fp_target(CLSPContext *ctx, const char *var_name, const char *target_qn) {
     if (ctx->fp_count >= ctx->fp_cap) {
+        if (ctx->fp_cap > INT_MAX / 2)
+            return;
         int new_cap = ctx->fp_cap == 0 ? 16 : ctx->fp_cap * 2;
         const char **new_names =
             (const char **)cbm_arena_alloc(ctx->arena, new_cap * sizeof(const char *));
@@ -351,6 +360,8 @@ static void c_add_pending_template_call(CLSPContext *ctx, const char *func_qn,
     if (!func_qn || !type_param || !method_name)
         return;
     if (ctx->pending_tc_count >= ctx->pending_tc_cap) {
+        if (ctx->pending_tc_cap > INT_MAX / 2)
+            return;
         int new_cap = ctx->pending_tc_cap == 0 ? 16 : ctx->pending_tc_cap * 2;
         size_t sz = new_cap * sizeof(ctx->pending_template_calls[0]);
         void *new_arr = cbm_arena_alloc(ctx->arena, sz);
@@ -2673,7 +2684,8 @@ static void c_neg_memo_insert(CLSPContext *ctx, uint64_t h) {
         ctx->neg_memo = nm;
         ctx->neg_memo_cap = 1024;
         ctx->neg_memo_count = 0;
-    } else if ((ctx->neg_memo_count + 1) * 10 >= ctx->neg_memo_cap * 7) {
+    } else if ((ctx->neg_memo_count + 1) * 10 >= ctx->neg_memo_cap * 7 &&
+               ctx->neg_memo_cap <= INT_MAX / 2) {
         int new_cap = ctx->neg_memo_cap * 2;
         uint64_t *nm = (uint64_t *)calloc((size_t)new_cap, sizeof(uint64_t));
         if (nm) {
@@ -2694,7 +2706,12 @@ static void c_neg_memo_insert(CLSPContext *ctx, uint64_t h) {
         // if calloc failed: keep the existing table (load may exceed 70%, still correct)
     }
     uint64_t mask = (uint64_t)ctx->neg_memo_cap - 1;
-    for (uint64_t i = h & mask;; i = (i + 1) & mask) {
+    /* The 70% load factor normally guarantees a free slot, but a failed grow
+     * (OOM, or the capacity ceiling) leaves the table over that load and a
+     * full one would spin forever. Probing at most cap slots terminates; the
+     * memo is best-effort, so declining to record is correct. */
+    for (uint64_t i = h & mask, probes = 0; probes < (uint64_t)ctx->neg_memo_cap;
+         i = (i + 1) & mask, probes++) {
         if (ctx->neg_memo[i] == 0) {
             ctx->neg_memo[i] = h;
             ctx->neg_memo_count++;

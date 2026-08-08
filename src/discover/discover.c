@@ -834,6 +834,13 @@ static cbm_gitignore_t *try_load_nested_gitignore(const walk_frame_t *frame) {
 static void walk_push_subdir(walk_stack_t *ws, const char *abs_path, const char *rel_path,
                              const walk_frame_t *parent, file_list_t *out) {
     if (ws->top >= ws->cap) {
+        /* Doubling an int overflows before the cast can widen it, so bound it
+         * first and treat hitting the ceiling the same as an allocation
+         * failure. */
+        if (ws->cap > INT_MAX / 2) {
+            out->failed = true;
+            return;
+        }
         int new_cap = ws->cap * 2;
         walk_frame_t *grown = realloc(ws->frames, (size_t)new_cap * sizeof(*grown));
         if (!grown) {

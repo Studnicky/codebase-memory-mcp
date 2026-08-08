@@ -288,7 +288,11 @@ cbm_store_t *cbm_store_open(const char *project);
 /* Close the store and free all resources. NULL-safe. */
 void cbm_store_close(cbm_store_t *s);
 
-/* Get the underlying sqlite3 handle (for testing only). */
+/* The underlying sqlite3 handle. Reaching for this from another module means
+ * including <sqlite3.h> there, which the architecture gate refuses: production
+ * code goes through store/sql.h, which owns that header and publishes typed
+ * statements. This stays for store's own implementation and for tests, which
+ * drive raw SQL against a fixture deliberately. */
 struct sqlite3 *cbm_store_get_db(cbm_store_t *s);
 
 /* Get the last error message (static string, valid until next call). */

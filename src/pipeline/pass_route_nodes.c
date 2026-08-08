@@ -432,8 +432,8 @@ static int ensure_one_decorator_route(cbm_gbuf_t *gb, const cbm_gbuf_node_t *fun
 
     char rprops[CBM_SZ_256];
     snprintf(rprops, sizeof(rprops), "{\"method\":\"%s\",\"source\":\"decorator\"}", method);
-    cbm_node_id_t route_id = cbm_gbuf_upsert_node(
-        gb, "Route", path, route_qn, func->file_path ? func->file_path : "", 0, 0, rprops);
+    cbm_node_id_t route_id =
+        cbm_gbuf_upsert_node(gb, "Route", path, route_qn, func->file_path, 0, 0, rprops);
 
     if (existing) {
         const cbm_gbuf_edge_t **existing_handles = NULL;
@@ -447,9 +447,7 @@ static int ensure_one_decorator_route(cbm_gbuf_t *gb, const cbm_gbuf_node_t *fun
     }
 
     const cbm_gbuf_prop_t hprops[] = {
-        {.key = "handler",
-         .kind = CBM_EDGE_PROP_STRING,
-         .text = func->qualified_name ? func->qualified_name : ""},
+        {.key = "handler", .kind = CBM_EDGE_PROP_STRING, .text = func->qualified_name},
     };
     cbm_gbuf_insert_edge_props(gb, (cbm_edge_endpoints_t){.source = func->id, .target = route_id},
                                "HANDLES", hprops, (int)(sizeof(hprops) / sizeof(hprops[0])));
@@ -728,8 +726,8 @@ static int try_create_data_flow(cbm_gbuf_t *gb, cbm_node_id_t caller_id, cbm_nod
      * malformed (aborts json_extract consumers incl. integrity_check). */
     char esc_rname[CBM_SZ_256];
     char esc_rqn[CBM_SZ_512];
-    cbm_json_escape(esc_rname, sizeof(esc_rname), route->name ? route->name : "");
-    cbm_json_escape(esc_rqn, sizeof(esc_rqn), route->qualified_name ? route->qualified_name : "");
+    cbm_json_escape(esc_rname, sizeof(esc_rname), route->name);
+    cbm_json_escape(esc_rqn, sizeof(esc_rqn), route->qualified_name);
     char props[CBM_SZ_2K];
     int n = data_flow_props_open(props, sizeof(props), esc_rname, esc_rqn, edge_type, via_infra);
 

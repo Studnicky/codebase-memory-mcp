@@ -1,4 +1,5 @@
 #include "type_registry.h"
+#include <limits.h> /* INT_MAX */
 #include <string.h>
 #include <stdlib.h>
 
@@ -365,6 +366,8 @@ void cbm_registry_add_func(CBMTypeRegistry *reg, CBMRegisteredFunc func) {
                  */
     }
     if (reg->func_count >= reg->func_cap) {
+        if (reg->func_cap > INT_MAX / 2)
+            return;
         int new_cap = reg->func_cap == 0 ? 64 : reg->func_cap * 2;
         CBMRegisteredFunc *new_items = (CBMRegisteredFunc *)cbm_arena_alloc(
             reg->arena, (size_t)new_cap * sizeof(CBMRegisteredFunc));
@@ -385,6 +388,8 @@ void cbm_registry_add_type(CBMTypeRegistry *reg, CBMRegisteredType type) {
                  */
     }
     if (reg->type_count >= reg->type_cap) {
+        if (reg->type_cap > INT_MAX / 2)
+            return;
         int new_cap = reg->type_cap == 0 ? 64 : reg->type_cap * 2;
         CBMRegisteredType *new_items = (CBMRegisteredType *)cbm_arena_alloc(
             reg->arena, (size_t)new_cap * sizeof(CBMRegisteredType));

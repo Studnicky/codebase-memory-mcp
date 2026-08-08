@@ -1013,7 +1013,7 @@ struct few_ctx {
     size_t target_len;
     const char **results;
     int count;
-    int cap;
+    size_t cap;
 };
 
 static void few_scan(const char *key, void *value, void *ud) {
@@ -1021,9 +1021,9 @@ static void few_scan(const char *key, void *value, void *ud) {
     struct few_ctx *ctx = ud;
     size_t klen = strlen(key);
     if (klen >= ctx->target_len && strcmp(key + klen - ctx->target_len, ctx->target) == 0) {
-        if (ctx->count >= ctx->cap) {
+        if ((size_t)ctx->count >= ctx->cap) {
             ctx->cap = ctx->cap ? ctx->cap * PAIR_LEN : REG_INIT_CAP;
-            ctx->results = safe_realloc(ctx->results, (size_t)ctx->cap * sizeof(char *));
+            ctx->results = cbm_realloc_or_abort(ctx->results, ctx->cap * sizeof(char *));
         }
         ctx->results[ctx->count++] = key;
     }

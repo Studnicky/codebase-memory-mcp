@@ -1600,7 +1600,7 @@ int cbm_store_list_projects(cbm_store_t *s, cbm_project_t **out, int *count) {
     while ((scan_rc1 = sqlite3_step(stmt)) == SQLITE_ROW) {
         if (n >= cap) {
             cap *= ST_GROWTH;
-            arr = safe_realloc(arr, cap * sizeof(cbm_project_t));
+            arr = cbm_realloc_or_abort(arr, cap * sizeof(cbm_project_t));
         }
         arr[n].name = heap_strdup((const char *)sqlite3_column_text(stmt, 0));
         arr[n].indexed_at = heap_strdup((const char *)sqlite3_column_text(stmt, SKIP_ONE));
@@ -1812,7 +1812,7 @@ int cbm_store_find_nodes_by_name_any(cbm_store_t *s, const char *name, cbm_node_
     while ((scan_rc2 = sqlite3_step(stmt)) == SQLITE_ROW) {
         if (n >= cap) {
             cap *= ST_GROWTH;
-            arr = safe_realloc(arr, cap * sizeof(cbm_node_t));
+            arr = cbm_realloc_or_abort(arr, cap * sizeof(cbm_node_t));
         }
         scan_node(stmt, &arr[n]);
         n++;
@@ -1879,7 +1879,7 @@ static int find_nodes_generic(cbm_store_t *s, sqlite3_stmt **slot, const char *s
     while ((scan_rc3 = sqlite3_step(stmt)) == SQLITE_ROW) {
         if (n >= cap) {
             cap *= ST_GROWTH;
-            arr = safe_realloc(arr, cap * sizeof(cbm_node_t));
+            arr = cbm_realloc_or_abort(arr, cap * sizeof(cbm_node_t));
         }
         scan_node(stmt, &arr[n]);
         n++;
@@ -2096,7 +2096,7 @@ static int find_edges_generic(cbm_store_t *s, sqlite3_stmt **slot, const char *s
     while ((scan_rc4 = sqlite3_step(stmt)) == SQLITE_ROW) {
         if (n >= cap) {
             cap *= ST_GROWTH;
-            arr = safe_realloc(arr, cap * sizeof(cbm_edge_t));
+            arr = cbm_realloc_or_abort(arr, cap * sizeof(cbm_edge_t));
         }
         scan_edge(stmt, &arr[n]);
         n++;
@@ -2194,8 +2194,8 @@ int cbm_store_fetch_call_edges(cbm_store_t *s, const char *project, int max_edge
         }
         if (n >= cap) {
             cap *= ST_GROWTH;
-            src = safe_realloc(src, cap * sizeof(int64_t));
-            tgt = safe_realloc(tgt, cap * sizeof(int64_t));
+            src = cbm_realloc_or_abort(src, cap * sizeof(int64_t));
+            tgt = cbm_realloc_or_abort(tgt, cap * sizeof(int64_t));
         }
         src[n] = sqlite3_column_int64(stmt, 0);
         tgt[n] = sqlite3_column_int64(stmt, 1);
@@ -2392,7 +2392,7 @@ int cbm_store_get_file_hashes(cbm_store_t *s, const char *project, cbm_file_hash
     while ((scan_rc5 = sqlite3_step(stmt)) == SQLITE_ROW) {
         if (n >= cap) {
             cap *= ST_GROWTH;
-            arr = safe_realloc(arr, cap * sizeof(cbm_file_hash_t));
+            arr = cbm_realloc_or_abort(arr, cap * sizeof(cbm_file_hash_t));
         }
         arr[n].project = heap_strdup((const char *)sqlite3_column_text(stmt, 0));
         arr[n].rel_path = heap_strdup((const char *)sqlite3_column_text(stmt, SKIP_ONE));
@@ -2931,7 +2931,7 @@ static int coverage_query_rows(cbm_store_t *s, const char *project, const char *
     while ((scan_rc = sqlite3_step(stmt)) == SQLITE_ROW) {
         if (n >= cap) {
             cap *= ST_GROWTH;
-            arr = safe_realloc(arr, cap * sizeof(*arr));
+            arr = cbm_realloc_or_abort(arr, cap * sizeof(*arr));
         }
         memset(&arr[n], 0, sizeof(arr[n]));
         arr[n].rel_path = heap_strdup((const char *)sqlite3_column_text(stmt, 0));
@@ -3060,7 +3060,7 @@ int cbm_store_coverage_get(cbm_store_t *s, const char *project, cbm_coverage_row
     while ((scan_rc6 = sqlite3_step(stmt)) == SQLITE_ROW) {
         if (n >= cap) {
             cap *= ST_GROWTH;
-            arr = safe_realloc(arr, cap * sizeof(cbm_coverage_row_t));
+            arr = cbm_realloc_or_abort(arr, cap * sizeof(cbm_coverage_row_t));
         }
         arr[n].rel_path = heap_strdup((const char *)sqlite3_column_text(stmt, 0));
         arr[n].kind = heap_strdup((const char *)sqlite3_column_text(stmt, SKIP_ONE));
@@ -3126,7 +3126,7 @@ int cbm_store_find_nodes_by_file_overlap(cbm_store_t *s, const char *project, co
     while ((scan_rc7 = sqlite3_step(stmt)) == SQLITE_ROW) {
         if (n >= cap) {
             cap *= ST_GROWTH;
-            nodes = safe_realloc(nodes, cap * sizeof(cbm_node_t));
+            nodes = cbm_realloc_or_abort(nodes, cap * sizeof(cbm_node_t));
         }
         memset(&nodes[n], 0, sizeof(cbm_node_t));
         scan_node(stmt, &nodes[n]);
@@ -3191,7 +3191,7 @@ int cbm_store_find_nodes_by_qn_suffix(cbm_store_t *s, const char *project, const
     while ((scan_rc8 = sqlite3_step(stmt)) == SQLITE_ROW) {
         if (n >= cap) {
             cap *= ST_GROWTH;
-            nodes = safe_realloc(nodes, cap * sizeof(cbm_node_t));
+            nodes = cbm_realloc_or_abort(nodes, cap * sizeof(cbm_node_t));
         }
         memset(&nodes[n], 0, sizeof(cbm_node_t));
         scan_node(stmt, &nodes[n]);
@@ -3272,7 +3272,7 @@ int cbm_store_list_files(cbm_store_t *s, const char *project, char ***out, int *
         }
         if (n >= cap) {
             cap *= ST_GROWTH;
-            files = safe_realloc(files, cap * sizeof(char *));
+            files = cbm_realloc_or_abort(files, cap * sizeof(char *));
         }
         files[n++] = heap_strdup(fp);
     }
@@ -3317,7 +3317,7 @@ static int query_neighbor_names(sqlite3 *db, const char *sql, int64_t node_id, i
         }
         if (count >= cap) {
             cap *= ST_GROWTH;
-            names = safe_realloc(names, cap * sizeof(char *));
+            names = cbm_realloc_or_abort(names, cap * sizeof(char *));
         }
         names[count++] = strdup(name);
     }
@@ -3808,7 +3808,7 @@ int cbm_store_find_edges_by_url_path(cbm_store_t *s, const char *project, const 
     while ((scan_rc12 = sqlite3_step(stmt)) == SQLITE_ROW) {
         if (n >= cap) {
             cap *= ST_GROWTH;
-            edges = safe_realloc(edges, cap * sizeof(cbm_edge_t));
+            edges = cbm_realloc_or_abort(edges, cap * sizeof(cbm_edge_t));
         }
         memset(&edges[n], 0, sizeof(cbm_edge_t));
         scan_edge(stmt, &edges[n]);
@@ -4342,7 +4342,7 @@ int cbm_store_search(cbm_store_t *s, const cbm_search_params_t *params, cbm_sear
     while ((scan_rc13 = sqlite3_step(main_stmt)) == SQLITE_ROW) {
         if (n >= cap) {
             cap *= ST_GROWTH;
-            results = safe_realloc(results, cap * sizeof(cbm_search_result_t));
+            results = cbm_realloc_or_abort(results, cap * sizeof(cbm_search_result_t));
         }
         memset(&results[n], 0, sizeof(cbm_search_result_t));
         scan_node(main_stmt, &results[n].node);
@@ -4458,7 +4458,7 @@ static int bfs_collect_edges(cbm_store_t *s, int64_t start_id, const cbm_node_ho
     while ((scan_rc14 = sqlite3_step(estmt)) == SQLITE_ROW) {
         if (en >= ecap) {
             ecap *= ST_GROWTH;
-            edges = safe_realloc(edges, ecap * sizeof(cbm_edge_info_t));
+            edges = cbm_realloc_or_abort(edges, ecap * sizeof(cbm_edge_info_t));
         }
         edges[en].from_name = heap_strdup((const char *)sqlite3_column_text(estmt, 0));
         edges[en].to_name = heap_strdup((const char *)sqlite3_column_text(estmt, SKIP_ONE));
@@ -4586,7 +4586,7 @@ int cbm_store_bfs(cbm_store_t *s, int64_t start_id, const char *direction, const
     while ((scan_rc15 = sqlite3_step(stmt)) == SQLITE_ROW) {
         if (n >= cap) {
             cap *= ST_GROWTH;
-            visited = safe_realloc(visited, cap * sizeof(cbm_node_hop_t));
+            visited = cbm_realloc_or_abort(visited, cap * sizeof(cbm_node_hop_t));
         }
         scan_node(stmt, &visited[n].node);
         visited[n].hop = sqlite3_column_int(stmt, ST_COL_9);
@@ -4726,7 +4726,7 @@ int cbm_store_bfs_multi(cbm_store_t *s, const int64_t *seed_ids, int seed_count,
         }
         if (n >= cap) {
             cap *= ST_GROWTH;
-            visited = safe_realloc(visited, cap * sizeof(cbm_node_hop_t));
+            visited = cbm_realloc_or_abort(visited, cap * sizeof(cbm_node_hop_t));
         }
         scan_node(stmt, &visited[n].node);
         visited[n].hop = sqlite3_column_int(stmt, ST_COL_9);
@@ -4876,7 +4876,7 @@ int cbm_deduplicate_hops(const cbm_node_hop_t *hops, int hop_count, cbm_node_hop
         }
     }
 
-    *out = safe_realloc(result, n * sizeof(cbm_node_hop_t));
+    *out = cbm_realloc_or_abort(result, n * sizeof(cbm_node_hop_t));
     *out_count = store_count_to_int(n);
     return CBM_STORE_OK;
 }
@@ -5637,7 +5637,7 @@ static int arch_entry_points(cbm_store_t *s, const char *project, const char *pa
     while ((scan_rc21 = sqlite3_step(stmt)) == SQLITE_ROW) {
         if (n >= cap) {
             cap *= ST_GROWTH;
-            arr = safe_realloc(arr, cap * sizeof(cbm_entry_point_t));
+            arr = cbm_realloc_or_abort(arr, cap * sizeof(cbm_entry_point_t));
         }
         arr[n].name = heap_strdup((const char *)sqlite3_column_text(stmt, 0));
         arr[n].qualified_name = heap_strdup((const char *)sqlite3_column_text(stmt, SKIP_ONE));
@@ -5719,7 +5719,7 @@ static int arch_routes(cbm_store_t *s, const char *project, const char *path,
         }
         if (n >= cap) {
             cap *= ST_GROWTH;
-            arr = safe_realloc(arr, cap * sizeof(cbm_route_info_t));
+            arr = cbm_realloc_or_abort(arr, cap * sizeof(cbm_route_info_t));
         }
 
         arr[n].method = heap_strdup("");
@@ -5794,7 +5794,7 @@ static int arch_hotspots(cbm_store_t *s, const char *project, const char *path,
     while ((scan_rc23 = sqlite3_step(stmt)) == SQLITE_ROW) {
         if (n >= cap) {
             cap *= ST_GROWTH;
-            arr = safe_realloc(arr, cap * sizeof(cbm_hotspot_t));
+            arr = cbm_realloc_or_abort(arr, cap * sizeof(cbm_hotspot_t));
         }
         arr[n].name = heap_strdup((const char *)sqlite3_column_text(stmt, 0));
         arr[n].qualified_name = heap_strdup((const char *)sqlite3_column_text(stmt, SKIP_ONE));
@@ -5891,8 +5891,8 @@ static int arch_boundaries(cbm_store_t *s, const char *project, const char *path
     while ((scan_rc24 = sqlite3_step(nstmt)) == SQLITE_ROW) {
         if (nn >= ncap) {
             ncap *= ST_GROWTH;
-            nids = safe_realloc(nids, ncap * sizeof(int64_t));
-            npkgs = safe_realloc(npkgs, ncap * sizeof(char *));
+            nids = cbm_realloc_or_abort(nids, ncap * sizeof(int64_t));
+            npkgs = cbm_realloc_or_abort(npkgs, ncap * sizeof(char *));
         }
         int64_t nid = sqlite3_column_int64(nstmt, 0);
         nids[nn] = nid;
@@ -6133,7 +6133,7 @@ static int arch_packages(cbm_store_t *s, const char *project, const char *path,
     while ((scan_rc27 = sqlite3_step(stmt)) == SQLITE_ROW) {
         if (n >= cap) {
             cap *= ST_GROWTH;
-            arr = safe_realloc(arr, cap * sizeof(cbm_package_summary_t));
+            arr = cbm_realloc_or_abort(arr, cap * sizeof(cbm_package_summary_t));
         }
         arr[n].name = heap_strdup((const char *)sqlite3_column_text(stmt, 0));
         arr[n].node_count = sqlite3_column_int(stmt, SKIP_ONE);
@@ -6473,7 +6473,7 @@ static void push_tree_entry(cbm_file_tree_entry_t **entries, size_t *en, size_t 
                             cbm_file_tree_entry_t e) {
     if (*en >= *ecap) {
         *ecap *= ST_GROWTH;
-        *entries = safe_realloc(*entries, *ecap * sizeof(cbm_file_tree_entry_t));
+        *entries = cbm_realloc_or_abort(*entries, *ecap * sizeof(cbm_file_tree_entry_t));
     }
     (*entries)[(*en)++] = e;
 }
@@ -6587,7 +6587,7 @@ static int arch_file_tree(cbm_store_t *s, const char *project, const char *path,
         }
         if ((size_t)fn >= fcap) {
             fcap *= ST_GROWTH;
-            files = safe_realloc(files, fcap * sizeof(char *));
+            files = cbm_realloc_or_abort(files, fcap * sizeof(char *));
         }
         files[fn++] = heap_strdup(fp);
         arch_register_file_dirs(fp, dir_paths, dir_child_counts, dir_children, dir_children_caps,
@@ -6654,9 +6654,9 @@ static void louvain_build_weights(const int64_t *nodes, int n, const cbm_louvain
         } else {
             if (wn >= wcap) {
                 wcap *= ST_GROWTH;
-                wsi = safe_realloc(wsi, wcap * sizeof(int));
-                wdi = safe_realloc(wdi, wcap * sizeof(int));
-                ww = safe_realloc(ww, wcap * sizeof(double));
+                wsi = cbm_realloc_or_abort(wsi, wcap * sizeof(int));
+                wdi = cbm_realloc_or_abort(wdi, wcap * sizeof(int));
+                ww = cbm_realloc_or_abort(ww, wcap * sizeof(double));
             }
             wsi[wn] = si;
             wdi[wn] = di;
@@ -7333,9 +7333,9 @@ static int arch_clusters(cbm_store_t *s, const char *project, const char *path,
     while ((scan_rc29 = sqlite3_step(st)) == SQLITE_ROW) {
         if ((size_t)n >= cap) {
             cap *= ST_GROWTH;
-            ids = safe_realloc(ids, cap * sizeof(int64_t));
-            names = safe_realloc(names, cap * sizeof(char *));
-            qns = safe_realloc(qns, cap * sizeof(char *));
+            ids = cbm_realloc_or_abort(ids, cap * sizeof(int64_t));
+            names = cbm_realloc_or_abort(names, cap * sizeof(char *));
+            qns = cbm_realloc_or_abort(qns, cap * sizeof(char *));
         }
         ids[n] = sqlite3_column_int64(st, 0);
         names[n] = heap_strdup((const char *)sqlite3_column_text(st, SKIP_ONE));
@@ -7385,9 +7385,9 @@ static int arch_clusters(cbm_store_t *s, const char *project, const char *path,
             }
             if ((size_t)ne >= ecap) {
                 ecap *= ST_GROWTH;
-                edges = safe_realloc(edges, ecap * sizeof(cbm_louvain_edge_t));
-                esrc = safe_realloc(esrc, ecap * sizeof(int));
-                edst = safe_realloc(edst, ecap * sizeof(int));
+                edges = cbm_realloc_or_abort(edges, ecap * sizeof(cbm_louvain_edge_t));
+                esrc = cbm_realloc_or_abort(esrc, ecap * sizeof(int));
+                edst = cbm_realloc_or_abort(edst, ecap * sizeof(int));
             }
             edges[ne].src = ids[si];
             edges[ne].dst = ids[ti];
@@ -8155,7 +8155,7 @@ int cbm_store_find_architecture_docs(cbm_store_t *s, const char *project, char *
     while ((scan_rc31 = sqlite3_step(stmt)) == SQLITE_ROW) {
         if (n >= cap) {
             cap *= ST_GROWTH;
-            arr = safe_realloc(arr, cap * sizeof(char *));
+            arr = cbm_realloc_or_abort(arr, cap * sizeof(char *));
         }
         arr[n++] = heap_strdup((const char *)sqlite3_column_text(stmt, 0));
     }

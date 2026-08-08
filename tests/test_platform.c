@@ -10,9 +10,15 @@
 #include "../src/foundation/platform.h"
 #include "../src/foundation/platform_internal.h"
 #include "../src/foundation/system_info_internal.h"
+#include <errno.h>
+#include <signal.h>
 #include <stdatomic.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <unistd.h>
+#ifndef _WIN32
+#include <sys/wait.h>
+#endif
 
 #ifdef __linux__
 /* Linux-only cgroup tests need stdio for FILE*, stdlib for mkdtemp,
@@ -238,6 +244,88 @@ TEST(platform_mmap_nonexistent) {
     ASSERT_NULL(data);
     PASS();
 }
+
+TEST(platform_realloc_or_abort_grows_and_preserves) {
+    enum { INITIAL = 4, GROWN = 64 };
+    int *arr = malloc(INITIAL * sizeof(int));
+    ASSERT_NOT_NULL(arr);
+    for (int i = 0; i < INITIAL; i++) {
+        arr[i] = i * 7;
+    }
+    arr = cbm_realloc_or_abort(arr, GROWN * sizeof(int));
+    ASSERT_NOT_NULL(arr);
+    for (int i = 0; i < INITIAL; i++) {
+        ASSERT(arr[i] == i * 7);
+    }
+    free(arr);
+    PASS();
+}
+
+TEST(platform_realloc_or_free_grows_and_preserves) {
+    /* The recoverable variant reports failure rather than aborting — that is
+     * the whole point of having two names, and the abort test below is what
+     * pins the difference. Its own failure branch is not asserted here: it
+     * needs a real allocator refusal, which the sanitizers intercept before it
+     * reaches us, so such a test would pass or die depending on ASAN_OPTIONS
+     * rather than on the code. */
+    enum { INITIAL = 4, GROWN = 64 };
+    int *arr = malloc(INITIAL * sizeof(int));
+    ASSERT_NOT_NULL(arr);
+    for (int i = 0; i < INITIAL; i++) {
+        arr[i] = i * 3;
+    }
+    int *grown = cbm_realloc_or_free(arr, GROWN * sizeof(int));
+    ASSERT_NOT_NULL(grown);
+    for (int i = 0; i < INITIAL; i++) {
+        ASSERT(grown[i] == i * 3);
+    }
+    free(grown);
+    PASS();
+}
+
+/* cbm_realloc_or_abort must never return NULL. Proving that means observing
+ * the process die, so the call runs in a forked child and the parent asserts
+ * the child was killed by SIGABRT rather than returning. The failure is
+ * injected through the test seam: a real allocator refusal is intercepted by
+ * the sanitizers before it reaches us, which would make the child die for a
+ * reason unrelated to the contract under test.
+ *
+ * Restricted to the single-purpose foundation binary. The abort path logs
+ * before it aborts, and the logger takes a lock — forking a process whose
+ * other threads may hold that lock and then locking in the child is the
+ * classic post-fork deadlock, so this must not run inside the multi-suite
+ * runner. */
+#if !defined(_WIN32) && defined(CBM_TEST_HOST_IS_SINGLE_PURPOSE)
+TEST(platform_realloc_or_abort_dies_rather_than_returning_null) {
+    fflush(NULL);
+    pid_t child = fork();
+    ASSERT(child >= 0);
+    if (child == 0) {
+        (void)signal(SIGALRM, SIG_DFL);
+        (void)alarm(30);
+        void *p = malloc(sizeof(int));
+        cbm_realloc_fail_next_growth_for_test();
+        p = cbm_realloc_or_abort(p, 64 * sizeof(int));
+        /* Unreachable: reaching here means the contract is broken, so exit
+         * with a status the parent can tell apart from the abort. */
+        _exit(p == NULL ? 41 : 42);
+    }
+    int status = 0;
+    pid_t waited;
+    do {
+        waited = waitpid(child, &status, 0);
+    } while (waited < 0 && errno == EINTR);
+    ASSERT(waited == child);
+    if (WIFEXITED(status)) {
+        (void)fprintf(stderr,
+                      "cbm_realloc_or_abort returned (exit=%d) instead of aborting\n",
+                      WEXITSTATUS(status));
+    }
+    ASSERT(WIFSIGNALED(status));
+    ASSERT(WTERMSIG(status) == SIGABRT);
+    PASS();
+}
+#endif
 
 typedef struct {
     const char *home;
@@ -625,6 +713,11 @@ SUITE(platform) {
     RUN_TEST(platform_file_size);
     RUN_TEST(platform_mmap);
     RUN_TEST(platform_mmap_nonexistent);
+    RUN_TEST(platform_realloc_or_abort_grows_and_preserves);
+    RUN_TEST(platform_realloc_or_free_grows_and_preserves);
+#if !defined(_WIN32) && defined(CBM_TEST_HOST_IS_SINGLE_PURPOSE)
+    RUN_TEST(platform_realloc_or_abort_dies_rather_than_returning_null);
+#endif
     RUN_TEST(platform_path_helpers_use_per_thread_storage);
     RUN_TEST(platform_cache_dir_rejects_truncated_override);
 #ifdef _WIN32

@@ -43,6 +43,7 @@
 #include "lsp_node_iter.h"
 #include "../helpers.h"
 #include <ctype.h>
+#include <limits.h> /* INT_MAX */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -234,6 +235,7 @@ void cs_lsp_add_using(CSLSPContext *ctx, CBMCSUsingKind kind, const char *local_
         return;
     }
     if (ctx->using_count >= ctx->using_cap) {
+        if (ctx->using_cap > INT_MAX / 2) return;
         int new_cap = ctx->using_cap ? ctx->using_cap * 2 : CS_USING_INITIAL_CAP;
         CBMCSUsing *nu = (CBMCSUsing *)cbm_arena_alloc(ctx->arena, (size_t)new_cap * sizeof(*nu));
         if (!nu) return;
@@ -253,6 +255,7 @@ void cs_lsp_add_using(CSLSPContext *ctx, CBMCSUsingKind kind, const char *local_
 static void cs_namespace_push(CSLSPContext *ctx, const char *ns_name) {
     if (!ns_name || !*ns_name) return;
     if (ctx->namespace_count >= ctx->namespace_cap) {
+        if (ctx->namespace_cap > INT_MAX / 2) return;
         int new_cap = ctx->namespace_cap ? ctx->namespace_cap * 2 : CS_NAMESPACE_INITIAL_CAP;
         const char **arr = (const char **)cbm_arena_alloc(ctx->arena,
                                                           (size_t)new_cap * sizeof(*arr));
@@ -2080,6 +2083,7 @@ static void cs_collect_type_params(CSLSPContext *ctx, TSNode node, const char **
         char *name = cs_node_text(ctx, id);
         if (!name) continue;
         if (n + 1 >= cap) {
+            if (cap > INT_MAX / 2) break;
             int new_cap = cap * 2;
             const char **ne =
                 (const char **)cbm_arena_alloc(ctx->arena, (size_t)new_cap * sizeof(*ne));
@@ -2303,9 +2307,11 @@ static void cs_process_type_decl(CSLSPContext *ctx, TSNode node) {
         TSNode bl = cs_child_named_kind(node, "base_list");
         if (!ts_node_is_null(bl)) {
             uint32_t nc = ts_node_child_count(bl);
-            int icap = 4, icount = 0;
-            const char **ifs =
-                (const char **)cbm_arena_alloc(ctx->arena, (size_t)icap * sizeof(*ifs));
+            /* icap is size_t so the doublings below are defined unsigned
+             * arithmetic; icount stays int, it indexes and terminates the list. */
+            size_t icap = 4;
+            int icount = 0;
+            const char **ifs = (const char **)cbm_arena_alloc(ctx->arena, icap * sizeof(*ifs));
             for (uint32_t i = 0; i < nc; i++) {
                 TSNode c = ts_node_child(bl, i);
                 if (ts_node_is_null(c) || !ts_node_is_named(c)) continue;
@@ -2319,10 +2325,10 @@ static void cs_process_type_decl(CSLSPContext *ctx, TSNode node) {
                  * goes to interfaces; first non-interface goes to base. */
                 const CBMRegisteredType *rt = cs_lookup_type_qn(ctx, qn);
                 if (rt && rt->is_interface) {
-                    if (icount + 1 >= icap) {
-                        int nc2 = icap * 2;
-                        const char **ne = (const char **)cbm_arena_alloc(
-                            ctx->arena, (size_t)nc2 * sizeof(*ne));
+                    if ((size_t)(icount + 1) >= icap) {
+                        size_t nc2 = icap * 2;
+                        const char **ne =
+                            (const char **)cbm_arena_alloc(ctx->arena, nc2 * sizeof(*ne));
                         if (!ne) continue;
                         for (int j = 0; j < icount; j++) ne[j] = ifs[j];
                         ifs = ne;
@@ -2332,10 +2338,10 @@ static void cs_process_type_decl(CSLSPContext *ctx, TSNode node) {
                 } else {
                     if (!ctx->enclosing_base_qn) ctx->enclosing_base_qn = qn;
                     else {
-                        if (icount + 1 >= icap) {
-                            int nc2 = icap * 2;
-                            const char **ne = (const char **)cbm_arena_alloc(
-                                ctx->arena, (size_t)nc2 * sizeof(*ne));
+                        if ((size_t)(icount + 1) >= icap) {
+                            size_t nc2 = icap * 2;
+                            const char **ne =
+                                (const char **)cbm_arena_alloc(ctx->arena, nc2 * sizeof(*ne));
                             if (!ne) continue;
                             for (int j = 0; j < icount; j++) ne[j] = ifs[j];
                             ifs = ne;
@@ -2726,6 +2732,7 @@ static cs_fields_t *cs_fields_get(CBMArena *arena, cs_fields_table_t *tab,
         if (strcmp(tab->items[i].class_qn, class_qn) == 0) return &tab->items[i];
     }
     if (tab->count + 1 >= tab->cap) {
+        if (tab->cap > INT_MAX / 2) return NULL;
         int new_cap = tab->cap ? tab->cap * 2 : 8;
         cs_fields_t *ne =
             (cs_fields_t *)cbm_arena_alloc(arena, (size_t)new_cap * sizeof(*ne));
@@ -2762,6 +2769,7 @@ static void cs_fields_add_debug(CBMArena *arena, cs_fields_t *f, const char *nam
         if (strcmp(f->field_names[i], name) == 0) return;
     }
     if (f->count + 2 >= f->cap) {
+        if (f->cap > INT_MAX / 2) return;
         int new_cap = f->cap * 2;
         const char **nn = (const char **)cbm_arena_alloc(arena, (size_t)new_cap * sizeof(*nn));
         const CBMType **nt = (const CBMType **)cbm_arena_alloc(arena, (size_t)new_cap * sizeof(*nt));
@@ -2935,6 +2943,7 @@ static void cs_method_rt_add(CBMArena *arena, cs_method_rt_table_t *tab,
         if (strcmp(tab->items[i].qn, qn) == 0) return;
     }
     if (tab->count + 1 >= tab->cap) {
+        if (tab->cap > INT_MAX / 2) return;
         int new_cap = tab->cap ? tab->cap * 2 : 16;
         cs_method_rt_entry_t *ne = (cs_method_rt_entry_t *)cbm_arena_alloc(
             arena, (size_t)new_cap * sizeof(*ne));

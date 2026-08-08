@@ -80,7 +80,7 @@ static bool json_get_bool(const char *json, const char *key) {
  * cbm_gbuf_set_node_properties_json rather than being assigned into the node. */
 static void append_complexity_props(cbm_gbuf_t *gb, const cbm_gbuf_node_t *node, int tld,
                                     bool recursive) {
-    const char *old = node->properties_json ? node->properties_json : "{}";
+    const char *old = node->properties_json;
     size_t olen = strlen(old);
     if (olen < 2 || old[olen - 1] != '}') {
         return; /* not a JSON object — leave untouched */

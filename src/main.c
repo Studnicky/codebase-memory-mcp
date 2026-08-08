@@ -15,7 +15,8 @@
  * and never create or retain a daemon generation.
  */
 #include "cbm.h"
-#include "store/store.h" // cbm_alloc_init — bind 3rd-party allocators to mimalloc before any sqlite/git init
+#include "store/store.h"
+#include "store/sql.h" // cbm_sql_bind_allocator — must precede any store open
 #include "host/application.h"
 #include "daemon/bootstrap.h"
 #include "host/frontend.h"
@@ -1883,9 +1884,39 @@ static int main_run_daemon_ctl(int argc, char **argv, const cbm_daemon_ipc_endpo
     return EXIT_SUCCESS;
 }
 
-int main(int argc, char **argv) {
-    /* Must remain the first statement: see allocator binding contract above. */
+/* Bind every third-party allocator to mimalloc, as defense-in-depth against the
+ * MI_OVERRIDE symbol override resolving malloc and free to different allocators
+ * inside one library (#424). sqlite additionally requires its bind to precede
+ * its own initialization, so it happens at startup, before any store is opened,
+ * rather than wherever the first query lives. The test build binds neither — it
+ * is CRT + ASan, where routing to mimalloc would mismatch ASan's frees.
+ * A refused bind means the database initialized first, i.e. the ordering
+ * contract above is already broken. That is fatal here rather than a slow
+ * death later, for the same reason mem_setup_fatal is: continuing would run
+ * the process on an allocator pairing that corrupts the heap. */
+static void main_bind_third_party_allocators(void) {
     cbm_alloc_init();
+#if defined(CBM_BIND_TS_ALLOCATOR) && CBM_BIND_TS_ALLOCATOR
+    const cbm_sql_allocator_t sql_alloc = {
+        .alloc = cbm_mem_alloc,
+        .grow = cbm_mem_grow,
+        .release = cbm_mem_release,
+        .usable_size = cbm_mem_usable_size,
+    };
+    if (!cbm_sql_bind_allocator(&sql_alloc)) {
+        /* Logged rather than printed: the daemon runs with stderr detached, so
+         * a message there would vanish and the process would look like it died
+         * for no reason at all. */
+        cbm_log_error("mem.sql_allocator_bind_refused", "detail",
+                      "the database initialized before its allocator could be bound");
+        abort();
+    }
+#endif
+}
+
+int main(int argc, char **argv) {
+    /* Must remain the first statement: see the binding contract above. */
+    main_bind_third_party_allocators();
 #ifndef _WIN32
     pid_t process_initial_ppid = getppid();
 #endif

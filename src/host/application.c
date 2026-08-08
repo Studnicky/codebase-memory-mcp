@@ -678,7 +678,7 @@ static char **application_read_suspects(cbm_daemon_application_job_t *job, const
     }
     char **open_paths = NULL;
     int open_count = 0;
-    int open_capacity = 0;
+    size_t open_capacity = 0;
     bool allocation_failed = false;
     size_t lines_read = 0;
     char line[APPLICATION_PATH_CAP];
@@ -712,9 +712,9 @@ static char **application_read_suspects(cbm_daemon_application_job_t *job, const
             if (already_open) {
                 continue;
             }
-            if (open_count == open_capacity) {
-                int next_capacity = open_capacity ? open_capacity * 2 : 16;
-                char **next = realloc(open_paths, (size_t)next_capacity * sizeof(*next));
+            if ((size_t)open_count == open_capacity) {
+                size_t next_capacity = open_capacity ? open_capacity * 2 : 16;
+                char **next = realloc(open_paths, next_capacity * sizeof(*next));
                 if (!next) {
                     allocation_failed = true;
                     break;

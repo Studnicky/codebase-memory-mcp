@@ -81,7 +81,7 @@ static void lex_push(cbm_lex_result_t *r, cbm_token_type_t type, const char *tex
             return; /* unreachable: capacity is bounded by input length */
         }
         r->capacity = r->capacity ? r->capacity * PAIR_LEN : CBM_SZ_32;
-        r->tokens = safe_realloc(r->tokens, (size_t)r->capacity * sizeof(cbm_token_t));
+        r->tokens = cbm_realloc_or_abort(r->tokens, (size_t)r->capacity * sizeof(cbm_token_t));
     }
     r->tokens[r->count++] = (cbm_token_t){.type = type, .text = heap_strdup(text), .pos = pos};
 }
@@ -93,7 +93,7 @@ static void lex_push_n(cbm_lex_result_t *r, cbm_token_type_t type, const char *s
             return; /* unreachable: capacity is bounded by input length */
         }
         r->capacity = r->capacity ? r->capacity * PAIR_LEN : CBM_SZ_32;
-        r->tokens = safe_realloc(r->tokens, (size_t)r->capacity * sizeof(cbm_token_t));
+        r->tokens = cbm_realloc_or_abort(r->tokens, (size_t)r->capacity * sizeof(cbm_token_t));
     }
     r->tokens[r->count++] =
         (cbm_token_t){.type = type, .text = heap_strndup(start, len), .pos = pos};
@@ -1634,7 +1634,7 @@ static int parse_multiarg_func_item(parser_t *p, cbm_return_item_t *item) {
          * non-negative here. */
         if ((size_t)item->arg_count >= cap) {
             cap *= PAIR_LEN;
-            item->args = safe_realloc(item->args, cap * sizeof(cbm_func_arg_t));
+            item->args = cbm_realloc_or_abort(item->args, cap * sizeof(cbm_func_arg_t));
         }
         if (parse_func_arg(p, &item->args[item->arg_count]) < 0) {
             return CBM_NOT_FOUND;
@@ -1845,7 +1845,7 @@ static int parse_return_or_with(parser_t *p, cbm_return_clause_t **out, bool is_
          * non-negative here; cap is private bookkeeping and stays size_t. */
         if ((size_t)r->count >= cap) {
             cap *= PAIR_LEN;
-            r->items = safe_realloc(r->items, cap * sizeof(cbm_return_item_t));
+            r->items = cbm_realloc_or_abort(r->items, cap * sizeof(cbm_return_item_t));
         }
         r->items[r->count++] = item;
 
@@ -1913,7 +1913,7 @@ static int parse_match_pattern(parser_t *p, cbm_pattern_t *pat) {
     while (check(p, TOK_DASH) || check(p, TOK_LT)) {
         if ((size_t)pat->rel_count >= rel_cap) {
             rel_cap *= PAIR_LEN;
-            pat->rels = safe_realloc(pat->rels, rel_cap * sizeof(cbm_rel_pattern_t));
+            pat->rels = cbm_realloc_or_abort(pat->rels, rel_cap * sizeof(cbm_rel_pattern_t));
         }
         if (parse_rel(p, &pat->rels[pat->rel_count]) < 0) {
             return CBM_NOT_FOUND;
@@ -1922,7 +1922,7 @@ static int parse_match_pattern(parser_t *p, cbm_pattern_t *pat) {
 
         if ((size_t)pat->node_count >= node_cap) {
             node_cap *= PAIR_LEN;
-            pat->nodes = safe_realloc(pat->nodes, node_cap * sizeof(cbm_node_pattern_t));
+            pat->nodes = cbm_realloc_or_abort(pat->nodes, node_cap * sizeof(cbm_node_pattern_t));
         }
         if (parse_node(p, &pat->nodes[pat->node_count]) < 0) {
             return CBM_NOT_FOUND;
@@ -1995,8 +1995,8 @@ static int parse_match_chain(parser_t *p, cbm_query_t *q, size_t *pat_cap) {
          * non-negative here; pat_cap is private bookkeeping and stays size_t. */
         if ((size_t)q->pattern_count >= *pat_cap) {
             *pat_cap *= PAIR_LEN;
-            q->patterns = safe_realloc(q->patterns, *pat_cap * sizeof(cbm_pattern_t));
-            q->pattern_optional = safe_realloc(q->pattern_optional, *pat_cap * sizeof(bool));
+            q->patterns = cbm_realloc_or_abort(q->patterns, *pat_cap * sizeof(cbm_pattern_t));
+            q->pattern_optional = cbm_realloc_or_abort(q->pattern_optional, *pat_cap * sizeof(bool));
         }
         if (parse_match_pattern(p, &q->patterns[q->pattern_count]) < 0) {
             return CBM_NOT_FOUND;
@@ -2473,7 +2473,7 @@ static const char *edge_prop(const cbm_edge_t *e, const char *prop) {
         return "";
     }
     if (strcmp(prop, "type") == 0) {
-        return e->type ? e->type : "";
+        return e->type;
     }
     /* Rotate through 8 thread-local buffers so multiple props can be accessed per row. */
     static CBM_TLS char ebufs[CYP_BUF_8][CBM_SZ_512];
@@ -2633,7 +2633,7 @@ static const char *resolve_condition_value(const cbm_condition_t *c, binding_t *
         return node_prop(n, c->property, b->store);
     }
     /* Bare alias (e.g. post-WITH virtual var) — use node name directly */
-    return n->name ? n->name : "";
+    return n->name;
 }
 
 /* Evaluate a comparison operator between actual and expected strings. */
@@ -2869,7 +2869,7 @@ static void rb_set_columns(result_builder_t *rb, const char **cols, int count) {
 static void rb_add_row(result_builder_t *rb, const char **values) {
     if ((size_t)rb->row_count >= rb->row_cap) {
         rb->row_cap *= PAIR_LEN;
-        rb->rows = safe_realloc(rb->rows, rb->row_cap * sizeof(const char **));
+        rb->rows = cbm_realloc_or_abort(rb->rows, rb->row_cap * sizeof(const char **));
     }
     const char **row =
         malloc((rb->col_count > 0 ? (size_t)rb->col_count : SKIP_ONE) * sizeof(const char *));
@@ -2952,14 +2952,14 @@ static const char *binding_get_virtual(binding_t *b, const char *var, const char
         /* Bare `RETURN r` on an edge: surface the full properties JSON
          * (or "{}" if none) so callers can inspect timestamps, weights,
          * etc. without naming each property. */
-        return prop ? edge_prop(e, prop) : (e->properties_json ? e->properties_json : "{}");
+        return prop ? edge_prop(e, prop) : e->properties_json;
     }
     cbm_node_t *n = binding_get(b, var);
     if (n) {
         if (prop) {
             return node_prop(n, prop, b->store);
         }
-        return n->name ? n->name : "";
+        return n->name;
     }
     return "";
 }
@@ -3126,7 +3126,7 @@ static void scan_alternation_labels(cbm_store_t *store, const char *project, con
              * never negative. */
             if ((size_t)(*out_count + pc) > cap) {
                 cap = (size_t)(*out_count + pc) * PAIR_LEN;
-                *out_nodes = safe_realloc(*out_nodes, cap * sizeof(cbm_node_t));
+                *out_nodes = cbm_realloc_or_abort(*out_nodes, cap * sizeof(cbm_node_t));
             }
             memcpy(*out_nodes + *out_count, part, (size_t)pc * sizeof(cbm_node_t));
             *out_count += pc;
@@ -3760,11 +3760,11 @@ static const char *project_item(binding_t *b, cbm_return_item_t *item, char *fun
         if (strcmp(item->func, "properties") == 0) {
             cbm_node_t *n = binding_get(b, item->variable);
             if (n) {
-                return n->properties_json ? n->properties_json : "{}";
+                return n->properties_json;
             }
             cbm_edge_t *e = binding_get_edge(b, item->variable);
             if (e) {
-                return e->properties_json ? e->properties_json : "{}";
+                return e->properties_json;
             }
             return "{}";
         }
@@ -3806,7 +3806,7 @@ static void distinct_list_add(char ***list, int *count, const char *val) {
     }
     /* *count is a running distinct-value tally — never negative. */
     int idx = (*count)++;
-    *list = safe_realloc(*list, (size_t)(idx + SKIP_ONE) * sizeof(char *));
+    *list = cbm_realloc_or_abort(*list, (size_t)(idx + SKIP_ONE) * sizeof(char *));
     (*list)[idx] = heap_strdup(val);
 }
 
@@ -3926,7 +3926,7 @@ static size_t with_agg_find_or_create(with_agg_t **aggs, size_t *agg_cnt, size_t
     }
     if (*agg_cnt >= *agg_cap) {
         *agg_cap *= PAIR_LEN;
-        *aggs = safe_realloc(*aggs, *agg_cap * sizeof(with_agg_t));
+        *aggs = cbm_realloc_or_abort(*aggs, *agg_cap * sizeof(with_agg_t));
     }
     size_t found = (*agg_cnt)++;
     snprintf((*aggs)[found].group_key, sizeof((*aggs)[found].group_key), "%s", key);
@@ -4055,7 +4055,7 @@ static void execute_with_aggregate(cbm_return_clause_t *wc, binding_t *bindings,
         with_agg_accumulate(&aggs[found], wc, &bindings[bi]);
     }
 
-    *vbindings = safe_realloc(*vbindings, (agg_cnt + SKIP_ONE) * sizeof(binding_t));
+    *vbindings = cbm_realloc_or_free(*vbindings, (agg_cnt + SKIP_ONE) * sizeof(binding_t));
     if (!*vbindings) {
         with_agg_free(aggs, agg_cnt, wc->count);
         return;
@@ -4273,10 +4273,10 @@ static void project_star_var(binding_t *b, const char *var, const char **vals) {
         return;
     }
     cbm_node_t *n = binding_get(b, var);
-    vals[0] = n && n->name ? n->name : "";
-    vals[SKIP_ONE] = n && n->qualified_name ? n->qualified_name : "";
-    vals[PAIR_LEN] = n && n->label ? n->label : "";
-    vals[CYP_TRIPLE] = n && n->file_path ? n->file_path : "";
+    vals[0] = n ? n->name : "";
+    vals[SKIP_ONE] = n ? n->qualified_name : "";
+    vals[PAIR_LEN] = n ? n->label : "";
+    vals[CYP_TRIPLE] = n ? n->file_path : "";
 }
 
 /* Project one binding row for RETURN * */
@@ -4391,7 +4391,7 @@ static void ret_agg_accumulate(ret_agg_entry_t *entry, cbm_return_clause_t *ret,
             /* collect_counts[ci] is a running per-item tally — never negative. */
             int idx = entry->collect_counts[ci]++;
             entry->collect_lists[ci] =
-                safe_realloc(entry->collect_lists[ci], (size_t)(idx + SKIP_ONE) * sizeof(char *));
+                cbm_realloc_or_abort(entry->collect_lists[ci], (size_t)(idx + SKIP_ONE) * sizeof(char *));
             entry->collect_lists[ci][idx] = heap_strdup(raw);
         } else if (ret->items[ci].distinct && strcmp(ret->items[ci].func, "COUNT") == 0) {
             /* COUNT(DISTINCT x): track unique values; emit the set size (#239). */
@@ -4498,7 +4498,7 @@ static void execute_return_agg(cbm_return_clause_t *ret, binding_t *bindings, in
         if (found < 0) {
             if ((size_t)agg_count >= agg_cap) {
                 agg_cap *= PAIR_LEN;
-                aggs = safe_realloc(aggs, agg_cap * sizeof(ret_agg_entry_t));
+                aggs = cbm_realloc_or_abort(aggs, agg_cap * sizeof(ret_agg_entry_t));
             }
             found = agg_count++;
             ret_agg_init_group(&aggs[found], key, ret->count, vals);
@@ -4594,10 +4594,10 @@ static void execute_default_projection(cbm_pattern_t *pat0, binding_t *bindings,
         const char *vals[CYP_COL_BUF];
         for (int v = 0; v < vc; v++) {
             cbm_node_t *n = binding_get(&bindings[bi], vars[v]);
-            vals[(size_t)v * CYP_EDGE_COLS] = n && n->name ? n->name : "";
+            vals[(size_t)v * CYP_EDGE_COLS] = n ? n->name : "";
             vals[((size_t)v * CYP_EDGE_COLS) + SKIP_ONE] =
-                n && n->qualified_name ? n->qualified_name : "";
-            vals[((size_t)v * CYP_EDGE_COLS) + PAIR_LEN] = n && n->label ? n->label : "";
+                n ? n->qualified_name : "";
+            vals[((size_t)v * CYP_EDGE_COLS) + PAIR_LEN] = n ? n->label : "";
         }
         rb_add_row(rb, vals);
     }

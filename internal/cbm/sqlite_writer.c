@@ -756,7 +756,7 @@ static uint8_t *build_node_record(const CBMDumpNode *n, int *out_len) {
     rec_add_text(&r, n->label);
     rec_add_text(&r, n->name);
     rec_add_text(&r, n->qualified_name);
-    rec_add_text(&r, n->file_path ? n->file_path : "");
+    rec_add_text(&r, n->file_path);
     rec_add_int(&r, n->start_line);
     rec_add_int(&r, n->end_line);
     rec_add_text(&r, n->properties ? n->properties : "{}");
@@ -1705,7 +1705,7 @@ static const char *ncol_name(const CBMDumpNode *n) {
     return n->name;
 }
 static const char *ncol_file(const CBMDumpNode *n) {
-    return n->file_path ? n->file_path : "";
+    return n->file_path;
 }
 static const char *ncol_qn(const CBMDumpNode *n) {
     return n->qualified_name;

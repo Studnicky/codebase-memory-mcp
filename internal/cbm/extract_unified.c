@@ -8,6 +8,7 @@
 
 enum { MAX_INFRA_BINDINGS = 8 };
 
+#include <limits.h> // INT_MAX
 #include <stdint.h> // uint32_t, uint8_t
 #include <string.h>
 #include <strings.h> // strcasecmp (ObjectScript type inference)
@@ -17,6 +18,11 @@ enum { MAX_INFRA_BINDINGS = 8 };
 static bool ensure_scope_capacity(WalkState *state) {
     if (state->scope_top < state->scope_capacity) {
         return true;
+    }
+    /* scope_capacity is int (compared against int scope_top throughout this
+     * module) — bound before doubling so the multiply cannot overflow. */
+    if (state->scope_capacity > INT_MAX / 2) {
+        return false;
     }
     int new_capacity = state->scope_capacity > 0 ? state->scope_capacity * 2 : MAX_SCOPES;
     CBMWalkScope *grown =

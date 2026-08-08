@@ -978,3 +978,21 @@ void cbm_mem_census_log(const char *tag) {
         }
     }
 }
+
+/* ── Bound allocator ──────────────────────────────────────────── */
+
+void *cbm_mem_alloc(size_t size) {
+    return mi_malloc(size);
+}
+
+void *cbm_mem_grow(void *block, size_t size) {
+    return mi_realloc(block, size);
+}
+
+void cbm_mem_release(void *block) {
+    mi_free(block);
+}
+
+size_t cbm_mem_usable_size(void *block) {
+    return mi_usable_size(block);
+}

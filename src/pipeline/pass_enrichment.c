@@ -319,7 +319,7 @@ static size_t collect_decorated_nodes(cbm_gbuf_t *gbuf, tagged_node_t **out_node
             }
             if (node_count >= node_cap) {
                 node_cap = node_cap ? node_cap * PAIR_LEN : CBM_SZ_64;
-                nodes = safe_realloc(nodes, sizeof(tagged_node_t) * node_cap);
+                nodes = cbm_realloc_or_abort(nodes, sizeof(tagged_node_t) * node_cap);
             }
             tagged_node_t *tn = &nodes[node_count++];
             tn->node_id = found[i]->id;
@@ -359,8 +359,7 @@ static int apply_decorator_tags(cbm_gbuf_t *gbuf, tagged_node_t *nodes, size_t n
             continue;
         }
 
-        const char *props = gn->properties_json ? gn->properties_json : "{}";
-        char *new_props = inject_decorator_tags(props, tag_words, tag_count);
+        char *new_props = inject_decorator_tags(gn->properties_json, tag_words, tag_count);
         if (new_props) {
             cbm_gbuf_upsert_node(gbuf, gn->label, gn->name, gn->qualified_name, gn->file_path,
                                  gn->start_line, gn->end_line, new_props);

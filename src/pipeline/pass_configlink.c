@@ -86,14 +86,14 @@ static inline void *intptr_to_ptr(intptr_t v) {
 static int cmp_node_ptr_canonical(const void *pa, const void *pb) {
     const cbm_gbuf_node_t *a = *(const cbm_gbuf_node_t *const *)pa;
     const cbm_gbuf_node_t *b = *(const cbm_gbuf_node_t *const *)pb;
-    const char *qa = a->qualified_name ? a->qualified_name : "";
-    const char *qb = b->qualified_name ? b->qualified_name : "";
+    const char *qa = a->qualified_name;
+    const char *qb = b->qualified_name;
     int r = strcmp(qa, qb);
     if (r != 0) {
         return r;
     }
-    const char *fa = a->file_path ? a->file_path : "";
-    const char *fb = b->file_path ? b->file_path : "";
+    const char *fa = a->file_path;
+    const char *fb = b->file_path;
     r = strcmp(fa, fb);
     if (r != 0) {
         return r;
@@ -101,8 +101,8 @@ static int cmp_node_ptr_canonical(const void *pa, const void *pb) {
     if (a->start_line != b->start_line) {
         return a->start_line < b->start_line ? CANON_CMP_LESS : CANON_CMP_GREATER;
     }
-    const char *na = a->name ? a->name : "";
-    const char *nb = b->name ? b->name : "";
+    const char *na = a->name;
+    const char *nb = b->name;
     return strcmp(na, nb);
 }
 

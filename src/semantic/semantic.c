@@ -504,14 +504,16 @@ struct cbm_sem_corpus {
     CBMHashTable *token_map; /* token → index into entries[] */
     corpus_entry_t *entries;
     int entry_count;
-    int entry_cap;
+    size_t entry_cap;
     int doc_count;
     bool finalized;
 
     /* Per-document token lists for co-occurrence pass */
     int **doc_token_ids;
     int *doc_token_counts;
-    int doc_cap;
+    /* size_t so the doubling in cbm_sem_corpus_add_doc is defined unsigned
+     * arithmetic; doc_count stays int, it indexes the docs everywhere else. */
+    size_t doc_cap;
 };
 
 static int corpus_get_or_add(cbm_sem_corpus_t *c, const char *token) {
@@ -522,9 +524,9 @@ static int corpus_get_or_add(cbm_sem_corpus_t *c, const char *token) {
         long parsed = strtol(existing, &end, BASE_DECIMAL);
         return (end != existing) ? (int)parsed : CBM_NOT_FOUND;
     }
-    if (c->entry_count >= c->entry_cap) {
-        int new_cap = c->entry_cap < CORPUS_INIT_CAP ? CORPUS_INIT_CAP : c->entry_cap * PAIR_LEN;
-        corpus_entry_t *grown = realloc(c->entries, (size_t)new_cap * sizeof(corpus_entry_t));
+    if ((size_t)c->entry_count >= c->entry_cap) {
+        size_t new_cap = c->entry_cap < CORPUS_INIT_CAP ? CORPUS_INIT_CAP : c->entry_cap * PAIR_LEN;
+        corpus_entry_t *grown = realloc(c->entries, new_cap * sizeof(corpus_entry_t));
         if (!grown) {
             return CBM_NOT_FOUND;
         }
@@ -553,11 +555,11 @@ void cbm_sem_corpus_add_doc(cbm_sem_corpus_t *corpus, const char **tokens, int c
         return;
     }
     /* Track document for co-occurrence pass */
-    if (corpus->doc_count >= corpus->doc_cap) {
-        int new_cap =
+    if ((size_t)corpus->doc_count >= corpus->doc_cap) {
+        size_t new_cap =
             corpus->doc_cap < DOC_TOKENS_INIT ? DOC_TOKENS_INIT : corpus->doc_cap * PAIR_LEN;
-        int **grown_ids = realloc(corpus->doc_token_ids, (size_t)new_cap * sizeof(int *));
-        int *grown_counts = realloc(corpus->doc_token_counts, (size_t)new_cap * sizeof(int));
+        int **grown_ids = realloc(corpus->doc_token_ids, new_cap * sizeof(int *));
+        int *grown_counts = realloc(corpus->doc_token_counts, new_cap * sizeof(int));
         if (!grown_ids || !grown_counts) {
             free(grown_ids);
             free(grown_counts);
@@ -572,7 +574,7 @@ void cbm_sem_corpus_add_doc(cbm_sem_corpus_t *corpus, const char **tokens, int c
     corpus->doc_token_counts[doc_idx] = count;
 
     /* Per-doc unique set for IDF */
-    int *seen = calloc((size_t)corpus->entry_cap + (size_t)count + CORPUS_INIT_CAP, sizeof(int));
+    int *seen = calloc(corpus->entry_cap + (size_t)count + CORPUS_INIT_CAP, sizeof(int));
     int seen_count = 0;
 
     for (int i = 0; i < count; i++) {
@@ -710,10 +712,10 @@ void cbm_sem_corpus_add_docs_batch(cbm_sem_corpus_t *corpus, char **all_tokens,
 
     /* Phase A (SEQUENTIAL): Build token_map and allocate doc arrays.
      * Hash table mutation can't be parallelized; strdup+insert is the cost. */
-    if (corpus->doc_cap < corpus->doc_count + doc_count) {
-        int new_cap = corpus->doc_count + doc_count;
-        int **grown_ids = realloc(corpus->doc_token_ids, (size_t)new_cap * sizeof(int *));
-        int *grown_counts = realloc(corpus->doc_token_counts, (size_t)new_cap * sizeof(int));
+    if (corpus->doc_cap < (size_t)corpus->doc_count + (size_t)doc_count) {
+        size_t new_cap = (size_t)corpus->doc_count + (size_t)doc_count;
+        int **grown_ids = realloc(corpus->doc_token_ids, new_cap * sizeof(int *));
+        int *grown_counts = realloc(corpus->doc_token_counts, new_cap * sizeof(int));
         if (!grown_ids || !grown_counts) {
             free(grown_ids);
             free(grown_counts);

@@ -18,12 +18,36 @@
 
 /* ── Safe memory ──────────────────────────────────────────────── */
 
-/* Safe realloc: frees old pointer on failure instead of leaking it.
- * Returns NULL on allocation failure (old memory is freed). */
-static inline void *safe_realloc(void *ptr, size_t size) {
-    enum { SAFE_REALLOC_MIN = 1 };
+/* Grow an allocation, or die trying. NEVER returns NULL, so the growth idiom
+ * `arr = cbm_realloc_or_abort(arr, n * sizeof *arr); arr[i] = x;` is correct
+ * without a check at every site.
+ *
+ * There is no global OOM handler here: mimalloc runs with default options and
+ * nothing registers a fallback, so a failed growth has no recovery — the
+ * caller has already lost the old buffer and every one of these call sites
+ * writes through the result immediately. Aborting names the failure at the
+ * point it happens; the alternative is a NULL dereference several frames
+ * later, attributed to nothing. Same reasoning as mem_setup_fatal: fatal here
+ * beats a slow death later.
+ *
+ * Where a failed growth IS genuinely recoverable, call cbm_realloc_or_free
+ * and handle the NULL. */
+void *cbm_realloc_or_abort(void *ptr, size_t size);
+
+/* Make the next cbm_realloc_or_abort take its failure branch, so the abort
+ * path is reachable from a test without depending on a real allocator refusal
+ * (which the sanitizers intercept before it reaches us). Consumed by that one
+ * call; the caller does not return. */
+void cbm_realloc_fail_next_growth_for_test(void);
+
+/* Grow an allocation, freeing the old block on failure instead of leaking it.
+ * Returns NULL on failure — the old pointer is already freed, so the caller
+ * must not touch it again. Only for call sites that genuinely recover; the
+ * default is cbm_realloc_or_abort. */
+static inline void *cbm_realloc_or_free(void *ptr, size_t size) {
+    enum { REALLOC_MIN = 1 };
     if (size == 0) {
-        size = SAFE_REALLOC_MIN;
+        size = REALLOC_MIN;
     }
     void *tmp = realloc(ptr, size);
     if (!tmp) {
@@ -71,18 +95,20 @@ static inline void safe_buf_free_impl(void **buf, size_t *count) {
 }
 #define safe_buf_free(buf, countp) safe_buf_free_impl((void **)(void *)&(buf), (countp))
 
-/* Safe grow: doubles capacity and reallocs when count reaches cap.
- * Note: uses safe_realloc which frees the old buffer on failure, so this is
- * only appropriate for arrays whose elements don't own additional heap memory.
- * For arrays of heap-allocated pointers, prefer a manual realloc+cleanup pattern.
+/* Safe grow: multiplies capacity and reallocs when count reaches cap.
+ * `cap` must be an unsigned type — the multiplication below is the growth step,
+ * and on a signed capacity it would be overflow, i.e. undefined.
+ * Only appropriate for arrays whose elements don't own additional heap memory;
+ * for arrays of heap-allocated pointers, prefer a manual realloc+cleanup.
  * Usage: safe_grow(arr, count, cap, growth_factor)
- * After the call, arr is the new buffer (NULL on OOM). */
-#define safe_grow(arr, n, cap, factor)                                   \
-    do {                                                                 \
-        if ((size_t)(n) >= (size_t)(cap)) {                              \
-            (cap) *= (factor);                                           \
-            (arr) = safe_realloc((arr), (size_t)(cap) * sizeof(*(arr))); \
-        }                                                                \
+ * After the call, arr is the new buffer — never NULL, see
+ * cbm_realloc_or_abort. */
+#define safe_grow(arr, n, cap, factor)                                          \
+    do {                                                                        \
+        if ((size_t)(n) >= (size_t)(cap)) {                                     \
+            (cap) *= (factor);                                                  \
+            (arr) = cbm_realloc_or_abort((arr), (size_t)(cap) * sizeof(*(arr))); \
+        }                                                                       \
     } while (0)
 
 /* ── Memory mapping ────────────────────────────────────────────── */

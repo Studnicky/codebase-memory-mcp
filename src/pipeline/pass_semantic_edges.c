@@ -932,9 +932,7 @@ typedef struct {
 static int cmp_node_ptr_by_qn(const void *pa, const void *pb) {
     const cbm_gbuf_node_t *a = *(const cbm_gbuf_node_t *const *)pa;
     const cbm_gbuf_node_t *b = *(const cbm_gbuf_node_t *const *)pb;
-    const char *qa = a->qualified_name ? a->qualified_name : "";
-    const char *qb = b->qualified_name ? b->qualified_name : "";
-    int r = strcmp(qa, qb);
+    int r = strcmp(a->qualified_name, b->qualified_name);
     if (r != 0) {
         return r;
     }

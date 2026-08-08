@@ -3,7 +3,7 @@
 #include "helpers.h"
 #include "lang_specs.h"
 #include "foundation/constants.h"
-#include "foundation/platform.h" // safe_realloc (frees old on failure)
+#include "foundation/platform.h" // cbm_realloc_or_abort, cbm_realloc_or_free
 #include "foundation/log.h"      // cbm_log_warn
 #include "extract_node_stack.h"
 #include "simhash/minhash.h"
@@ -6666,11 +6666,11 @@ static void wd_push(wd_stack_t *s, TSNode node, const char *enclosing_qn) {
             }
             return; // bounded: stop growing (warned, not silent)
         }
-        walk_defs_frame_t *nd = safe_realloc(s->data, ncap * sizeof(walk_defs_frame_t));
+        walk_defs_frame_t *nd = cbm_realloc_or_free(s->data, ncap * sizeof(walk_defs_frame_t));
         if (!nd) {
-            /* OOM — safe_realloc already freed the old buffer. Bail cleanly: drop
-             * pending frames so the walk_defs loop drains and exits without a NULL
-             * deref; extraction keeps whatever was already emitted. */
+            /* OOM — cbm_realloc_or_free already freed the old buffer. Bail cleanly:
+             * drop pending frames so the walk_defs loop drains and exits without a
+             * NULL deref; extraction keeps whatever was already emitted. */
             s->data = NULL;
             s->cap = 0;
             s->top = 0;

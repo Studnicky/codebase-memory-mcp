@@ -681,7 +681,7 @@ cbm_layout_result_t *cbm_layout_compute(cbm_store_t *store, const char *project,
 
     for (int i = 0; i < n; i++) {
         const cbm_node_t *sn = &search_out.results[i].node;
-        const char *fp = sn->file_path ? sn->file_path : "";
+        const char *fp = sn->file_path;
 
         /* Cluster key = first 3 dir components */
         char ck[CBM_SZ_256] = {0};

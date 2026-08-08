@@ -18,13 +18,13 @@
 
 typedef struct {
     TSNode *items;
-    int count;
-    int cap;
+    size_t count;
+    size_t cap;
 } TSNodeStack;
 
 /* Initialize a stack with the given initial capacity, arena-allocated. */
-static inline void ts_nstack_init(TSNodeStack *s, CBMArena *arena, int initial_cap) {
-    s->items = (TSNode *)cbm_arena_alloc(arena, (size_t)initial_cap * sizeof(TSNode));
+static inline void ts_nstack_init(TSNodeStack *s, CBMArena *arena, size_t initial_cap) {
+    s->items = (TSNode *)cbm_arena_alloc(arena, initial_cap * sizeof(TSNode));
     s->count = 0;
     s->cap = s->items ? initial_cap : 0;
 }
@@ -32,12 +32,12 @@ static inline void ts_nstack_init(TSNodeStack *s, CBMArena *arena, int initial_c
 /* Push a node onto the stack, growing 2x if needed. */
 static inline void ts_nstack_push(TSNodeStack *s, CBMArena *arena, TSNode node) {
     if (s->count >= s->cap) {
-        int new_cap = s->cap ? s->cap * 2 : 512;
-        TSNode *new_items = (TSNode *)cbm_arena_alloc(arena, (size_t)new_cap * sizeof(TSNode));
+        size_t new_cap = s->cap ? s->cap * 2 : 512;
+        TSNode *new_items = (TSNode *)cbm_arena_alloc(arena, new_cap * sizeof(TSNode));
         if (!new_items)
             return; /* OOM: best-effort, stop growing */
         if (s->items && s->count > 0) {
-            memcpy(new_items, s->items, (size_t)s->count * sizeof(TSNode));
+            memcpy(new_items, s->items, s->count * sizeof(TSNode));
         }
         /* Old s->items is abandoned in the arena — freed on arena_destroy. */
         s->items = new_items;
@@ -64,7 +64,7 @@ static inline TSNode ts_nstack_pop(TSNodeStack *s) {
  * reverses the just-pushed segment so pop order is identical to the old idiom.
  */
 static inline void ts_nstack_push_children(TSNodeStack *s, CBMArena *arena, TSNode node) {
-    int base = s->count;
+    size_t base = s->count;
     TSTreeCursor cursor = ts_tree_cursor_new(node);
     if (ts_tree_cursor_goto_first_child(&cursor)) {
         do {
@@ -72,8 +72,12 @@ static inline void ts_nstack_push_children(TSNodeStack *s, CBMArena *arena, TSNo
         } while (ts_tree_cursor_goto_next_sibling(&cursor));
     }
     ts_tree_cursor_delete(&cursor);
-    /* Reverse [base, count) so the first child pops first (forward order). */
-    int lo = base, hi = s->count - 1;
+    /* Reverse [base, count) so the first child pops first (forward order).
+     * s->count == base when no children were pushed — skip, count-1 would
+     * underflow the unsigned hi index. */
+    if (s->count == base)
+        return;
+    size_t lo = base, hi = s->count - 1;
     while (lo < hi) {
         TSNode tmp = s->items[lo];
         s->items[lo] = s->items[hi];

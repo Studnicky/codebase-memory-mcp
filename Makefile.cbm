@@ -306,7 +306,7 @@ PREPROCESSOR_SRC = $(CBM_DIR)/preprocessor.cpp
 SQLITE_WRITER_SRC = $(CBM_DIR)/sqlite_writer.c
 
 # Store module (new)
-STORE_SRCS = src/store/store.c
+STORE_SRCS = src/store/store.c src/store/sql.c
 
 # Cypher module (new)
 CYPHER_SRCS = src/cypher/cypher.c
@@ -766,7 +766,8 @@ $(BUILD_DIR):
 $(BUILD_DIR)/test-foundation: tests/test_foundation_main.c $(TEST_FOUNDATION_SUITE_SRCS) \
 		$(FOUNDATION_SRCS) $(TS_RUNTIME_OBJ_TEST) $(MIMALLOC_OBJ_TEST) \
 		$(PROJECT_HDRS) | $(BUILD_DIR)
-	$(CC) $(CFLAGS_TEST) -Itests -o $@ tests/test_foundation_main.c \
+	$(CC) $(CFLAGS_TEST) -DCBM_TEST_HOST_IS_SINGLE_PURPOSE=1 -Itests -o $@ \
+		tests/test_foundation_main.c \
 		$(TEST_FOUNDATION_SUITE_SRCS) $(FOUNDATION_SRCS) \
 		$(TS_RUNTIME_OBJ_TEST) $(MIMALLOC_OBJ_TEST) $(LDFLAGS_TEST)
 

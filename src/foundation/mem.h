@@ -77,6 +77,17 @@ size_t cbm_mem_worker_budget(int num_workers);
 /* Return unused pages to the OS. Call between files to bound per-file peak. */
 void cbm_mem_collect(void);
 
+/* ── Bound allocator ────────────────────────────────────────────────
+ *
+ * The allocator third-party libraries are bound to, so a block allocated by
+ * one library is never freed by another's (#424). Exposed here because the
+ * module that owns a given library — and therefore binds it — is not this one,
+ * and passing these four keeps that module from depending on mimalloc itself. */
+void *cbm_mem_alloc(size_t size);
+void *cbm_mem_grow(void *block, size_t size);
+void cbm_mem_release(void *block);
+size_t cbm_mem_usable_size(void *block);
+
 /* ── Memory map: where does the process's memory actually live? ──────
  *
  * A growth diagnostic that is honest about what it cannot see. Walking the

@@ -1,4 +1,5 @@
 #include "type_rep.h"
+#include <limits.h> /* INT_MAX */
 #include <stdint.h>
 #include <string.h>
 
@@ -268,10 +269,15 @@ static int union_member_dedupe(const CBMType **scratch, int count) {
 const CBMType *cbm_type_union(CBMArena *a, const CBMType **members, int count) {
     if (!members || count <= 0)
         return &unknown_singleton;
+    // count is caller-supplied (public API) and doubled below (plus a small
+    // slack); bound it so the doubling cannot signed-overflow.
+    if (count > (INT_MAX - 4) / 2)
+        return &unknown_singleton;
 
     // Flatten: nested UNIONs unfold their members into the parent.
     int flat_cap = count * 2 + 4;
-    const CBMType **flat = (const CBMType **)cbm_arena_alloc(a, flat_cap * sizeof(const CBMType *));
+    const CBMType **flat =
+        (const CBMType **)cbm_arena_alloc(a, (size_t)flat_cap * sizeof(const CBMType *));
     if (!flat)
         return &unknown_singleton;
     int flat_count = 0;

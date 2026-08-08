@@ -36,7 +36,8 @@
 #include "foundation/win_utf8.h"   /* cbm_utf8_to_wide — CreateProcessW wide cmdline (#423/#20) */
 #include "foundation/workspace.h"
 
-#include <sqlite3/sqlite3.h>
+#include "store/sql.h"
+
 #include <yyjson/yyjson.h>
 
 #include <ctype.h>
@@ -1141,23 +1142,23 @@ static void handle_project_health(cbm_http_conn_t *c, const cbm_http_req_t *req)
  * Writes up to max_out project names (heap-allocated). Returns count. */
 static int find_cross_repo_targets(cbm_store_t *store, const char *project, char **out,
                                    int max_out) {
-    struct sqlite3 *db = cbm_store_get_db(store);
+    cbm_sql_t *db = cbm_store_sql(store);
     if (!db) {
         return 0;
     }
-    sqlite3_stmt *s = NULL;
-    if (sqlite3_prepare_v2(
+    cbm_sql_stmt_t *s = NULL;
+    if (!cbm_sql_prepare(
             db,
             "SELECT DISTINCT json_extract(properties, '$.target_project') FROM edges "
             "WHERE project = ?1 AND type LIKE 'CROSS_%' "
             "AND json_extract(properties, '$.target_project') IS NOT NULL",
-            -1, &s, NULL) != SQLITE_OK) {
+            &s)) {
         return 0;
     }
-    sqlite3_bind_text(s, 1, project, -1, SQLITE_STATIC);
+    cbm_sql_bind_text(s, 1, project);
     int count = 0;
-    while (sqlite3_step(s) == SQLITE_ROW && count < max_out) {
-        const char *tp = (const char *)sqlite3_column_text(s, 0);
+    while (cbm_sql_step(s) == CBM_SQL_ROW && count < max_out) {
+        const char *tp = cbm_sql_column_text(s, 0);
         if (tp && tp[0]) {
             size_t len = strlen(tp);
             out[count] = malloc(len + 1);
@@ -1165,7 +1166,7 @@ static int find_cross_repo_targets(cbm_store_t *store, const char *project, char
             count++;
         }
     }
-    sqlite3_finalize(s);
+    cbm_sql_finalize(s);
     return count;
 }
 
@@ -1437,39 +1438,40 @@ static void handle_layout(cbm_http_conn_t *c, const cbm_http_req_t *req) {
          * the cross-repo matching contract. Join edges → nodes in source to
          * pull the QN, then look it up in the linked store. */
         yyjson_mut_val *cross_arr = yyjson_mut_arr(mdoc);
-        struct sqlite3 *src_db = cbm_store_get_db(store);
-        struct sqlite3 *lp_db = cbm_store_get_db(lp_store);
+        cbm_sql_t *src_db = cbm_store_sql(store);
+        cbm_sql_t *lp_db = cbm_store_sql(lp_store);
         if (src_db && lp_db) {
-            sqlite3_stmt *eq = NULL;
-            if (sqlite3_prepare_v2(src_db,
+            cbm_sql_stmt_t *eq = NULL;
+            if (cbm_sql_prepare(src_db,
                                    "SELECT e.source_id, e.type, n.qualified_name "
                                    "FROM edges e JOIN nodes n "
                                    "  ON n.id = e.target_id AND n.project = e.project "
                                    "WHERE e.project = ?1 AND e.type LIKE 'CROSS_%' "
                                    "  AND json_extract(e.properties, '$.target_project') = ?2 "
                                    "  AND n.qualified_name IS NOT NULL",
-                                   -1, &eq, NULL) == SQLITE_OK) {
-                sqlite3_bind_text(eq, 1, project, -1, SQLITE_STATIC);
-                sqlite3_bind_text(eq, 2, linked[li], -1, SQLITE_STATIC);
+                                   &eq)) {
+                cbm_sql_bind_text(eq, 1, project);
+                cbm_sql_bind_text(eq, 2, linked[li]);
 
-                sqlite3_stmt *lookup = NULL;
-                sqlite3_prepare_v2(lp_db, "SELECT id FROM nodes WHERE qualified_name = ?1 LIMIT 1",
-                                   -1, &lookup, NULL);
+                cbm_sql_stmt_t *lookup = NULL;
+                cbm_sql_prepare(lp_db, "SELECT id FROM nodes WHERE qualified_name = ?1 LIMIT 1",
+                                   &lookup);
 
-                while (sqlite3_step(eq) == SQLITE_ROW) {
-                    int64_t src_id = sqlite3_column_int64(eq, 0);
-                    const char *etype = (const char *)sqlite3_column_text(eq, 1);
-                    const char *qn = (const char *)sqlite3_column_text(eq, 2);
-                    if (!qn || !etype || !lookup) {
+                while (cbm_sql_step(eq) == CBM_SQL_ROW) {
+                    int64_t src_id = cbm_sql_column_int64(eq, 0);
+                    const char *etype = cbm_sql_column_text(eq, 1);
+                    const char *qn = cbm_sql_column_text(eq, 2);
+                    if (!lookup || cbm_sql_column_is_null(eq, 1) ||
+                        cbm_sql_column_is_null(eq, 2)) {
                         continue;
                     }
-                    sqlite3_reset(lookup);
-                    sqlite3_clear_bindings(lookup);
-                    sqlite3_bind_text(lookup, 1, qn, -1, SQLITE_STATIC);
-                    if (sqlite3_step(lookup) != SQLITE_ROW) {
+                    cbm_sql_reset(lookup);
+                    cbm_sql_clear_bindings(lookup);
+                    cbm_sql_bind_text(lookup, 1, qn);
+                    if (cbm_sql_step(lookup) != CBM_SQL_ROW) {
                         continue;
                     }
-                    int64_t tgt_id = sqlite3_column_int64(lookup, 0);
+                    int64_t tgt_id = cbm_sql_column_int64(lookup, 0);
                     yyjson_mut_val *ce = yyjson_mut_obj(mdoc);
                     yyjson_mut_obj_add_int(mdoc, ce, "source", src_id);
                     yyjson_mut_obj_add_int(mdoc, ce, "target", tgt_id);
@@ -1477,8 +1479,8 @@ static void handle_layout(cbm_http_conn_t *c, const cbm_http_req_t *req) {
                     yyjson_mut_arr_append(cross_arr, ce);
                 }
                 if (lookup)
-                    sqlite3_finalize(lookup);
-                sqlite3_finalize(eq);
+                    cbm_sql_finalize(lookup);
+                cbm_sql_finalize(eq);
             }
         }
         yyjson_mut_obj_add_val(mdoc, entry, "cross_edges", cross_arr);

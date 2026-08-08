@@ -95,7 +95,7 @@ typedef struct {
 static void commit_add_file(commit_t *c, const char *file) {
     if (c->count >= c->cap) {
         c->cap = c->cap ? c->cap * PAIR_LEN : GH_INIT_CAP;
-        c->files = safe_realloc(c->files, c->cap * sizeof(char *));
+        c->files = cbm_realloc_or_abort(c->files, c->cap * sizeof(char *));
     }
     c->files[c->count++] = strdup(file);
 }
@@ -156,7 +156,7 @@ static int parse_git_log(const char *repo_path, commit_t **out, int *out_count) 
             if (current.count > 0) {
                 if (count >= cap) {
                     cap *= PAIR_LEN;
-                    commits = safe_realloc(commits, cap * sizeof(commit_t));
+                    commits = cbm_realloc_or_abort(commits, cap * sizeof(commit_t));
                 }
                 commits[count++] = current;
                 memset(&current, 0, sizeof(current));
@@ -177,7 +177,7 @@ static int parse_git_log(const char *repo_path, commit_t **out, int *out_count) 
     if (current.count > 0) {
         if (count >= cap) {
             cap *= PAIR_LEN;
-            commits = safe_realloc(commits, cap * sizeof(commit_t));
+            commits = cbm_realloc_or_abort(commits, cap * sizeof(commit_t));
         }
         commits[count++] = current;
     } else {

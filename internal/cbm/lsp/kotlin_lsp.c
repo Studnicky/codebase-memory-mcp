@@ -52,6 +52,7 @@ typedef struct {
     int cap;
 } KtCrossFieldList;
 #include <ctype.h>
+#include <limits.h> /* INT_MAX */
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -414,6 +415,8 @@ static void kt_emit_resolved_kind(KotlinLSPContext *ctx, const char *callee_qn,
 
     CBMResolvedCallArray *arr = ctx->resolved_calls;
     if (arr->count >= arr->cap) {
+        if (arr->cap > INT_MAX / 2)
+            return;
         int new_cap = arr->cap == 0 ? 16 : arr->cap * 2;
         CBMResolvedCall *new_items = (CBMResolvedCall *)cbm_arena_alloc(
             ctx->arena, (size_t)new_cap * sizeof(CBMResolvedCall));
@@ -537,6 +540,8 @@ static void kt_record_delegate_binding(KotlinLSPContext *ctx, const CBMScope *sc
         }
     }
     if (ctx->delegate_count >= ctx->delegate_cap) {
+        if (ctx->delegate_cap > INT_MAX / 2)
+            return;
         int new_cap = ctx->delegate_cap == 0 ? 8 : ctx->delegate_cap * 2;
         CBMKotlinDelegateBinding *grown = (CBMKotlinDelegateBinding *)cbm_arena_alloc(
             ctx->arena, (size_t)new_cap * sizeof(*grown));
@@ -953,6 +958,9 @@ void kotlin_lsp_add_import(KotlinLSPContext *ctx, const char *local_name, const 
         return;
     }
     if (ctx->import_count >= ctx->import_cap) {
+        if (ctx->import_cap > INT_MAX / 2) {
+            return;
+        }
         int new_cap = ctx->import_cap * 2;
         const char **new_locals =
             (const char **)cbm_arena_alloc(ctx->arena, sizeof(const char *) * (size_t)new_cap);
@@ -5333,6 +5341,9 @@ void cbm_kotlin_register_lsp_defs(CBMArena *arena, CBMTypeRegistry *reg, const C
                 cbm_ht_set(field_map, d->receiver_type, fl);
             }
             if (fl->count + 1 >= fl->cap) {
+                if (fl->cap > INT_MAX / 2) {
+                    continue;
+                }
                 int new_cap = fl->cap ? fl->cap * 2 : 4;
                 const char **nn =
                     (const char **)cbm_arena_alloc(arena, (size_t)new_cap * sizeof(*nn));

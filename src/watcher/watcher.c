@@ -95,8 +95,8 @@ struct cbm_watcher {
     atomic_int stopped;
     /* Deferred-free list: freed after the next poll_once. */
     project_state_t **pending_free;
-    int pending_free_count;
-    int pending_free_cap;
+    size_t pending_free_count;
+    size_t pending_free_cap;
 };
 
 /* ── Constants ─────────────────────────────────────────────────── */
@@ -734,9 +734,9 @@ static void state_free(project_state_t *s) {
  * a use-after-free against an in-flight poll snapshot. */
 static bool defer_state_free(cbm_watcher_t *w, project_state_t *s) {
     if (w->pending_free_count >= w->pending_free_cap) {
-        int new_cap = w->pending_free_cap ? w->pending_free_cap * 2 : 8;
+        size_t new_cap = w->pending_free_cap ? w->pending_free_cap * 2 : 8;
         project_state_t **tmp =
-            realloc(w->pending_free, (size_t)new_cap * sizeof(project_state_t *));
+            realloc(w->pending_free, new_cap * sizeof(project_state_t *));
         if (!tmp) {
             cbm_log_warn("watcher.unwatch.oom", "project", s->project_name);
             return false;
@@ -902,7 +902,7 @@ void cbm_watcher_free(cbm_watcher_t *w) {
     cbm_mutex_lock(&w->projects_lock);
     cbm_ht_foreach(w->projects, free_state_entry, NULL);
     cbm_ht_free(w->projects);
-    for (int i = 0; i < w->pending_free_count; i++) {
+    for (size_t i = 0; i < w->pending_free_count; i++) {
         state_free(w->pending_free[i]);
     }
     free(w->pending_free);
@@ -1356,7 +1356,7 @@ int cbm_watcher_poll_once(cbm_watcher_t *w) {
     cbm_mutex_lock(&w->projects_lock);
 
     /* Free deferred entries from the previous cycle. */
-    for (int i = 0; i < w->pending_free_count; i++) {
+    for (size_t i = 0; i < w->pending_free_count; i++) {
         state_free(w->pending_free[i]);
     }
     w->pending_free_count = 0;
@@ -1403,7 +1403,7 @@ void cbm_watcher_stop(cbm_watcher_t *w) {
         atomic_store_explicit(&w->stopped, 1, memory_order_release);
         cbm_mutex_lock(&w->projects_lock);
         cbm_ht_foreach(w->projects, cancel_active_git_entry, NULL);
-        for (int i = 0; i < w->pending_free_count; i++) {
+        for (size_t i = 0; i < w->pending_free_count; i++) {
             project_state_t *state = w->pending_free[i];
             if (state && state->active_git) {
                 (void)cbm_subprocess_request_cancel(state->active_git);

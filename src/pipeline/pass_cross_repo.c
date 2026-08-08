@@ -17,8 +17,8 @@
 #include "foundation/compat.h"
 #include "foundation/compat_fs.h"
 #include "foundation/str_util.h"
+#include "store/sql.h"
 
-#include <sqlite3/sqlite3.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -210,7 +210,7 @@ static cr_run_status_t delete_cross_edges(cbm_store_t *store, const char *projec
         "CROSS_HTTP_CALLS", "CROSS_ASYNC_CALLS",   "CROSS_CHANNEL",
         "CROSS_GRPC_CALLS", "CROSS_GRAPHQL_CALLS", "CROSS_TRPC_CALLS",
     };
-    struct sqlite3 *db = cbm_store_get_db(store);
+    cbm_sql_t *db = cbm_store_sql(store);
     if (!db) {
         return CR_RUN_FAILED;
     }
@@ -218,11 +218,11 @@ static cr_run_status_t delete_cross_edges(cbm_store_t *store, const char *projec
         if (cr_cancel_requested(ctx)) {
             return CR_RUN_CANCELLED;
         }
-        int changes_before = sqlite3_total_changes(db);
+        int changes_before = cbm_sql_total_changes(db);
         if (cbm_store_delete_edges_by_type(store, project, edge_types[i]) != CBM_STORE_OK) {
             return CR_RUN_FAILED;
         }
-        if (sqlite3_total_changes(db) > changes_before) {
+        if (cbm_sql_total_changes(db) > changes_before) {
             ctx->mutated = true;
         }
     }
@@ -275,26 +275,25 @@ static const char *cr_url_path(const char *url) {
 }
 
 /* Look up a node's name and file_path by id. */
-static bool lookup_node_info(struct sqlite3 *db, int64_t node_id, char *name_out, size_t name_sz,
+static bool lookup_node_info(cbm_sql_t *db, int64_t node_id, char *name_out, size_t name_sz,
                              char *file_out, size_t file_sz) {
     name_out[0] = '\0';
     file_out[0] = '\0';
     if (!db) {
         return false;
     }
-    sqlite3_stmt *st = NULL;
-    if (sqlite3_prepare_v2(db, "SELECT name, file_path FROM nodes WHERE id = ?1", CBM_NOT_FOUND,
-                           &st, NULL) != SQLITE_OK) {
+    cbm_sql_stmt_t *st = NULL;
+    if (!cbm_sql_prepare(db, "SELECT name, file_path FROM nodes WHERE id = ?1", &st)) {
         return false;
     }
-    if (sqlite3_bind_int64(st, SKIP_ONE, node_id) != SQLITE_OK) {
-        sqlite3_finalize(st);
+    if (!cbm_sql_bind_int64(st, SKIP_ONE, node_id)) {
+        cbm_sql_finalize(st);
         return false;
     }
-    int step_rc = sqlite3_step(st);
-    if (step_rc == SQLITE_ROW) {
-        const char *nm = (const char *)sqlite3_column_text(st, 0);
-        const char *fp = (const char *)sqlite3_column_text(st, SKIP_ONE);
+    cbm_sql_step_t step_rc = cbm_sql_step(st);
+    if (step_rc == CBM_SQL_ROW) {
+        const char *nm = cbm_sql_column_text(st, 0);
+        const char *fp = cbm_sql_column_text(st, SKIP_ONE);
         if (nm) {
             snprintf(name_out, name_sz, "%s", nm);
         }
@@ -302,8 +301,8 @@ static bool lookup_node_info(struct sqlite3 *db, int64_t node_id, char *name_out
             snprintf(file_out, file_sz, "%s", fp);
         }
     }
-    int finalize_rc = sqlite3_finalize(st);
-    return (step_rc == SQLITE_ROW || step_rc == SQLITE_DONE) && finalize_rc == SQLITE_OK;
+    bool finalized = cbm_sql_finalize(st);
+    return (step_rc == CBM_SQL_ROW || step_rc == CBM_SQL_DONE) && finalized;
 }
 
 /* ── Phase A: HTTP Route matching ────────────────────────────────── */
@@ -316,33 +315,33 @@ static int64_t find_route_handler(cbm_store_t *target_store, const char *route_q
     *failed = false;
     handler_name[0] = '\0';
     handler_file[0] = '\0';
-    struct sqlite3 *db = cbm_store_get_db(target_store);
+    cbm_sql_t *db = cbm_store_sql(target_store);
     if (!db) {
         *failed = true;
         return 0;
     }
 
     /* Find Route node by QN */
-    sqlite3_stmt *s = NULL;
-    if (sqlite3_prepare_v2(
+    cbm_sql_stmt_t *s = NULL;
+    if (!cbm_sql_prepare(
             db, "SELECT id FROM nodes WHERE qualified_name = ?1 AND label = 'Route' LIMIT 1",
-            CBM_NOT_FOUND, &s, NULL) != SQLITE_OK) {
+            &s)) {
         *failed = true;
         return 0;
     }
-    if (sqlite3_bind_text(s, SKIP_ONE, route_qn, CBM_NOT_FOUND, SQLITE_STATIC) != SQLITE_OK) {
-        sqlite3_finalize(s);
+    if (!cbm_sql_bind_text(s, SKIP_ONE, route_qn)) {
+        cbm_sql_finalize(s);
         *failed = true;
         return 0;
     }
     int64_t route_id = 0;
-    int step_rc = sqlite3_step(s);
-    if (step_rc == SQLITE_ROW) {
-        route_id = sqlite3_column_int64(s, 0);
-    } else if (step_rc != SQLITE_DONE) {
+    cbm_sql_step_t step_rc = cbm_sql_step(s);
+    if (step_rc == CBM_SQL_ROW) {
+        route_id = cbm_sql_column_int64(s, 0);
+    } else if (step_rc != CBM_SQL_DONE) {
         *failed = true;
     }
-    if (sqlite3_finalize(s) != SQLITE_OK) {
+    if (!cbm_sql_finalize(s)) {
         *failed = true;
     }
     if (*failed || route_id == 0) {
@@ -350,35 +349,35 @@ static int64_t find_route_handler(cbm_store_t *target_store, const char *route_q
     }
 
     /* Follow HANDLES edge to find the handler function */
-    if (sqlite3_prepare_v2(db,
-                           "SELECT n.id, n.name, n.file_path FROM edges e "
-                           "JOIN nodes n ON n.id = e.source_id "
-                           "WHERE e.target_id = ?1 AND e.type = 'HANDLES' LIMIT 1",
-                           CBM_NOT_FOUND, &s, NULL) != SQLITE_OK) {
+    if (!cbm_sql_prepare(db,
+                         "SELECT n.id, n.name, n.file_path FROM edges e "
+                         "JOIN nodes n ON n.id = e.source_id "
+                         "WHERE e.target_id = ?1 AND e.type = 'HANDLES' LIMIT 1",
+                         &s)) {
         *failed = true;
         return 0;
     }
-    if (sqlite3_bind_int64(s, SKIP_ONE, route_id) != SQLITE_OK) {
-        sqlite3_finalize(s);
+    if (!cbm_sql_bind_int64(s, SKIP_ONE, route_id)) {
+        cbm_sql_finalize(s);
         *failed = true;
         return 0;
     }
     int64_t handler_id = 0;
-    step_rc = sqlite3_step(s);
-    if (step_rc == SQLITE_ROW) {
-        handler_id = sqlite3_column_int64(s, 0);
-        const char *n = (const char *)sqlite3_column_text(s, SKIP_ONE);
-        const char *f = (const char *)sqlite3_column_text(s, PAIR_LEN);
+    step_rc = cbm_sql_step(s);
+    if (step_rc == CBM_SQL_ROW) {
+        handler_id = cbm_sql_column_int64(s, 0);
+        const char *n = cbm_sql_column_text(s, SKIP_ONE);
+        const char *f = cbm_sql_column_text(s, PAIR_LEN);
         if (n) {
             snprintf(handler_name, name_sz, "%s", n);
         }
         if (f) {
             snprintf(handler_file, file_sz, "%s", f);
         }
-    } else if (step_rc != SQLITE_DONE) {
+    } else if (step_rc != CBM_SQL_DONE) {
         *failed = true;
     }
-    if (sqlite3_finalize(s) != SQLITE_OK) {
+    if (!cbm_sql_finalize(s)) {
         *failed = true;
     }
     return handler_id;
@@ -442,26 +441,26 @@ static int64_t find_route_handler_fuzzy(cbm_store_t *target_store, const char *c
                                         char *handler_name, size_t name_sz, char *handler_file,
                                         size_t file_sz, bool *failed, cr_run_context_t *ctx) {
     *failed = false;
-    struct sqlite3 *db = cbm_store_get_db(target_store);
+    cbm_sql_t *db = cbm_store_sql(target_store);
     if (!db || !concrete_path || !concrete_path[0]) {
         if (!db) {
             *failed = true;
         }
         return 0;
     }
-    sqlite3_stmt *s = NULL;
-    if (sqlite3_prepare_v2(db, "SELECT qualified_name FROM nodes WHERE label = 'Route' ORDER BY id",
-                           CBM_NOT_FOUND, &s, NULL) != SQLITE_OK) {
+    cbm_sql_stmt_t *s = NULL;
+    if (!cbm_sql_prepare(db, "SELECT qualified_name FROM nodes WHERE label = 'Route' ORDER BY id",
+                         &s)) {
         *failed = true;
         return 0;
     }
     int64_t found = 0;
     int scanned = 0;
-    int step_rc = SQLITE_DONE;
+    cbm_sql_step_t step_rc = CBM_SQL_DONE;
     while (scanned < CR_MAX_EDGES && !cr_cancel_requested(ctx) &&
-           (step_rc = sqlite3_step(s)) == SQLITE_ROW) {
+           (step_rc = cbm_sql_step(s)) == CBM_SQL_ROW) {
         scanned++;
-        const char *qn = (const char *)sqlite3_column_text(s, 0);
+        const char *qn = cbm_sql_column_text(s, 0);
         if (!qn || strncmp(qn, "__route__", CR_ROUTE_PREFIX_LEN) != 0) {
             continue;
         }
@@ -492,20 +491,20 @@ static int64_t find_route_handler_fuzzy(cbm_store_t *target_store, const char *c
         int64_t hid = find_route_handler(target_store, qn, handler_name, name_sz, handler_file,
                                          file_sz, failed);
         if (*failed) {
-            step_rc = SQLITE_DONE;
+            step_rc = CBM_SQL_DONE;
             break;
         }
         if (hid != 0) {
             snprintf(out_qn, out_qn_sz, "%s", qn);
             found = hid;
-            step_rc = SQLITE_DONE;
+            step_rc = CBM_SQL_DONE;
             break;
         }
     }
-    if (!cr_cancel_requested(ctx) && scanned < CR_MAX_EDGES && step_rc != SQLITE_DONE) {
+    if (!cr_cancel_requested(ctx) && scanned < CR_MAX_EDGES && step_rc != CBM_SQL_DONE) {
         *failed = true;
     }
-    if (sqlite3_finalize(s) != SQLITE_OK) {
+    if (!cbm_sql_finalize(s)) {
         *failed = true;
     }
     return found;
@@ -514,7 +513,7 @@ static int64_t find_route_handler_fuzzy(cbm_store_t *target_store, const char *c
 /* Emit CROSS_* edge for a route match: forward into source, reverse into target.
  * A pair is successful only when both writes complete. */
 static bool emit_cross_route_bidirectional(
-    cbm_store_t *src_store, const char *src_project, struct sqlite3 *src_db, int64_t caller_id,
+    cbm_store_t *src_store, const char *src_project, cbm_sql_t *src_db, int64_t caller_id,
     int64_t local_route_id, cbm_store_t *tgt_store, const char *tgt_project, int64_t handler_id,
     const char *route_qn, const char *handler_name, const char *handler_file, const char *url_path,
     const char *method, const char *edge_type, cr_run_context_t *ctx) {
@@ -532,27 +531,25 @@ static bool emit_cross_route_bidirectional(
     }
 
     /* Reverse: handler → Route in target DB */
-    struct sqlite3 *tgt_db = cbm_store_get_db(tgt_store);
+    cbm_sql_t *tgt_db = cbm_store_sql(tgt_store);
     if (!tgt_db) {
         return false;
     }
-    sqlite3_stmt *rq = NULL;
-    if (sqlite3_prepare_v2(tgt_db, "SELECT id FROM nodes WHERE qualified_name = ?1 LIMIT 1",
-                           CBM_NOT_FOUND, &rq, NULL) != SQLITE_OK) {
+    cbm_sql_stmt_t *rq = NULL;
+    if (!cbm_sql_prepare(tgt_db, "SELECT id FROM nodes WHERE qualified_name = ?1 LIMIT 1", &rq)) {
         return false;
     }
-    if (sqlite3_bind_text(rq, SKIP_ONE, route_qn, CBM_NOT_FOUND, SQLITE_STATIC) != SQLITE_OK) {
-        sqlite3_finalize(rq);
+    if (!cbm_sql_bind_text(rq, SKIP_ONE, route_qn)) {
+        cbm_sql_finalize(rq);
         return false;
     }
     int64_t tgt_route_id = 0;
-    int step_rc = sqlite3_step(rq);
-    if (step_rc == SQLITE_ROW) {
-        tgt_route_id = sqlite3_column_int64(rq, 0);
+    cbm_sql_step_t step_rc = cbm_sql_step(rq);
+    if (step_rc == CBM_SQL_ROW) {
+        tgt_route_id = cbm_sql_column_int64(rq, 0);
     }
-    int finalize_rc = sqlite3_finalize(rq);
-    if ((step_rc != SQLITE_ROW && step_rc != SQLITE_DONE) || finalize_rc != SQLITE_OK ||
-        tgt_route_id == 0) {
+    bool finalized = cbm_sql_finalize(rq);
+    if ((step_rc != CBM_SQL_ROW && step_rc != CBM_SQL_DONE) || !finalized || tgt_route_id == 0) {
         return false;
     }
 
@@ -572,34 +569,34 @@ static bool emit_cross_route_bidirectional(
 static cr_match_result_t match_http_routes(cbm_store_t *src_store, const char *src_project,
                                            cbm_store_t *tgt_store, const char *tgt_project,
                                            cr_run_context_t *ctx) {
-    struct sqlite3 *src_db = cbm_store_get_db(src_store);
+    cbm_sql_t *src_db = cbm_store_sql(src_store);
     if (!src_db) {
         return cr_match_finish(ctx, 0, true);
     }
 
     /* Find all HTTP_CALLS edges in source project */
-    sqlite3_stmt *s = NULL;
-    if (sqlite3_prepare_v2(src_db,
-                           "SELECT e.source_id, e.target_id, e.properties FROM edges e "
-                           "WHERE e.project = ?1 AND e.type = 'HTTP_CALLS' ORDER BY e.id",
-                           CBM_NOT_FOUND, &s, NULL) != SQLITE_OK) {
+    cbm_sql_stmt_t *s = NULL;
+    if (!cbm_sql_prepare(src_db,
+                         "SELECT e.source_id, e.target_id, e.properties FROM edges e "
+                         "WHERE e.project = ?1 AND e.type = 'HTTP_CALLS' ORDER BY e.id",
+                         &s)) {
         return cr_match_finish(ctx, 0, true);
     }
-    if (sqlite3_bind_text(s, SKIP_ONE, src_project, CBM_NOT_FOUND, SQLITE_STATIC) != SQLITE_OK) {
-        sqlite3_finalize(s);
+    if (!cbm_sql_bind_text(s, SKIP_ONE, src_project)) {
+        cbm_sql_finalize(s);
         return cr_match_finish(ctx, 0, true);
     }
 
     int count = 0;
     int scanned = 0;
-    int step_rc = SQLITE_DONE;
+    cbm_sql_step_t step_rc = CBM_SQL_DONE;
     bool failed = false;
     while (scanned < CR_MAX_EDGES && !cr_cancel_requested(ctx) &&
-           (step_rc = sqlite3_step(s)) == SQLITE_ROW) {
+           (step_rc = cbm_sql_step(s)) == CBM_SQL_ROW) {
         scanned++;
-        int64_t caller_id = sqlite3_column_int64(s, 0);
-        int64_t route_id = sqlite3_column_int64(s, SKIP_ONE);
-        const char *props = (const char *)sqlite3_column_text(s, PAIR_LEN);
+        int64_t caller_id = cbm_sql_column_int64(s, 0);
+        int64_t route_id = cbm_sql_column_int64(s, SKIP_ONE);
+        const char *props = cbm_sql_column_text(s, PAIR_LEN);
 
         char url_path[CBM_SZ_256] = {0};
         char method[CBM_SZ_32] = {0};
@@ -660,10 +657,10 @@ static cr_match_result_t match_http_routes(cbm_store_t *src_store, const char *s
 
         count++;
     }
-    if (!failed && !cr_cancel_requested(ctx) && scanned < CR_MAX_EDGES && step_rc != SQLITE_DONE) {
+    if (!failed && !cr_cancel_requested(ctx) && scanned < CR_MAX_EDGES && step_rc != CBM_SQL_DONE) {
         failed = true;
     }
-    if (sqlite3_finalize(s) != SQLITE_OK) {
+    if (!cbm_sql_finalize(s)) {
         failed = true;
     }
     return cr_match_finish(ctx, count, failed);
@@ -674,33 +671,33 @@ static cr_match_result_t match_http_routes(cbm_store_t *src_store, const char *s
 static cr_match_result_t match_async_routes(cbm_store_t *src_store, const char *src_project,
                                             cbm_store_t *tgt_store, const char *tgt_project,
                                             cr_run_context_t *ctx) {
-    struct sqlite3 *src_db = cbm_store_get_db(src_store);
+    cbm_sql_t *src_db = cbm_store_sql(src_store);
     if (!src_db) {
         return cr_match_finish(ctx, 0, true);
     }
 
-    sqlite3_stmt *s = NULL;
-    if (sqlite3_prepare_v2(src_db,
-                           "SELECT e.source_id, e.target_id, e.properties FROM edges e "
-                           "WHERE e.project = ?1 AND e.type = 'ASYNC_CALLS' ORDER BY e.id",
-                           CBM_NOT_FOUND, &s, NULL) != SQLITE_OK) {
+    cbm_sql_stmt_t *s = NULL;
+    if (!cbm_sql_prepare(src_db,
+                         "SELECT e.source_id, e.target_id, e.properties FROM edges e "
+                         "WHERE e.project = ?1 AND e.type = 'ASYNC_CALLS' ORDER BY e.id",
+                         &s)) {
         return cr_match_finish(ctx, 0, true);
     }
-    if (sqlite3_bind_text(s, SKIP_ONE, src_project, CBM_NOT_FOUND, SQLITE_STATIC) != SQLITE_OK) {
-        sqlite3_finalize(s);
+    if (!cbm_sql_bind_text(s, SKIP_ONE, src_project)) {
+        cbm_sql_finalize(s);
         return cr_match_finish(ctx, 0, true);
     }
 
     int count = 0;
     int scanned = 0;
-    int step_rc = SQLITE_DONE;
+    cbm_sql_step_t step_rc = CBM_SQL_DONE;
     bool failed = false;
     while (scanned < CR_MAX_EDGES && !cr_cancel_requested(ctx) &&
-           (step_rc = sqlite3_step(s)) == SQLITE_ROW) {
+           (step_rc = cbm_sql_step(s)) == CBM_SQL_ROW) {
         scanned++;
-        int64_t caller_id = sqlite3_column_int64(s, 0);
-        int64_t route_id = sqlite3_column_int64(s, SKIP_ONE);
-        const char *props = (const char *)sqlite3_column_text(s, PAIR_LEN);
+        int64_t caller_id = cbm_sql_column_int64(s, 0);
+        int64_t route_id = cbm_sql_column_int64(s, SKIP_ONE);
+        const char *props = cbm_sql_column_text(s, PAIR_LEN);
 
         char url_path[CBM_SZ_256] = {0};
         char broker[CBM_SZ_128] = {0};
@@ -742,10 +739,10 @@ static cr_match_result_t match_async_routes(cbm_store_t *src_store, const char *
         }
         count++;
     }
-    if (!failed && !cr_cancel_requested(ctx) && scanned < CR_MAX_EDGES && step_rc != SQLITE_DONE) {
+    if (!failed && !cr_cancel_requested(ctx) && scanned < CR_MAX_EDGES && step_rc != CBM_SQL_DONE) {
         failed = true;
     }
-    if (sqlite3_finalize(s) != SQLITE_OK) {
+    if (!cbm_sql_finalize(s)) {
         failed = true;
     }
     return cr_match_finish(ctx, count, failed);
@@ -764,22 +761,22 @@ static int try_match_channel_listener(cbm_store_t *src_store, const char *src_pr
     if (cr_cancel_requested(ctx)) {
         return CBM_STORE_NOT_FOUND;
     }
-    struct sqlite3 *tgt_db = cbm_store_get_db(tgt_store);
+    cbm_sql_t *tgt_db = cbm_store_sql(tgt_store);
     if (!tgt_db) {
         return CBM_STORE_ERR;
     }
-    sqlite3_stmt *tq = NULL;
-    if (sqlite3_prepare_v2(tgt_db,
-                           "SELECT n.id, e.source_id, fn.name, fn.file_path FROM nodes n "
-                           "JOIN edges e ON e.target_id = n.id AND e.type = 'LISTENS_ON' "
-                           "JOIN nodes fn ON fn.id = e.source_id "
-                           "WHERE n.project = ?1 AND n.name = ?2 AND n.label = 'Channel' LIMIT 1",
-                           CBM_NOT_FOUND, &tq, NULL) != SQLITE_OK) {
+    cbm_sql_stmt_t *tq = NULL;
+    if (!cbm_sql_prepare(tgt_db,
+                         "SELECT n.id, e.source_id, fn.name, fn.file_path FROM nodes n "
+                         "JOIN edges e ON e.target_id = n.id AND e.type = 'LISTENS_ON' "
+                         "JOIN nodes fn ON fn.id = e.source_id "
+                         "WHERE n.project = ?1 AND n.name = ?2 AND n.label = 'Channel' LIMIT 1",
+                         &tq)) {
         return CBM_STORE_ERR;
     }
-    if (sqlite3_bind_text(tq, SKIP_ONE, tgt_project, CBM_NOT_FOUND, SQLITE_STATIC) != SQLITE_OK ||
-        sqlite3_bind_text(tq, PAIR_LEN, channel_name, CBM_NOT_FOUND, SQLITE_STATIC) != SQLITE_OK) {
-        sqlite3_finalize(tq);
+    if (!cbm_sql_bind_text(tq, SKIP_ONE, tgt_project) ||
+        !cbm_sql_bind_text(tq, PAIR_LEN, channel_name)) {
+        cbm_sql_finalize(tq);
         return CBM_STORE_ERR;
     }
 
@@ -787,26 +784,26 @@ static int try_match_channel_listener(cbm_store_t *src_store, const char *src_pr
     int64_t listener_id = 0;
     char listener_name[CBM_SZ_256] = {0};
     char listener_file[CBM_SZ_512] = {0};
-    int step_rc = sqlite3_step(tq);
-    if (step_rc == SQLITE_ROW) {
-        tgt_channel_id = sqlite3_column_int64(tq, 0);
-        listener_id = sqlite3_column_int64(tq, SKIP_ONE);
-        const char *name = (const char *)sqlite3_column_text(tq, PAIR_LEN);
-        const char *file = (const char *)sqlite3_column_text(tq, CR_COL_3);
-        snprintf(listener_name, sizeof(listener_name), "%s", name ? name : "");
+    cbm_sql_step_t step_rc = cbm_sql_step(tq);
+    if (step_rc == CBM_SQL_ROW) {
+        tgt_channel_id = cbm_sql_column_int64(tq, 0);
+        listener_id = cbm_sql_column_int64(tq, SKIP_ONE);
+        const char *name = cbm_sql_column_text(tq, PAIR_LEN);
+        const char *file = cbm_sql_column_text(tq, CR_COL_3);
+        snprintf(listener_name, sizeof(listener_name), "%s", name);
         snprintf(listener_file, sizeof(listener_file), "%s", file ? file : "");
     }
-    int finalize_rc = sqlite3_finalize(tq);
-    if ((step_rc != SQLITE_ROW && step_rc != SQLITE_DONE) || finalize_rc != SQLITE_OK) {
+    bool finalized = cbm_sql_finalize(tq);
+    if ((step_rc != CBM_SQL_ROW && step_rc != CBM_SQL_DONE) || !finalized) {
         return CBM_STORE_ERR;
     }
-    if (step_rc == SQLITE_DONE) {
+    if (step_rc == CBM_SQL_DONE) {
         return 0;
     }
 
     char caller_name[CBM_SZ_256] = {0};
     char caller_file[CBM_SZ_512] = {0};
-    if (!lookup_node_info(cbm_store_get_db(src_store), emitter_id, caller_name, sizeof(caller_name),
+    if (!lookup_node_info(cbm_store_sql(src_store), emitter_id, caller_name, sizeof(caller_name),
                           caller_file, sizeof(caller_file))) {
         return CBM_STORE_ERR;
     }
@@ -836,41 +833,42 @@ static int try_match_channel_listener(cbm_store_t *src_store, const char *src_pr
 static cr_match_result_t match_channels(cbm_store_t *src_store, const char *src_project,
                                         cbm_store_t *tgt_store, const char *tgt_project,
                                         cr_run_context_t *ctx) {
-    struct sqlite3 *src_db = cbm_store_get_db(src_store);
+    cbm_sql_t *src_db = cbm_store_sql(src_store);
     if (!src_db) {
         return cr_match_finish(ctx, 0, true);
     }
 
-    sqlite3_stmt *s = NULL;
-    if (sqlite3_prepare_v2(src_db,
-                           "SELECT DISTINCT n.id, n.name, n.qualified_name, n.properties, "
-                           "e.source_id FROM nodes n "
-                           "JOIN edges e ON e.target_id = n.id AND e.type = 'EMITS' "
-                           "WHERE n.project = ?1 AND n.label = 'Channel' "
-                           "ORDER BY n.id, e.source_id",
-                           CBM_NOT_FOUND, &s, NULL) != SQLITE_OK) {
+    cbm_sql_stmt_t *s = NULL;
+    if (!cbm_sql_prepare(src_db,
+                         "SELECT DISTINCT n.id, n.name, n.qualified_name, n.properties, "
+                         "e.source_id FROM nodes n "
+                         "JOIN edges e ON e.target_id = n.id AND e.type = 'EMITS' "
+                         "WHERE n.project = ?1 AND n.label = 'Channel' "
+                         "ORDER BY n.id, e.source_id",
+                         &s)) {
         return cr_match_finish(ctx, 0, true);
     }
-    if (sqlite3_bind_text(s, SKIP_ONE, src_project, CBM_NOT_FOUND, SQLITE_STATIC) != SQLITE_OK) {
-        sqlite3_finalize(s);
+    if (!cbm_sql_bind_text(s, SKIP_ONE, src_project)) {
+        cbm_sql_finalize(s);
         return cr_match_finish(ctx, 0, true);
     }
 
     int count = 0;
     int scanned = 0;
-    int step_rc = SQLITE_DONE;
+    cbm_sql_step_t step_rc = CBM_SQL_DONE;
     bool failed = false;
     while (scanned < CR_MAX_EDGES && !cr_cancel_requested(ctx) &&
-           (step_rc = sqlite3_step(s)) == SQLITE_ROW) {
+           (step_rc = cbm_sql_step(s)) == CBM_SQL_ROW) {
         scanned++;
-        const char *channel_name = (const char *)sqlite3_column_text(s, SKIP_ONE);
-        const char *channel_qn = (const char *)sqlite3_column_text(s, PAIR_LEN);
-        if (!channel_name || !channel_qn) {
+        const char *channel_name = cbm_sql_column_text(s, SKIP_ONE);
+        /* A channel needs both a name and a qualified name to be matchable;
+         * the qualified name is only tested, never read. */
+        if (cbm_sql_column_is_null(s, SKIP_ONE) || cbm_sql_column_is_null(s, PAIR_LEN)) {
             continue;
         }
-        int64_t channel_id = sqlite3_column_int64(s, 0);
-        const char *channel_props = (const char *)sqlite3_column_text(s, CR_COL_3);
-        int64_t emitter_id = sqlite3_column_int64(s, CR_COL_4);
+        int64_t channel_id = cbm_sql_column_int64(s, 0);
+        const char *channel_props = cbm_sql_column_text(s, CR_COL_3);
+        int64_t emitter_id = cbm_sql_column_int64(s, CR_COL_4);
 
         char *channel_name_copy = cbm_strdup(channel_name);
         if (!channel_name_copy) {
@@ -895,10 +893,10 @@ static cr_match_result_t match_channels(cbm_store_t *src_store, const char *src_
             count++;
         }
     }
-    if (!failed && !cr_cancel_requested(ctx) && scanned < CR_MAX_EDGES && step_rc != SQLITE_DONE) {
+    if (!failed && !cr_cancel_requested(ctx) && scanned < CR_MAX_EDGES && step_rc != CBM_SQL_DONE) {
         failed = true;
     }
-    if (sqlite3_finalize(s) != SQLITE_OK) {
+    if (!cbm_sql_finalize(s)) {
         failed = true;
     }
     return cr_match_finish(ctx, count, failed);
@@ -908,7 +906,7 @@ static cr_match_result_t match_channels(cbm_store_t *src_store, const char *src_
 
 /* Look up a node's qualified_name by id. Returns true if found and reports SQL
  * failures separately from an ordinary miss. */
-static bool lookup_node_qn(struct sqlite3 *db, int64_t node_id, char *out, size_t out_sz,
+static bool lookup_node_qn(cbm_sql_t *db, int64_t node_id, char *out, size_t out_sz,
                            bool *failed) {
     *failed = false;
     out[0] = '\0';
@@ -916,29 +914,28 @@ static bool lookup_node_qn(struct sqlite3 *db, int64_t node_id, char *out, size_
         *failed = true;
         return false;
     }
-    sqlite3_stmt *st = NULL;
-    if (sqlite3_prepare_v2(db, "SELECT qualified_name FROM nodes WHERE id = ?1", CBM_NOT_FOUND, &st,
-                           NULL) != SQLITE_OK) {
+    cbm_sql_stmt_t *st = NULL;
+    if (!cbm_sql_prepare(db, "SELECT qualified_name FROM nodes WHERE id = ?1", &st)) {
         *failed = true;
         return false;
     }
-    if (sqlite3_bind_int64(st, SKIP_ONE, node_id) != SQLITE_OK) {
-        sqlite3_finalize(st);
+    if (!cbm_sql_bind_int64(st, SKIP_ONE, node_id)) {
+        cbm_sql_finalize(st);
         *failed = true;
         return false;
     }
     bool found = false;
-    int step_rc = sqlite3_step(st);
-    if (step_rc == SQLITE_ROW) {
-        const char *qn = (const char *)sqlite3_column_text(st, 0);
+    cbm_sql_step_t step_rc = cbm_sql_step(st);
+    if (step_rc == CBM_SQL_ROW) {
+        const char *qn = cbm_sql_column_text(st, 0);
         if (qn) {
             snprintf(out, out_sz, "%s", qn);
             found = true;
         }
-    } else if (step_rc != SQLITE_DONE) {
+    } else if (step_rc != CBM_SQL_DONE) {
         *failed = true;
     }
-    if (sqlite3_finalize(st) != SQLITE_OK) {
+    if (!cbm_sql_finalize(st)) {
         *failed = true;
     }
     return found;
@@ -951,7 +948,7 @@ static cr_match_result_t match_typed_routes(cbm_store_t *src_store, const char *
                                             const char *edge_type, const char *svc_key,
                                             const char *method_key, const char *cross_edge_type,
                                             cr_run_context_t *ctx) {
-    struct sqlite3 *src_db = cbm_store_get_db(src_store);
+    cbm_sql_t *src_db = cbm_store_sql(src_store);
     if (!src_db) {
         return cr_match_finish(ctx, 0, true);
     }
@@ -962,25 +959,25 @@ static cr_match_result_t match_typed_routes(cbm_store_t *src_store, const char *
              "WHERE e.project = ?1 AND e.type = '%s' ORDER BY e.id",
              edge_type);
 
-    sqlite3_stmt *s = NULL;
-    if (sqlite3_prepare_v2(src_db, sql, CBM_NOT_FOUND, &s, NULL) != SQLITE_OK) {
+    cbm_sql_stmt_t *s = NULL;
+    if (!cbm_sql_prepare(src_db, sql, &s)) {
         return cr_match_finish(ctx, 0, true);
     }
-    if (sqlite3_bind_text(s, SKIP_ONE, src_project, CBM_NOT_FOUND, SQLITE_STATIC) != SQLITE_OK) {
-        sqlite3_finalize(s);
+    if (!cbm_sql_bind_text(s, SKIP_ONE, src_project)) {
+        cbm_sql_finalize(s);
         return cr_match_finish(ctx, 0, true);
     }
 
     int count = 0;
     int scanned = 0;
-    int step_rc = SQLITE_DONE;
+    cbm_sql_step_t step_rc = CBM_SQL_DONE;
     bool failed = false;
     while (scanned < CR_MAX_EDGES && !cr_cancel_requested(ctx) &&
-           (step_rc = sqlite3_step(s)) == SQLITE_ROW) {
+           (step_rc = cbm_sql_step(s)) == CBM_SQL_ROW) {
         scanned++;
-        int64_t caller_id = sqlite3_column_int64(s, 0);
-        int64_t route_id = sqlite3_column_int64(s, SKIP_ONE);
-        const char *props = (const char *)sqlite3_column_text(s, PAIR_LEN);
+        int64_t caller_id = cbm_sql_column_int64(s, 0);
+        int64_t route_id = cbm_sql_column_int64(s, SKIP_ONE);
+        const char *props = cbm_sql_column_text(s, PAIR_LEN);
 
         char svc_val[CBM_SZ_256] = {0};
         char meth_val[CBM_SZ_256] = {0};
@@ -1027,10 +1024,10 @@ static cr_match_result_t match_typed_routes(cbm_store_t *src_store, const char *
         }
         count++;
     }
-    if (!failed && !cr_cancel_requested(ctx) && scanned < CR_MAX_EDGES && step_rc != SQLITE_DONE) {
+    if (!failed && !cr_cancel_requested(ctx) && scanned < CR_MAX_EDGES && step_rc != CBM_SQL_DONE) {
         failed = true;
     }
-    if (sqlite3_finalize(s) != SQLITE_OK) {
+    if (!cbm_sql_finalize(s)) {
         failed = true;
     }
     return cr_match_finish(ctx, count, failed);
@@ -1049,9 +1046,11 @@ static int collect_all_projects(char ***out, cr_run_context_t *ctx) {
         return -1;
     }
 
-    int cap = CR_INIT_CAP;
+    /* cap is size_t so the doubling below is defined unsigned arithmetic; count
+     * stays int because free_project_list and the return value take it. */
+    size_t cap = CR_INIT_CAP;
     int count = 0;
-    char **projects = malloc((size_t)cap * sizeof(char *));
+    char **projects = malloc(cap * sizeof(char *));
     if (!projects) {
         cbm_closedir(d);
         return -1;
@@ -1094,9 +1093,9 @@ static int collect_all_projects(char ***out, cr_run_context_t *ctx) {
         if (!cbm_validate_project_name(project) || !cr_project_exists(project)) {
             continue;
         }
-        if (count >= cap) {
+        if ((size_t)count >= cap) {
             cap *= PAIR_LEN;
-            char **tmp = realloc(projects, (size_t)cap * sizeof(char *));
+            char **tmp = realloc(projects, cap * sizeof(char *));
             if (!tmp) {
                 failed = true;
                 break;

@@ -44,7 +44,7 @@ enum {
 #include "mcp/mcp.h"
 #include "mcp/mcp_internal.h"
 #include "store/store.h"
-#include <sqlite3.h>
+#include "store/sql.h"
 #include "cypher/cypher.h"
 #include "discover/discover.h"
 #include "pipeline/pipeline.h"
@@ -2797,20 +2797,6 @@ enum {
     BM25_INNER_LIMIT = 2000,
 };
 
-/* Module-local SQLITE_TRANSIENT wrapper to dodge performance-no-int-to-ptr.
- * See the matching helper in src/store/store.c for the same pattern. */
-static sqlite3_destructor_type mcp_sqlite_transient(void) {
-    static const volatile intptr_t raw = -1;
-    /* Read through the volatile qualifier into a plain local first: memcpy
-     * from &local needs no qualifier-dropping cast, since local itself is
-     * neither const nor volatile. */
-    intptr_t local = raw;
-    sqlite3_destructor_type dtor = NULL;
-    memcpy(&dtor, &local, sizeof(dtor));
-    return dtor;
-}
-#define MCP_SQLITE_TRANSIENT (mcp_sqlite_transient())
-
 static int bm25_build_match(const char *query, char *out, size_t out_size) {
     if (!query || !out || out_size < BM25_MIN_BUF) {
         return 0;
@@ -2875,7 +2861,7 @@ static char *bm25_file_pattern_like(const char *file_pattern) {
  * in which case the caller falls back to the regex-based search path. */
 static char *bm25_search(cbm_store_t *store, const char *project, const char *query,
                          const char *file_pattern, int limit, int offset, bool toon) {
-    sqlite3 *db = cbm_store_get_db(store);
+    cbm_sql_t *db = cbm_store_sql(store);
     if (!db) {
         return NULL;
     }
@@ -2921,20 +2907,20 @@ static char *bm25_search(cbm_store_t *store, const char *project, const char *qu
         "ORDER BY rank, n.id "
         "LIMIT ?3 OFFSET ?4";
 
-    sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(db, sql, BM25_SQL_AUTO_LEN, &stmt, NULL) != SQLITE_OK) {
+    cbm_sql_stmt_t *stmt = NULL;
+    if (!cbm_sql_prepare(db, sql, &stmt)) {
         free(file_like);
         return NULL;
     }
-    sqlite3_bind_text(stmt, BM25_BIND_QUERY, fts_query, BM25_SQL_AUTO_LEN, MCP_SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, BM25_BIND_PROJECT, project, BM25_SQL_AUTO_LEN, MCP_SQLITE_TRANSIENT);
-    sqlite3_bind_int(stmt, BM25_BIND_LIMIT, limit > 0 ? limit : BM25_DEFAULT_LIMIT);
-    sqlite3_bind_int(stmt, BM25_BIND_OFFSET, offset > 0 ? offset : 0);
-    sqlite3_bind_int(stmt, BM25_BIND_INNER, BM25_INNER_LIMIT);
+    cbm_sql_bind_text(stmt, BM25_BIND_QUERY, fts_query);
+    cbm_sql_bind_text(stmt, BM25_BIND_PROJECT, project);
+    cbm_sql_bind_int(stmt, BM25_BIND_LIMIT, limit > 0 ? limit : BM25_DEFAULT_LIMIT);
+    cbm_sql_bind_int(stmt, BM25_BIND_OFFSET, offset > 0 ? offset : 0);
+    cbm_sql_bind_int(stmt, BM25_BIND_INNER, BM25_INNER_LIMIT);
     if (file_like) {
-        sqlite3_bind_text(stmt, BM25_BIND_FILE, file_like, BM25_SQL_AUTO_LEN, MCP_SQLITE_TRANSIENT);
+        cbm_sql_bind_text(stmt, BM25_BIND_FILE, file_like);
     } else {
-        sqlite3_bind_null(stmt, BM25_BIND_FILE);
+        cbm_sql_bind_null(stmt, BM25_BIND_FILE);
     }
 
     /* Count hits within the same inner-limit window — capped at BM25_INNER_LIMIT.
@@ -2952,23 +2938,20 @@ static char *bm25_search(cbm_store_t *store, const char *project, const char *qu
             "      AND n.label NOT IN ('File','Folder','Module','Section','Variable','Project')"
             "      AND (?6 IS NULL OR n.file_path LIKE ?6)"
             ")";
-        sqlite3_stmt *cs = NULL;
-        if (sqlite3_prepare_v2(db, count_sql, BM25_SQL_AUTO_LEN, &cs, NULL) == SQLITE_OK) {
-            sqlite3_bind_text(cs, BM25_BIND_QUERY, fts_query, BM25_SQL_AUTO_LEN,
-                              MCP_SQLITE_TRANSIENT);
-            sqlite3_bind_text(cs, BM25_BIND_PROJECT, project, BM25_SQL_AUTO_LEN,
-                              MCP_SQLITE_TRANSIENT);
-            sqlite3_bind_int(cs, BM25_BIND_LIMIT, BM25_INNER_LIMIT);
+        cbm_sql_stmt_t *cs = NULL;
+        if (cbm_sql_prepare(db, count_sql, &cs)) {
+            cbm_sql_bind_text(cs, BM25_BIND_QUERY, fts_query);
+            cbm_sql_bind_text(cs, BM25_BIND_PROJECT, project);
+            cbm_sql_bind_int(cs, BM25_BIND_LIMIT, BM25_INNER_LIMIT);
             if (file_like) {
-                sqlite3_bind_text(cs, BM25_BIND_FILE, file_like, BM25_SQL_AUTO_LEN,
-                                  MCP_SQLITE_TRANSIENT);
+                cbm_sql_bind_text(cs, BM25_BIND_FILE, file_like);
             } else {
-                sqlite3_bind_null(cs, BM25_BIND_FILE);
+                cbm_sql_bind_null(cs, BM25_BIND_FILE);
             }
-            if (sqlite3_step(cs) == SQLITE_ROW) {
-                total = sqlite3_column_int(cs, 0);
+            if (cbm_sql_step(cs) == CBM_SQL_ROW) {
+                total = cbm_sql_column_int(cs, 0);
             }
-            sqlite3_finalize(cs);
+            cbm_sql_finalize(cs);
         }
     }
 
@@ -2978,26 +2961,26 @@ static char *bm25_search(cbm_store_t *store, const char *project, const char *qu
         cbm_sb_t rows;
         cbm_sb_init(&rows);
         int emitted = 0;
-        while (sqlite3_step(stmt) == SQLITE_ROW) {
+        while (cbm_sql_step(stmt) == CBM_SQL_ROW) {
             char lines[CBM_SZ_32];
-            int sl = sqlite3_column_int(stmt, BM25_COL_START);
-            int el = sqlite3_column_int(stmt, BM25_COL_END);
+            int sl = cbm_sql_column_int(stmt, BM25_COL_START);
+            int el = cbm_sql_column_int(stmt, BM25_COL_END);
             if (sl > 0) {
                 snprintf(lines, sizeof(lines), "%d-%d", sl, el > sl ? el : sl);
             } else {
                 lines[0] = '\0';
             }
             cbm_tree_row_begin(&rows);
-            cbm_tree_cell_str(&rows, (const char *)sqlite3_column_text(stmt, BM25_COL_QN), true);
-            cbm_tree_cell_str(&rows, (const char *)sqlite3_column_text(stmt, BM25_COL_LABEL),
+            cbm_tree_cell_str(&rows, cbm_sql_column_text(stmt, BM25_COL_QN), true);
+            cbm_tree_cell_str(&rows, cbm_sql_column_text(stmt, BM25_COL_LABEL),
                               false);
-            cbm_tree_cell_str(&rows, (const char *)sqlite3_column_text(stmt, BM25_COL_FILE), false);
+            cbm_tree_cell_str(&rows, cbm_sql_column_text(stmt, BM25_COL_FILE), false);
             cbm_tree_cell_str(&rows, lines, false);
-            cbm_tree_cell_real(&rows, sqlite3_column_double(stmt, BM25_COL_RANK), false);
+            cbm_tree_cell_real(&rows, cbm_sql_column_double(stmt, BM25_COL_RANK), false);
             cbm_tree_row_end(&rows);
             emitted++;
         }
-        sqlite3_finalize(stmt);
+        cbm_sql_finalize(stmt);
         free(file_like);
 
         cbm_sb_t sb;
@@ -3029,26 +3012,26 @@ static char *bm25_search(cbm_store_t *store, const char *project, const char *qu
 
     yyjson_mut_val *rows = yyjson_mut_arr(doc);
     int emitted = 0;
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
+    while (cbm_sql_step(stmt) == CBM_SQL_ROW) {
         char lines[CBM_SZ_32];
-        int sl = sqlite3_column_int(stmt, BM25_COL_START);
-        int el = sqlite3_column_int(stmt, BM25_COL_END);
+        int sl = cbm_sql_column_int(stmt, BM25_COL_START);
+        int el = cbm_sql_column_int(stmt, BM25_COL_END);
         if (sl > 0) {
             snprintf(lines, sizeof(lines), "%d-%d", sl, el > sl ? el : sl);
         } else {
             lines[0] = '\0';
         }
         yyjson_mut_val *row = yyjson_mut_arr(doc);
-        yyjson_mut_arr_add_strcpy(doc, row, (const char *)sqlite3_column_text(stmt, BM25_COL_QN));
+        yyjson_mut_arr_add_strcpy(doc, row, cbm_sql_column_text(stmt, BM25_COL_QN));
         yyjson_mut_arr_add_strcpy(doc, row,
-                                  (const char *)sqlite3_column_text(stmt, BM25_COL_LABEL));
-        yyjson_mut_arr_add_strcpy(doc, row, (const char *)sqlite3_column_text(stmt, BM25_COL_FILE));
+                                  cbm_sql_column_text(stmt, BM25_COL_LABEL));
+        yyjson_mut_arr_add_strcpy(doc, row, cbm_sql_column_text(stmt, BM25_COL_FILE));
         yyjson_mut_arr_add_strcpy(doc, row, lines);
-        yyjson_mut_arr_add_real(doc, row, sqlite3_column_double(stmt, BM25_COL_RANK));
+        yyjson_mut_arr_add_real(doc, row, cbm_sql_column_double(stmt, BM25_COL_RANK));
         yyjson_mut_arr_add_val(rows, row);
         emitted++;
     }
-    sqlite3_finalize(stmt);
+    cbm_sql_finalize(stmt);
     free(file_like);
 
     yyjson_mut_obj_add_val(doc, root, "rows", rows);
@@ -3322,8 +3305,8 @@ static size_t sg_qn_prefix_len(const char *qn) {
 static int sg_cmp_by_qn(const void *pa, const void *pb) {
     const cbm_search_result_t *a = (const cbm_search_result_t *)pa;
     const cbm_search_result_t *b = (const cbm_search_result_t *)pb;
-    const char *qa = a->node.qualified_name ? a->node.qualified_name : "";
-    const char *qb = b->node.qualified_name ? b->node.qualified_name : "";
+    const char *qa = a->node.qualified_name;
+    const char *qb = b->node.qualified_name;
     return strcmp(qa, qb);
 }
 
@@ -3351,8 +3334,8 @@ static void emit_search_results_tree(cbm_sb_t *sb, cbm_search_output_t *out, int
     char cur_group[CBM_SZ_1K] = "";
     for (int i = 0; i < out->count; i++) {
         const cbm_search_result_t *sr = &out->results[i];
-        const char *qn = sr->node.qualified_name ? sr->node.qualified_name : "";
-        const char *file = sr->node.file_path ? sr->node.file_path : "";
+        const char *qn = sr->node.qualified_name;
+        const char *file = sr->node.file_path;
         size_t plen = sg_qn_prefix_len(qn);
         char group[CBM_SZ_1K];
         snprintf(group, sizeof(group), "%.*s (%s)", (int)plen, qn, file);
@@ -3366,7 +3349,7 @@ static void emit_search_results_tree(cbm_sb_t *sb, cbm_search_output_t *out, int
         sg_lines_str(lines, sizeof(lines), sr->node.start_line, sr->node.end_line);
         char row[CBM_SZ_1K];
         snprintf(row, sizeof(row), "  %s %s %s %d %d", shortname,
-                 sr->node.label ? sr->node.label : "", lines, sr->in_degree, sr->out_degree);
+                 sr->node.label, lines, sr->in_degree, sr->out_degree);
         cbm_sb_append(sb, row);
         /* Extra property columns (fields param). Routed through the shared
          * cell emitters so values with spaces (signatures, docstrings) are
@@ -3440,8 +3423,8 @@ static void emit_search_results_tree_json(yyjson_mut_doc *doc, yyjson_mut_val *r
     char cur_key[CBM_SZ_1K] = "";
     for (int i = 0; i < out->count; i++) {
         const cbm_search_result_t *sr = &out->results[i];
-        const char *qn = sr->node.qualified_name ? sr->node.qualified_name : "";
-        const char *file = sr->node.file_path ? sr->node.file_path : "";
+        const char *qn = sr->node.qualified_name;
+        const char *file = sr->node.file_path;
         size_t plen = sg_qn_prefix_len(qn);
         char key[CBM_SZ_1K];
         snprintf(key, sizeof(key), "%.*s|%s", (int)plen, qn, file);
@@ -3460,7 +3443,7 @@ static void emit_search_results_tree_json(yyjson_mut_doc *doc, yyjson_mut_val *r
         sg_lines_str(lines, sizeof(lines), sr->node.start_line, sr->node.end_line);
         yyjson_mut_val *row = yyjson_mut_arr(doc);
         yyjson_mut_arr_add_strcpy(doc, row, plen ? qn + plen + 1 : qn);
-        yyjson_mut_arr_add_strcpy(doc, row, sr->node.label ? sr->node.label : "");
+        yyjson_mut_arr_add_strcpy(doc, row, sr->node.label);
         yyjson_mut_arr_add_strcpy(doc, row, lines);
         yyjson_mut_arr_add_int(doc, row, sr->in_degree);
         yyjson_mut_arr_add_int(doc, row, sr->out_degree);
@@ -5563,7 +5546,7 @@ static char *handle_get_architecture(cbm_mcp_server_t *srv, const char *args) {
             const cbm_cluster_info_t *c = &arch.clusters[i];
             yyjson_mut_val *row = yyjson_mut_arr(doc);
             yyjson_mut_arr_add_int(doc, row, c->id);
-            yyjson_mut_arr_add_strcpy(doc, row, c->label ? c->label : "");
+            yyjson_mut_arr_add_strcpy(doc, row, c->label);
             yyjson_mut_arr_add_int(doc, row, c->members);
             yyjson_mut_arr_add_real(doc, row, c->cohesion);
             yyjson_mut_val *top = yyjson_mut_arr(doc);
@@ -6040,7 +6023,7 @@ static void bfs_union_same_name(cbm_store_t *store, const cbm_node_t *nodes, int
             }
             if ((size_t)out->visited_count >= vcap) {
                 vcap = vcap ? vcap * 2 : 8;
-                out->visited = safe_realloc(out->visited, vcap * sizeof(cbm_node_hop_t));
+                out->visited = cbm_realloc_or_abort(out->visited, vcap * sizeof(cbm_node_hop_t));
             }
             out->visited[out->visited_count++] = tr.visited[i];
             memset(&tr.visited[i], 0, sizeof(tr.visited[i])); /* ownership moved */
@@ -6062,7 +6045,7 @@ static void bfs_union_same_name(cbm_store_t *store, const cbm_node_t *nodes, int
             }
             if ((size_t)out->edge_count >= ecap) {
                 ecap = ecap ? ecap * 2 : 8;
-                out->edges = safe_realloc(out->edges, ecap * sizeof(cbm_edge_info_t));
+                out->edges = cbm_realloc_or_abort(out->edges, ecap * sizeof(cbm_edge_info_t));
             }
             out->edges[out->edge_count++] = tr.edges[i];
             memset(&tr.edges[i], 0, sizeof(tr.edges[i])); /* ownership moved */
@@ -6249,8 +6232,8 @@ static yyjson_mut_val *bfs_to_tree_json(yyjson_mut_doc *doc, cbm_traverse_result
 static int tree_hop_cmp_qn(const void *pa, const void *pb) {
     const cbm_node_hop_t *a = (const cbm_node_hop_t *)pa;
     const cbm_node_hop_t *b = (const cbm_node_hop_t *)pb;
-    const char *qa = a->node.qualified_name ? a->node.qualified_name : "";
-    const char *qb = b->node.qualified_name ? b->node.qualified_name : "";
+    const char *qa = a->node.qualified_name;
+    const char *qb = b->node.qualified_name;
     int c = strcmp(qa, qb);
     if (c != 0) {
         return c;
@@ -6769,7 +6752,7 @@ static char *read_file_lines(const char *path, int start, int end) {
         size_t ll = strlen(line);
         while (len + ll + SKIP_ONE > cap) {
             cap *= PAIR_LEN;
-            buf = safe_realloc(buf, cap);
+            buf = cbm_realloc_or_abort(buf, cap);
         }
         memcpy(buf + len, line, ll);
         len += ll;
@@ -7170,21 +7153,53 @@ static void add_skipped_summary(yyjson_mut_doc *doc, yyjson_mut_val *root,
  * note spells out the best-effort framing: absence from this list is NOT a
  * completeness guarantee. */
 static void add_parse_partial_summary(yyjson_mut_doc *doc, yyjson_mut_val *root,
-                                      const cbm_file_error_t *errs, int count) {
+                                      const cbm_file_error_t *errs, int count,
+                                      cbm_store_t *store, const char *project) {
+    /* Count from the persisted coverage rows, the same source index_status
+     * reads, so the two always agree. An incremental run re-extracts only the
+     * changed files, so this run's errs[] describes those alone — reporting it
+     * as the project's total makes a fully-cached run read as a clean one. */
+    cbm_coverage_row_t *rows = NULL;
+    int row_count = 0;
+    bool from_store = store && project &&
+                      cbm_store_coverage_get(store, project, &rows, &row_count) == CBM_STORE_OK;
+
     int partials = 0;
-    for (int i = 0; i < count; i++) {
-        if (is_parse_partial(&errs[i])) {
-            partials++;
+    if (from_store) {
+        for (int i = 0; i < row_count; i++) {
+            if (rows[i].kind && strcmp(rows[i].kind, "parse_partial") == 0) {
+                partials++;
+            }
+        }
+    } else {
+        for (int i = 0; i < count; i++) {
+            if (is_parse_partial(&errs[i])) {
+                partials++;
+            }
         }
     }
     yyjson_mut_obj_add_int(doc, root, "parse_partial_count", partials);
-    if (!errs || partials <= 0) {
+    if (partials <= 0) {
+        cbm_store_free_coverage(rows, row_count);
         return;
     }
     yyjson_mut_val *pp = yyjson_mut_obj(doc);
     yyjson_mut_val *files = yyjson_mut_arr(doc);
     int shown = 0;
-    for (int i = 0; i < count && shown < INDEX_SKIPPED_FILE_CAP; i++) {
+    if (from_store) {
+        for (int i = 0; i < row_count && shown < INDEX_SKIPPED_FILE_CAP; i++) {
+            if (!rows[i].kind || strcmp(rows[i].kind, "parse_partial") != 0) {
+                continue;
+            }
+            yyjson_mut_val *fe = yyjson_mut_obj(doc);
+            yyjson_mut_obj_add_strcpy(doc, fe, "path", rows[i].rel_path ? rows[i].rel_path : "");
+            yyjson_mut_obj_add_strcpy(doc, fe, "error_ranges",
+                                      rows[i].detail ? rows[i].detail : "");
+            yyjson_mut_arr_add_val(files, fe);
+            shown++;
+        }
+    }
+    for (int i = 0; i < count && shown < INDEX_SKIPPED_FILE_CAP && !from_store; i++) {
         if (!is_parse_partial(&errs[i])) {
             continue;
         }
@@ -7194,6 +7209,7 @@ static void add_parse_partial_summary(yyjson_mut_doc *doc, yyjson_mut_val *root,
         yyjson_mut_arr_add_val(files, fe);
         shown++;
     }
+    cbm_store_free_coverage(rows, row_count);
     yyjson_mut_obj_add_val(doc, pp, "files", files);
     yyjson_mut_obj_add_int(doc, pp, "count", partials);
     yyjson_mut_obj_add_bool(doc, pp, "truncated", partials > INDEX_SKIPPED_FILE_CAP);
@@ -7262,9 +7278,11 @@ static bool build_index_success_response(cbm_mcp_server_t *srv, yyjson_mut_doc *
                                          char **excluded_dirs, int excluded_count,
                                          const cbm_file_error_t *file_errors, int file_error_count,
                                          const char *logfile) {
+    cbm_store_t *store = resolve_store(srv, project_name);
+
     add_excluded_summary(doc, root, excluded_dirs, excluded_count);
     add_skipped_summary(doc, root, file_errors, file_error_count, logfile);
-    add_parse_partial_summary(doc, root, file_errors, file_error_count);
+    add_parse_partial_summary(doc, root, file_errors, file_error_count, store, project_name);
     add_not_indexed_files_summary(doc, root, p);
 
     int exp_nodes = -1;
@@ -7274,7 +7292,6 @@ static bool build_index_success_response(cbm_mcp_server_t *srv, yyjson_mut_doc *
     const double ratio = cbm_dump_verify_min_ratio();
     const int min_floor = CBM_DUMP_VERIFY_MIN_FLOOR;
 
-    cbm_store_t *store = resolve_store(srv, project_name);
     int nodes = 0;
     int edges = 0;
     bool degraded = false;
@@ -8371,10 +8388,9 @@ static char *build_snippet_response(cbm_mcp_server_t *srv, cbm_node_t *node,
     yyjson_mut_val *root_obj = yyjson_mut_obj(doc);
     yyjson_mut_doc_set_root(doc, root_obj);
 
-    yyjson_mut_obj_add_str(doc, root_obj, "name", node->name ? node->name : "");
-    yyjson_mut_obj_add_str(doc, root_obj, "qualified_name",
-                           node->qualified_name ? node->qualified_name : "");
-    yyjson_mut_obj_add_str(doc, root_obj, "label", node->label ? node->label : "");
+    yyjson_mut_obj_add_str(doc, root_obj, "name", node->name);
+    yyjson_mut_obj_add_str(doc, root_obj, "qualified_name", node->qualified_name);
+    yyjson_mut_obj_add_str(doc, root_obj, "label", node->label);
 
     const char *display_path = "";
     if (abs_path) {
@@ -9167,16 +9183,15 @@ static void add_to_search_results(search_result_t **sr, int *sr_count, size_t *s
     }
     if ((size_t)*sr_count >= *sr_cap) {
         *sr_cap *= PAIR_LEN;
-        *sr = safe_realloc(*sr, *sr_cap * sizeof(search_result_t));
+        *sr = cbm_realloc_or_abort(*sr, *sr_cap * sizeof(search_result_t));
         memset(&(*sr)[*sr_count], 0, (*sr_cap - (size_t)*sr_count) * sizeof(search_result_t));
     }
     search_result_t *r = &(*sr)[*sr_count];
     r->node_id = n->id;
-    snprintf(r->node_name, sizeof(r->node_name), "%s", n->name ? n->name : "");
-    snprintf(r->qualified_name, sizeof(r->qualified_name), "%s",
-             n->qualified_name ? n->qualified_name : "");
-    snprintf(r->label, sizeof(r->label), "%s", n->label ? n->label : "");
-    snprintf(r->file, sizeof(r->file), "%s", n->file_path ? n->file_path : "");
+    snprintf(r->node_name, sizeof(r->node_name), "%s", n->name);
+    snprintf(r->qualified_name, sizeof(r->qualified_name), "%s", n->qualified_name);
+    snprintf(r->label, sizeof(r->label), "%s", n->label);
+    snprintf(r->file, sizeof(r->file), "%s", n->file_path);
     r->start_line = n->start_line;
     r->end_line = n->end_line;
     r->match_lines[0] = line;
@@ -9194,7 +9209,7 @@ static void classify_grep_hit(grep_match_t *hit, cbm_node_t *file_nodes, int fil
     } else {
         if ((size_t)*raw_count >= *raw_cap) {
             *raw_cap = (*raw_cap == 0) ? CBM_SZ_32 : *raw_cap * PAIR_LEN;
-            *raw = safe_realloc(*raw, *raw_cap * sizeof(grep_match_t));
+            *raw = cbm_realloc_or_free(*raw, *raw_cap * sizeof(grep_match_t));
         }
         if (*raw) {
             (*raw)[(*raw_count)++] = *hit;
@@ -9973,7 +9988,7 @@ static void detect_collect_seeds(cbm_store_t *store, const char *project, const 
             }
             if ((size_t)*n >= *cap) {
                 *cap = *cap ? *cap * 2 : 16;
-                *seeds = safe_realloc(*seeds, *cap * sizeof(int64_t));
+                *seeds = cbm_realloc_or_abort(*seeds, *cap * sizeof(int64_t));
             }
             (*seeds)[(*n)++] = nodes[i].id;
         }
@@ -10303,7 +10318,7 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
                     size_t hread = fread(hbuf, SKIP_ONE, (size_t)hsz, hfp);
                     hbuf[hread] = '\0';
                     enum { HUNK_CAP = 4096 };
-                    hunks = safe_realloc(NULL, (size_t)HUNK_CAP * sizeof(cbm_changed_hunk_t));
+                    hunks = cbm_realloc_or_abort(NULL, (size_t)HUNK_CAP * sizeof(cbm_changed_hunk_t));
                     hunk_count = cbm_parse_hunks(hbuf, hunks, HUNK_CAP);
                     /* A filled buffer means the diff was truncated: the hunks
                      * past the cap are gone, so files captured only partially
@@ -10365,7 +10380,7 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
         }
         if ((size_t)file_count >= file_cap) {
             file_cap = file_cap ? file_cap * 2 : 16;
-            files = safe_realloc(files, file_cap * sizeof(char *));
+            files = cbm_realloc_or_abort(files, file_cap * sizeof(char *));
         }
         files[file_count++] = heap_strdup(path_line);
         if (want_symbols) {

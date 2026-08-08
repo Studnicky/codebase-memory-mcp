@@ -51,6 +51,7 @@
 #include "../helpers.h"
 #include "../arena.h"
 #include <ctype.h>
+#include <limits.h> /* INT_MAX */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -236,6 +237,8 @@ void perl_lsp_add_use(PerlLSPContext *ctx, const char *local_name, const char *t
     if (!ctx || !local_name || !target_qn)
         return;
     if (ctx->use_count >= ctx->use_cap) {
+        if (ctx->use_cap > INT_MAX / 2)
+            return;
         int newcap = ctx->use_cap ? ctx->use_cap * 2 : 8;
         const char **ln =
             (const char **)cbm_arena_alloc(ctx->arena, (size_t)newcap * sizeof(char *));
@@ -285,6 +288,8 @@ static void perl_add_isa(PerlLSPContext *ctx, const char *pkg, const char *paren
     if (!ctx || !pkg || !parent || !pkg[0] || !parent[0])
         return;
     if (ctx->isa_count >= ctx->isa_cap) {
+        if (ctx->isa_cap > INT_MAX / 2)
+            return;
         int newcap = ctx->isa_cap ? ctx->isa_cap * 2 : 8;
         const char **pk =
             (const char **)cbm_arena_alloc(ctx->arena, (size_t)newcap * sizeof(char *));
@@ -1477,6 +1482,10 @@ static void perl_mvec_push(PerlMethodVec *mv, const char *pkg, const char *short
     if (mv->oom)
         return;
     if (mv->cnt == mv->cap) {
+        if (mv->cap > INT_MAX / 2) {
+            mv->oom = true;
+            return;
+        }
         int ncap = mv->cap ? mv->cap * 2 : 32;
         PerlMethodEnt *nv = (PerlMethodEnt *)realloc(mv->v, (size_t)ncap * sizeof(PerlMethodEnt));
         if (!nv) {

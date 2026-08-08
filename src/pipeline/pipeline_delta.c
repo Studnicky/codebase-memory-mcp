@@ -27,13 +27,14 @@
 #include "foundation/constants.h"
 #include "pipeline/pipeline_internal.h"
 
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "foundation/compat_fs.h"
 #include "foundation/log.h"
-#include "sqlite3.h"
+#include "store/sql.h"
 #include "store/store.h"
 
 enum { DELTA_IN_CHUNK = 200 };
@@ -82,7 +83,7 @@ int cbm_delta_snapshot_inbound(cbm_store_t *store, const char *project, const ch
     if (path_count <= 0) {
         return 0;
     }
-    sqlite3 *db = cbm_store_get_db(store);
+    cbm_sql_t *db = cbm_store_sql(store);
     if (!db) {
         return CBM_NOT_FOUND;
     }
@@ -113,54 +114,65 @@ int cbm_delta_snapshot_inbound(cbm_store_t *store, const char *project, const ch
             cbm_delta_free_snapshot(items, count);
             return CBM_NOT_FOUND;
         }
-        sqlite3_stmt *stmt = NULL;
-        if (sqlite3_prepare_v2(db, sql, CBM_NOT_FOUND, &stmt, NULL) != SQLITE_OK) {
+        cbm_sql_stmt_t *stmt = NULL;
+        if (!cbm_sql_prepare(db, sql, &stmt)) {
             cbm_delta_free_snapshot(items, count);
             return CBM_NOT_FOUND;
         }
-        sqlite3_bind_text(stmt, 1, project, CBM_NOT_FOUND, SQLITE_TRANSIENT);
+        cbm_sql_bind_text(stmt, 1, project);
         for (int i = 0; i < chunk; i++) {
-            sqlite3_bind_text(stmt, 2 + i, paths[off + i], CBM_NOT_FOUND, SQLITE_TRANSIENT);
-            sqlite3_bind_text(stmt, 2 + chunk + i, paths[off + i], CBM_NOT_FOUND, SQLITE_TRANSIENT);
+            cbm_sql_bind_text(stmt, 2 + i, paths[off + i]);
+            cbm_sql_bind_text(stmt, 2 + chunk + i, paths[off + i]);
         }
-        int step_rc;
-        while ((step_rc = sqlite3_step(stmt)) == SQLITE_ROW) {
-            const char *type = (const char *)sqlite3_column_text(stmt, 2);
+        cbm_sql_step_t step_rc;
+        while ((step_rc = cbm_sql_step(stmt)) == CBM_SQL_ROW) {
+            const char *type = cbm_sql_column_text(stmt, 2);
             if (delta_edge_type_is_recomputed(type)) {
                 continue;
             }
             if (count >= cap) {
+                /* Doubling an int overflows before the cast can widen it, so bound it
+                 * first and fail closed the same way this loop already does when the
+                 * allocation fails. */
+                if (cap > INT_MAX / 2) {
+                    cbm_sql_finalize(stmt);
+                    cbm_delta_free_snapshot(items, count);
+                    return CBM_NOT_FOUND;
+                }
                 int ncap = cap ? cap * 2 : 64;
                 cbm_delta_saved_edge_t *grown = realloc(items, (size_t)ncap * sizeof(*items));
                 if (!grown) {
-                    sqlite3_finalize(stmt);
+                    cbm_sql_finalize(stmt);
                     cbm_delta_free_snapshot(items, count);
                     return CBM_NOT_FOUND;
                 }
                 items = grown;
                 cap = ncap;
             }
-            const char *sq = (const char *)sqlite3_column_text(stmt, 0);
-            const char *tq = (const char *)sqlite3_column_text(stmt, 1);
-            const char *props = (const char *)sqlite3_column_text(stmt, 3);
+            const char *sq = cbm_sql_column_text(stmt, 0);
+            const char *tq = cbm_sql_column_text(stmt, 1);
+            /* Absent properties must stay absent so the "{}" default below
+             * still applies; "" is not a JSON object and would be replayed as
+             * a malformed property set. */
+            const char *props = cbm_sql_column_is_null(stmt, 3) ? NULL : cbm_sql_column_text(stmt, 3);
             cbm_delta_saved_edge_t *e = &items[count];
             e->source_qn = strdup(sq ? sq : "");
             e->target_qn = strdup(tq ? tq : "");
-            e->type = strdup(type ? type : "");
+            e->type = strdup(type);
             e->props = strdup(props ? props : "{}");
             if (!e->source_qn || !e->target_qn || !e->type || !e->props) {
                 free(e->source_qn);
                 free(e->target_qn);
                 free(e->type);
                 free(e->props);
-                sqlite3_finalize(stmt);
+                cbm_sql_finalize(stmt);
                 cbm_delta_free_snapshot(items, count);
                 return CBM_NOT_FOUND;
             }
             count++;
         }
-        sqlite3_finalize(stmt);
-        if (step_rc != SQLITE_DONE) {
+        cbm_sql_finalize(stmt);
+        if (step_rc != CBM_SQL_DONE) {
             cbm_delta_free_snapshot(items, count);
             return CBM_NOT_FOUND;
         }
@@ -188,7 +200,7 @@ int cbm_delta_purge(cbm_store_t *store, const char *project, const char *const *
     if (path_count <= 0) {
         return 0;
     }
-    sqlite3 *db = cbm_store_get_db(store);
+    cbm_sql_t *db = cbm_store_sql(store);
     if (!db) {
         return CBM_NOT_FOUND;
     }
@@ -205,17 +217,17 @@ int cbm_delta_purge(cbm_store_t *store, const char *project, const char *const *
         if (n < 0 || (size_t)n >= sizeof(sql)) {
             return CBM_NOT_FOUND;
         }
-        sqlite3_stmt *stmt = NULL;
-        if (sqlite3_prepare_v2(db, sql, CBM_NOT_FOUND, &stmt, NULL) != SQLITE_OK) {
+        cbm_sql_stmt_t *stmt = NULL;
+        if (!cbm_sql_prepare(db, sql, &stmt)) {
             return CBM_NOT_FOUND;
         }
-        sqlite3_bind_text(stmt, 1, project, CBM_NOT_FOUND, SQLITE_TRANSIENT);
+        cbm_sql_bind_text(stmt, 1, project);
         for (int i = 0; i < chunk; i++) {
-            sqlite3_bind_text(stmt, 2 + i, paths[off + i], CBM_NOT_FOUND, SQLITE_TRANSIENT);
+            cbm_sql_bind_text(stmt, 2 + i, paths[off + i]);
         }
-        int rc = sqlite3_step(stmt);
-        sqlite3_finalize(stmt);
-        if (rc != SQLITE_DONE) {
+        cbm_sql_step_t rc = cbm_sql_step(stmt);
+        cbm_sql_finalize(stmt);
+        if (rc != CBM_SQL_DONE) {
             return CBM_NOT_FOUND;
         }
     }
@@ -231,23 +243,22 @@ int cbm_delta_purge(cbm_store_t *store, const char *project, const char *const *
  * where the old full load actually spent its time. */
 
 int64_t cbm_delta_preseed(cbm_store_t *store, const char *project, cbm_gbuf_t *gbuf) {
-    sqlite3 *db = cbm_store_get_db(store);
+    cbm_sql_t *db = cbm_store_sql(store);
     if (!db) {
         return -1;
     }
     int64_t max_id = 0;
     {
-        sqlite3_stmt *stmt = NULL;
+        cbm_sql_stmt_t *stmt = NULL;
         /* Global MAX, not project-scoped: node ids are one keyspace for the
          * whole database, and the watermark must clear every row in it. */
-        if (sqlite3_prepare_v2(db, "SELECT COALESCE(MAX(id), 0) FROM nodes", CBM_NOT_FOUND, &stmt,
-                               NULL) != SQLITE_OK) {
+        if (!cbm_sql_prepare(db, "SELECT COALESCE(MAX(id), 0) FROM nodes", &stmt)) {
             return -1;
         }
-        if (sqlite3_step(stmt) == SQLITE_ROW) {
-            max_id = sqlite3_column_int64(stmt, 0);
+        if (cbm_sql_step(stmt) == CBM_SQL_ROW) {
+            max_id = cbm_sql_column_int64(stmt, 0);
         }
-        sqlite3_finalize(stmt);
+        cbm_sql_finalize(stmt);
     }
 
     /* Proxy only what resolution can reach by NAME or QN: the registry
@@ -263,24 +274,24 @@ int64_t cbm_delta_preseed(cbm_store_t *store, const char *project, cbm_gbuf_t *g
      * UNIQUE violation the pre-remap patch would have raised. A resolver that
      * only LOOKS UP still needs its target resident, which is why the list
      * mirrors the registry's own membership rule instead of guessing. */
-    sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(db,
-                           "SELECT id, label, name, qualified_name, file_path FROM nodes"
-                           " WHERE project = ?1 AND label NOT IN"
-                           " ('Macro','Comment','Section','Branch','Commit','Tag')"
-                           " ORDER BY id",
-                           CBM_NOT_FOUND, &stmt, NULL) != SQLITE_OK) {
+    cbm_sql_stmt_t *stmt = NULL;
+    if (!cbm_sql_prepare(db,
+                         "SELECT id, label, name, qualified_name, file_path FROM nodes"
+                         " WHERE project = ?1 AND label NOT IN"
+                         " ('Macro','Comment','Section','Branch','Commit','Tag')"
+                         " ORDER BY id",
+                         &stmt)) {
         return -1;
     }
-    sqlite3_bind_text(stmt, 1, project, CBM_NOT_FOUND, SQLITE_TRANSIENT);
-    int step_rc;
+    cbm_sql_bind_text(stmt, 1, project);
+    cbm_sql_step_t step_rc;
     int64_t seeded = 0;
-    while ((step_rc = sqlite3_step(stmt)) == SQLITE_ROW) {
-        int64_t id = sqlite3_column_int64(stmt, 0);
-        const char *label = (const char *)sqlite3_column_text(stmt, 1);
-        const char *name = (const char *)sqlite3_column_text(stmt, 2);
-        const char *qn = (const char *)sqlite3_column_text(stmt, 3);
-        const char *fp = (const char *)sqlite3_column_text(stmt, 4);
+    while ((step_rc = cbm_sql_step(stmt)) == CBM_SQL_ROW) {
+        int64_t id = cbm_sql_column_int64(stmt, 0);
+        const char *label = cbm_sql_column_text(stmt, 1);
+        const char *name = cbm_sql_column_text(stmt, 2);
+        const char *qn = cbm_sql_column_text(stmt, 3);
+        const char *fp = cbm_sql_column_text(stmt, 4);
         /* Pin the gbuf id to the database id: proxies ARE their rows. */
         cbm_gbuf_set_next_id(gbuf, id);
         int64_t got = cbm_node_id_value(
@@ -288,14 +299,14 @@ int64_t cbm_delta_preseed(cbm_store_t *store, const char *project, cbm_gbuf_t *g
         if (got != id) {
             /* A QN collision inside the preseed set would silently split
              * identity between RAM and disk; the run cannot be trusted. */
-            sqlite3_finalize(stmt);
+            cbm_sql_finalize(stmt);
             cbm_log_error("delta.preseed_id_mismatch", "qn", qn ? qn : "");
             return -1;
         }
         seeded++;
     }
-    sqlite3_finalize(stmt);
-    if (step_rc != SQLITE_DONE) {
+    cbm_sql_finalize(stmt);
+    if (step_rc != CBM_SQL_DONE) {
         return -1;
     }
     cbm_gbuf_set_next_id(gbuf, max_id + 1);
@@ -307,12 +318,12 @@ int64_t cbm_delta_preseed(cbm_store_t *store, const char *project, cbm_gbuf_t *g
 
 /* Patch visitor state: inserts everything above the id watermark. */
 typedef struct {
-    sqlite3 *db;
+    cbm_sql_t *db;
     const char *project;
     int64_t max_db_id;
-    sqlite3_stmt *node_stmt;
-    sqlite3_stmt *edge_stmt;
-    sqlite3_stmt *qn_lookup;
+    cbm_sql_stmt_t *node_stmt;
+    cbm_sql_stmt_t *edge_stmt;
+    cbm_sql_stmt_t *qn_lookup;
     /* gbuf id -> real database id for any fresh node whose qualified
      * name turns out to already exist on disk: a resolver referenced
      * a symbol the narrowed proxy set did not pre-load, so it upserted
@@ -335,6 +346,13 @@ typedef struct {
 
 static void delta_remap_put(delta_patch_ctx_t *ctx, int64_t from, int64_t to) {
     if (ctx->remap_count >= ctx->remap_cap) {
+        /* Doubling an int overflows before the cast can widen it, so bound it
+         * first and fail the same way this function already does when the
+         * allocation fails. */
+        if (ctx->remap_cap > INT_MAX / 2) {
+            ctx->failed = true;
+            return;
+        }
         int ncap = ctx->remap_cap ? ctx->remap_cap * 2 : 256;
         void *grown = realloc(ctx->remap, (size_t)ncap * sizeof(*ctx->remap));
         if (!grown) {
@@ -375,49 +393,45 @@ static void delta_patch_node(const cbm_gbuf_node_t *node, void *userdata) {
         return;
     }
     if (node->qualified_name) {
-        sqlite3_reset(ctx->qn_lookup);
-        sqlite3_bind_text(ctx->qn_lookup, 1, ctx->project, CBM_NOT_FOUND, SQLITE_TRANSIENT);
-        sqlite3_bind_text(ctx->qn_lookup, 2, node->qualified_name, CBM_NOT_FOUND, SQLITE_TRANSIENT);
-        if (sqlite3_step(ctx->qn_lookup) == SQLITE_ROW) {
+        cbm_sql_reset(ctx->qn_lookup);
+        cbm_sql_bind_text(ctx->qn_lookup, 1, ctx->project);
+        cbm_sql_bind_text(ctx->qn_lookup, 2, node->qualified_name);
+        if (cbm_sql_step(ctx->qn_lookup) == CBM_SQL_ROW) {
             /* Already on disk: an unchanged file's symbol. A node from a
              * CHANGED file cannot appear here -- the purge removed it --
              * so repaired files still receive fresh rows. */
             delta_remap_put(ctx, cbm_node_id_value(node->id),
-                            sqlite3_column_int64(ctx->qn_lookup, 0));
+                            cbm_sql_column_int64(ctx->qn_lookup, 0));
             ctx->remapped++;
             return;
         }
     }
-    sqlite3_reset(ctx->node_stmt);
-    sqlite3_bind_int64(ctx->node_stmt, 1, cbm_node_id_value(node->id));
-    sqlite3_bind_text(ctx->node_stmt, 2, ctx->project, CBM_NOT_FOUND, SQLITE_TRANSIENT);
-    sqlite3_bind_text(ctx->node_stmt, 3, node->label, CBM_NOT_FOUND, SQLITE_TRANSIENT);
-    sqlite3_bind_text(ctx->node_stmt, 4, node->name, CBM_NOT_FOUND, SQLITE_TRANSIENT);
-    sqlite3_bind_text(ctx->node_stmt, 5, node->qualified_name, CBM_NOT_FOUND, SQLITE_TRANSIENT);
-    sqlite3_bind_text(ctx->node_stmt, 6, node->file_path ? node->file_path : "", CBM_NOT_FOUND,
-                      SQLITE_TRANSIENT);
-    sqlite3_bind_int(ctx->node_stmt, 7, node->start_line);
-    sqlite3_bind_int(ctx->node_stmt, 8, node->end_line);
-    sqlite3_bind_text(ctx->node_stmt, 9, node->properties_json ? node->properties_json : "{}",
-                      CBM_NOT_FOUND, SQLITE_TRANSIENT);
-    if (sqlite3_step(ctx->node_stmt) != SQLITE_DONE) {
+    cbm_sql_reset(ctx->node_stmt);
+    cbm_sql_bind_int64(ctx->node_stmt, 1, cbm_node_id_value(node->id));
+    cbm_sql_bind_text(ctx->node_stmt, 2, ctx->project);
+    cbm_sql_bind_text(ctx->node_stmt, 3, node->label);
+    cbm_sql_bind_text(ctx->node_stmt, 4, node->name);
+    cbm_sql_bind_text(ctx->node_stmt, 5, node->qualified_name);
+    cbm_sql_bind_text(ctx->node_stmt, 6, node->file_path);
+    cbm_sql_bind_int(ctx->node_stmt, 7, node->start_line);
+    cbm_sql_bind_int(ctx->node_stmt, 8, node->end_line);
+    cbm_sql_bind_text(ctx->node_stmt, 9, node->properties_json);
+    if (cbm_sql_step(ctx->node_stmt) != CBM_SQL_DONE) {
         ctx->failed = true;
         char id_buf[32];
         snprintf(id_buf, sizeof(id_buf), "%lld", (long long)cbm_node_id_value(node->id));
-        cbm_log_error("delta.patch_node_failed", "qn",
-                      node->qualified_name ? node->qualified_name : "", "err",
-                      sqlite3_errmsg(ctx->db));
+        cbm_log_error("delta.patch_node_failed", "qn", node->qualified_name, "err",
+                      cbm_sql_errmsg(ctx->db));
         cbm_log_error("delta.patch_node_id", "id", id_buf);
-        sqlite3_stmt *who = NULL;
-        if (sqlite3_prepare_v2(ctx->db, "SELECT label, qualified_name FROM nodes WHERE id = ?1",
-                               CBM_NOT_FOUND, &who, NULL) == SQLITE_OK) {
-            sqlite3_bind_int64(who, 1, cbm_node_id_value(node->id));
-            if (sqlite3_step(who) == SQLITE_ROW) {
-                cbm_log_error("delta.patch_id_owner", "label",
-                              (const char *)sqlite3_column_text(who, 0), "qn",
-                              (const char *)sqlite3_column_text(who, 1));
+        cbm_sql_stmt_t *who = NULL;
+        if (cbm_sql_prepare(ctx->db, "SELECT label, qualified_name FROM nodes WHERE id = ?1",
+                            &who)) {
+            cbm_sql_bind_int64(who, 1, cbm_node_id_value(node->id));
+            if (cbm_sql_step(who) == CBM_SQL_ROW) {
+                cbm_log_error("delta.patch_id_owner", "label", cbm_sql_column_text(who, 0), "qn",
+                              cbm_sql_column_text(who, 1));
             }
-            sqlite3_finalize(who);
+            cbm_sql_finalize(who);
         }
         return;
     }
@@ -438,21 +452,21 @@ static void delta_patch_edge(const cbm_gbuf_edge_t *edge, void *userdata) {
     char *props_json = cbm_gbuf_edge_props_json_alloc(edge);
     if (!props_json) {
         ctx->failed = true;
-        cbm_log_error("delta.patch_edge_props_alloc_failed", "type", edge->type ? edge->type : "");
+        cbm_log_error("delta.patch_edge_props_alloc_failed", "type", edge->type);
         return;
     }
 
-    sqlite3_reset(ctx->edge_stmt);
-    sqlite3_bind_text(ctx->edge_stmt, 1, ctx->project, CBM_NOT_FOUND, SQLITE_TRANSIENT);
-    sqlite3_bind_int64(ctx->edge_stmt, 2, src);
-    sqlite3_bind_int64(ctx->edge_stmt, 3, tgt);
-    sqlite3_bind_text(ctx->edge_stmt, 4, edge->type, CBM_NOT_FOUND, SQLITE_TRANSIENT);
-    sqlite3_bind_text(ctx->edge_stmt, 5, props_json, CBM_NOT_FOUND, SQLITE_TRANSIENT);
-    int step_rc = sqlite3_step(ctx->edge_stmt);
+    cbm_sql_reset(ctx->edge_stmt);
+    cbm_sql_bind_text(ctx->edge_stmt, 1, ctx->project);
+    cbm_sql_bind_int64(ctx->edge_stmt, 2, src);
+    cbm_sql_bind_int64(ctx->edge_stmt, 3, tgt);
+    cbm_sql_bind_text(ctx->edge_stmt, 4, edge->type);
+    cbm_sql_bind_text(ctx->edge_stmt, 5, props_json);
+    cbm_sql_step_t step_rc = cbm_sql_step(ctx->edge_stmt);
     free(props_json);
-    if (step_rc != SQLITE_DONE) {
+    if (step_rc != CBM_SQL_DONE) {
         ctx->failed = true;
-        cbm_log_error("delta.patch_edge_failed", "type", edge->type ? edge->type : "");
+        cbm_log_error("delta.patch_edge_failed", "type", edge->type);
         return;
     }
     ctx->edges++;
@@ -460,7 +474,7 @@ static void delta_patch_edge(const cbm_gbuf_edge_t *edge, void *userdata) {
 
 int cbm_delta_patch(cbm_store_t *store, const char *project, cbm_gbuf_t *gbuf, int64_t max_db_id,
                     const cbm_delta_saved_edge_t *snapshot, int snapshot_count) {
-    sqlite3 *db = cbm_store_get_db(store);
+    cbm_sql_t *db = cbm_store_sql(store);
     if (!db) {
         return CBM_NOT_FOUND;
     }
@@ -468,25 +482,25 @@ int cbm_delta_patch(cbm_store_t *store, const char *project, cbm_gbuf_t *gbuf, i
         return CBM_NOT_FOUND;
     }
     delta_patch_ctx_t ctx = {.db = db, .project = project, .max_db_id = max_db_id};
-    if (sqlite3_prepare_v2(db,
-                           "SELECT id FROM nodes WHERE project = ?1"
-                           " AND qualified_name = ?2",
-                           CBM_NOT_FOUND, &ctx.qn_lookup, NULL) != SQLITE_OK) {
+    if (!cbm_sql_prepare(db,
+                         "SELECT id FROM nodes WHERE project = ?1"
+                         " AND qualified_name = ?2",
+                         &ctx.qn_lookup)) {
         cbm_store_rollback(store);
         return CBM_NOT_FOUND;
     }
-    if (sqlite3_prepare_v2(db,
-                           "INSERT INTO nodes (id, project, label, name, qualified_name,"
-                           " file_path, start_line, end_line, properties)"
-                           " VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
-                           CBM_NOT_FOUND, &ctx.node_stmt, NULL) != SQLITE_OK ||
-        sqlite3_prepare_v2(db,
-                           "INSERT OR IGNORE INTO edges (project, source_id, target_id, type,"
-                           " properties) VALUES (?1,?2,?3,?4,?5)",
-                           CBM_NOT_FOUND, &ctx.edge_stmt, NULL) != SQLITE_OK) {
-        sqlite3_finalize(ctx.node_stmt);
-        sqlite3_finalize(ctx.edge_stmt);
-        sqlite3_finalize(ctx.qn_lookup);
+    if (!cbm_sql_prepare(db,
+                         "INSERT INTO nodes (id, project, label, name, qualified_name,"
+                         " file_path, start_line, end_line, properties)"
+                         " VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                         &ctx.node_stmt) ||
+        !cbm_sql_prepare(db,
+                         "INSERT OR IGNORE INTO edges (project, source_id, target_id, type,"
+                         " properties) VALUES (?1,?2,?3,?4,?5)",
+                         &ctx.edge_stmt)) {
+        cbm_sql_finalize(ctx.node_stmt);
+        cbm_sql_finalize(ctx.edge_stmt);
+        cbm_sql_finalize(ctx.qn_lookup);
         free(ctx.remap);
         cbm_store_rollback(store);
         return CBM_NOT_FOUND;
@@ -495,57 +509,55 @@ int cbm_delta_patch(cbm_store_t *store, const char *project, cbm_gbuf_t *gbuf, i
     if (!ctx.failed) {
         cbm_gbuf_foreach_edge(gbuf, delta_patch_edge, &ctx);
     }
-    sqlite3_finalize(ctx.node_stmt);
-    sqlite3_finalize(ctx.edge_stmt);
-    sqlite3_finalize(ctx.qn_lookup);
+    cbm_sql_finalize(ctx.node_stmt);
+    cbm_sql_finalize(ctx.edge_stmt);
+    cbm_sql_finalize(ctx.qn_lookup);
 
     /* Re-link the snapshotted inbound edges by qualified name. A target
      * whose QN no longer exists simply matches no row — full-reindex
      * semantics for deleted symbols, dedup by the UNIQUE edge constraint. */
     if (!ctx.failed && snapshot_count > 0) {
-        sqlite3_stmt *relink = NULL;
-        if (sqlite3_prepare_v2(db,
-                               "INSERT OR IGNORE INTO edges (project, source_id, target_id,"
-                               " type, properties)"
-                               " SELECT ?1, s.id, t.id, ?2, ?3 FROM nodes s, nodes t"
-                               " WHERE s.project = ?1 AND s.qualified_name = ?4"
-                               " AND t.project = ?1 AND t.qualified_name = ?5",
-                               CBM_NOT_FOUND, &relink, NULL) != SQLITE_OK) {
+        cbm_sql_stmt_t *relink = NULL;
+        if (!cbm_sql_prepare(db,
+                             "INSERT OR IGNORE INTO edges (project, source_id, target_id,"
+                             " type, properties)"
+                             " SELECT ?1, s.id, t.id, ?2, ?3 FROM nodes s, nodes t"
+                             " WHERE s.project = ?1 AND s.qualified_name = ?4"
+                             " AND t.project = ?1 AND t.qualified_name = ?5",
+                             &relink)) {
             ctx.failed = true;
         } else {
             for (int i = 0; i < snapshot_count && !ctx.failed; i++) {
-                sqlite3_reset(relink);
-                sqlite3_bind_text(relink, 1, project, CBM_NOT_FOUND, SQLITE_TRANSIENT);
-                sqlite3_bind_text(relink, 2, snapshot[i].type, CBM_NOT_FOUND, SQLITE_TRANSIENT);
-                sqlite3_bind_text(relink, 3, snapshot[i].props, CBM_NOT_FOUND, SQLITE_TRANSIENT);
-                sqlite3_bind_text(relink, 4, snapshot[i].source_qn, CBM_NOT_FOUND,
-                                  SQLITE_TRANSIENT);
-                sqlite3_bind_text(relink, 5, snapshot[i].target_qn, CBM_NOT_FOUND,
-                                  SQLITE_TRANSIENT);
-                if (sqlite3_step(relink) != SQLITE_DONE) {
+                cbm_sql_reset(relink);
+                cbm_sql_bind_text(relink, 1, project);
+                cbm_sql_bind_text(relink, 2, snapshot[i].type);
+                cbm_sql_bind_text(relink, 3, snapshot[i].props);
+                cbm_sql_bind_text(relink, 4, snapshot[i].source_qn);
+                cbm_sql_bind_text(relink, 5, snapshot[i].target_qn);
+                if (cbm_sql_step(relink) != CBM_SQL_DONE) {
                     ctx.failed = true;
                 }
             }
-            sqlite3_finalize(relink);
+            cbm_sql_finalize(relink);
         }
     }
 
     /* Row-level FTS for exactly the new nodes, through the same tokenizer
      * function the wholesale rebuild uses. */
     if (!ctx.failed) {
-        sqlite3_stmt *fts = NULL;
-        if (sqlite3_prepare_v2(db,
-                               "INSERT INTO nodes_fts (rowid, name, qualified_name, label,"
-                               " file_path)"
-                               " SELECT id, cbm_camel_split(name), qualified_name, label,"
-                               " file_path FROM nodes WHERE project = ?1 AND id > ?2",
-                               CBM_NOT_FOUND, &fts, NULL) == SQLITE_OK) {
-            sqlite3_bind_text(fts, 1, project, CBM_NOT_FOUND, SQLITE_TRANSIENT);
-            sqlite3_bind_int64(fts, 2, max_db_id);
-            if (sqlite3_step(fts) != SQLITE_DONE) {
+        cbm_sql_stmt_t *fts = NULL;
+        if (cbm_sql_prepare(db,
+                            "INSERT INTO nodes_fts (rowid, name, qualified_name, label,"
+                            " file_path)"
+                            " SELECT id, cbm_camel_split(name), qualified_name, label,"
+                            " file_path FROM nodes WHERE project = ?1 AND id > ?2",
+                            &fts)) {
+            cbm_sql_bind_text(fts, 1, project);
+            cbm_sql_bind_int64(fts, 2, max_db_id);
+            if (cbm_sql_step(fts) != CBM_SQL_DONE) {
                 ctx.failed = true;
             }
-            sqlite3_finalize(fts);
+            cbm_sql_finalize(fts);
         } else {
             /* FTS5 may be compiled out; the table then never existed and
              * search runs without it — matching the dump path's behavior. */

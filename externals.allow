@@ -20,7 +20,6 @@ cbm -> grammars
 cbm -> lz4
 cbm -> mimalloc
 cbm -> simplecpp
-cbm -> sqlite3
 cbm -> tree-sitter
 cbm -> ts_runtime
 cbm -> yyjson
@@ -31,13 +30,10 @@ discover -> yyjson
 foundation -> mimalloc
 foundation -> tre
 foundation -> verstable
-graph_buffer -> sqlite3
 graph_buffer -> yyjson
 host -> yyjson
 main -> yyjson
-mcp -> sqlite3
 mcp -> yyjson
-pipeline -> sqlite3
 pipeline -> xxhash
 pipeline -> yyjson
 semantic -> tree-sitter
@@ -47,5 +43,4 @@ simhash -> xxhash
 store -> sqlite3
 store -> xxhash
 ui -> libgit2
-ui -> sqlite3
 ui -> yyjson

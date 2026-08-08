@@ -37,7 +37,9 @@ struct cbm_yaml_node {
     /* Children (for map and list nodes) */
     cbm_yaml_node_t **children;
     int child_count;
-    int child_cap;
+    /* size_t so the doubling in node_add_child is defined unsigned arithmetic;
+     * child_count stays int, it indexes the children in int-typed loops. */
+    size_t child_cap;
 };
 
 /* ── Node lifecycle ───────────────────────────────────────────── */
@@ -54,10 +56,10 @@ static bool node_add_child(cbm_yaml_node_t *parent, cbm_yaml_node_t *child) {
     if (!parent || !child) {
         return false;
     }
-    if (parent->child_count >= parent->child_cap) {
-        int new_cap =
+    if ((size_t)parent->child_count >= parent->child_cap) {
+        size_t new_cap =
             parent->child_cap < YAML_INIT_CAP ? YAML_INIT_CAP : parent->child_cap * PAIR_LEN;
-        cbm_yaml_node_t **new_arr = realloc(parent->children, (size_t)new_cap * sizeof(*new_arr));
+        cbm_yaml_node_t **new_arr = realloc(parent->children, new_cap * sizeof(*new_arr));
         if (!new_arr) {
             return false;
         }
