@@ -28,6 +28,17 @@ jobs:
       - name: Architecture policy (module + third-party include graph)
         run: python3 scripts/check-layering.py
 
+      # NULL may mean "there is no object here". It may never be a value that
+      # something acts on without checking. A NULL in a slot that gets called
+      # is a jump to address 0 — that is how the sqlite allocator bind killed
+      # the daemon with no diagnostic at all. Enforced at zero, no allow-list.
+      # The self-test runs first: a detector that cannot catch its own
+      # motivating bug would report a clean tree forever.
+      - name: NULL discipline
+        run: |
+          python3 scripts/check-null-discipline.py --self-test
+          python3 scripts/check-null-discipline.py
+
       - name: Install build deps
         run: sudo apt-get update && sudo apt-get install -y zlib1g-dev cmake
 

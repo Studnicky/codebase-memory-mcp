@@ -1,0 +1,53 @@
+# complexity.allow — cyclomatic-complexity allow-list for scripts/check-complexity.py
+#
+# This file captures the functions the LIVE graph reports over complexity 60
+# (see scripts/check-complexity.py --report), so the complexity gate lands
+# green against the tree as it exists today. Generated code is excluded from
+# the population outright (tools/tree-sitter parsers, generated/ trees) — a
+# gate counting those measures a code generator, not this codebase.
+#
+# The list is an EXACT snapshot, not a ceiling. The gate fails both ways: a
+# function over threshold with no line here is a new violation, and a line
+# here whose function is gone or back under threshold is a permission that
+# outlived the debt it excused. So once a function is brought back under 60,
+# deleting its line is mandatory — and that deletion is what makes crossing
+# 60 again forbidden from then on.
+#
+# Format: <file_path>:<function_name>  # <complexity at time of entry>
+# file_path is project-relative; function_name is the bare symbol (the
+# qualified_name's project/module prefix is machine-specific and does not
+# belong in a committed allow-list).
+#
+# Regenerate the body (never hand-edit the entry list) with:
+#     scripts/check-complexity.py --report
+
+internal/cbm/lsp/c_lsp.c:c_eval_expr_type_inner              # 247
+internal/cbm/lsp/rust_lsp.c:rust_eval_expr_type               # 172
+internal/cbm/lsp/c_lsp.c:c_resolve_calls_in_node_inner         # 172
+internal/cbm/lsp/py_lsp.c:py_eval_expr_type_uncached           # 148
+internal/cbm/lsp/c_lsp.c:c_process_statement                   # 143
+internal/cbm/lsp/go_lsp.c:go_eval_expr_type                    # 122
+internal/cbm/extract_defs.c:cbm_resolve_func_name               # 112
+internal/cbm/lsp/rust_lsp.c:cbm_rust_build_local_registry       # 106
+internal/cbm/extract_defs.c:extract_class_def                   # 96
+src/mcp/mcp.c:handle_get_architecture                            # 90
+internal/cbm/lsp/kotlin_lsp.c:kt_repair_bodyless_interface_methods # 89
+internal/cbm/lsp/go_lsp.c:resolve_calls_in_node_inner            # 85
+internal/cbm/extract_imports.c:cbm_extract_imports               # 83
+internal/cbm/lsp/php_lsp.c:php_eval_expr_type                    # 79
+internal/cbm/lsp/kotlin_lsp.c:kotlin_eval_expr_type              # 79
+internal/cbm/lsp/ts_lsp.c:parse_ts_type_text                     # 77
+internal/cbm/lsp/php_lsp.c:process_class_for_fields              # 74
+internal/cbm/lsp/rust_lsp.c:rust_resolve_call_expression_inner   # 72
+internal/cbm/lsp/go_lsp.c:cbm_run_go_lsp                         # 72
+internal/cbm/lsp/ts_lsp.c:process_node                           # 70
+internal/cbm/lsp/c_lsp.c:c_parse_type_node                       # 68
+internal/cbm/lsp/py_lsp.c:py_process_statement                   # 66
+internal/cbm/lsp/php_lsp.c:apply_phpdoc_class_tags               # 65
+internal/cbm/lsp/rust_lsp.c:rust_resolve_calls_in_node           # 65
+internal/cbm/lsp/ts_lsp.c:ts_eval_expr_type                      # 65
+internal/cbm/cbm.c:cbm_extract_file_ex                           # 62
+internal/cbm/extract_defs.c:extract_base_classes                 # 62
+src/pipeline/pipeline_incremental.c:run_closure_delta             # 61
+internal/cbm/lsp/cs_lsp.c:cs_eval_expr_type                      # 61
+internal/cbm/extract_calls.c:extract_callee_lang_specific         # 61

@@ -71,6 +71,34 @@ bash "$ROOT/scripts/check-no-test-skips.sh"
 echo "=== architecture policy (module + third-party include graph) ==="
 python3 "$ROOT/scripts/check-layering.py"
 
+# NULL may mean "no object here". It may never be a value something acts on
+# without checking — a NULL in a slot that gets called is a jump to address 0,
+# which is how the sqlite allocator bind killed the daemon with no diagnostic.
+# The callable-slot rule is enforced at zero with no allow-list; decoded-null
+# sites are reported so the trend is visible without gating on a number that
+# includes correct code.
+echo "=== NULL discipline ==="
+python3 "$ROOT/scripts/check-null-discipline.py" --self-test
+python3 "$ROOT/scripts/check-null-discipline.py"
+
+# Complexity ratchet over pass_complexity.c's own numbers, checked against
+# complexity.allow. Unlike the gates above this one is not static analysis —
+# it queries the graph the product itself builds, using the binary under
+# test, so it needs both a build and a current index of THIS repo. lint.sh
+# has no build step of its own (`make lint`/`lint-ci` don't depend on the
+# cbm binary), so this runs only when a binary is already sitting at
+# build/c/codebase-memory-mcp; CI enforces it unconditionally in pr.yml's
+# pr-smoke job, right after that job builds the binary.
+CBM_BIN="$ROOT/build/c/codebase-memory-mcp"
+[ -x "$CBM_BIN" ] || CBM_BIN="$ROOT/build/c/codebase-memory-mcp.exe"
+if [ -x "$CBM_BIN" ]; then
+    echo "=== complexity ratchet (live graph vs. complexity.allow) ==="
+    "$CBM_BIN" cli index_repository --repo-path "$ROOT" --mode full
+    python3 "$ROOT/scripts/check-complexity.py" --binary "$CBM_BIN"
+else
+    echo "=== complexity ratchet: SKIPPED (no build/c/codebase-memory-mcp — run scripts/build.sh first) ==="
+fi
+
 if $CI_ONLY; then
     echo "=== CI mode: cppcheck + clang-format ==="
     make -j2 -f Makefile.cbm lint-ci "${MAKE_ARGS[@]+"${MAKE_ARGS[@]}"}"

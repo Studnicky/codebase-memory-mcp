@@ -127,6 +127,22 @@ jobs:
           CCACHE_DIR: ${{ github.workspace }}/.ccache
           CCACHE_MAXSIZE: 1000M
 
+      # Complexity ratchet over pass_complexity.c's own numbers (complexity,
+      # cognitive, loop_count, loop_depth, transitive_loop_depth, recursive),
+      # checked against complexity.allow. It queries the graph the product
+      # itself builds, using the binary under test — not a reimplementation
+      # of complexity measurement — so it needs a built binary and a current
+      # index of THIS repo. _lint.yml has no build step, and this is the
+      # only Ubuntu leg (of the three-OS pr-smoke matrix) that already builds
+      # build/c/codebase-memory-mcp, so it runs right here, once, right after
+      # the build that produced the binary it queries.
+      - name: Complexity ratchet (live graph vs. complexity.allow)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          BIN="$(pwd)/build/c/codebase-memory-mcp"
+          "$BIN" cli index_repository --repo-path "$(pwd)" --mode full
+          python3 scripts/check-complexity.py --binary "$BIN"
+
       - name: Build prod + smoke (macOS)
         if: matrix.os == 'macos-14'
         run: |

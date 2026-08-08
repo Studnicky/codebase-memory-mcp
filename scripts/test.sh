@@ -233,6 +233,11 @@ bash "$ROOT/tests/test_venue_parity_contract.sh"
 echo "=== Step 0k: spawn console-window contract (#1427) ==="
 bash "$ROOT/tests/test_spawn_no_window_contract.sh"
 
+# Skips itself when no built binary and index are present — it gates the graph
+# the product builds of this repo, so a fresh checkout has nothing to measure.
+echo "=== Step 0l: complexity ratchet contract ==="
+bash "$ROOT/tests/test_complexity_gate_contract.sh"
+
 # Verify compiler supports target arch
 verify_compiler "$CC"
 
