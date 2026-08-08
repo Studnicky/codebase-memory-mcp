@@ -75,9 +75,15 @@ def yaml_run_blocks(text: str) -> list[str]:
 
 binary = "codebase-memory-mcp.exe"
 payload = "codebase-memory-mcp.payload.exe"
-windows_archive_names = (binary, "LICENSE", "install.ps1", "THIRD_PARTY_NOTICES.md")
+# cbm-integrations.json: the integration templates the binary verifies by its
+# embedded SHA-256 before installing anything. install.ps1 runs `install` from
+# the extract dir, so the file must sit NEXT TO the .exe or every install
+# fails closed with "integration assets missing or modified".
+windows_archive_names = (
+    binary, "cbm-integrations.json", "LICENSE", "install.ps1", "THIRD_PARTY_NOTICES.md",
+)
 
-# ── 1. The archive is exactly four files, defined in ONE place ───────────────
+# ── 1. The archive is exactly five files, defined in ONE place ───────────────
 # Every venue (release build, local artifact-flow smoke) produces archives
 # through scripts/package-release.sh, so the layout is asserted where it is
 # defined and cannot fork per venue.
