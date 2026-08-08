@@ -749,8 +749,19 @@ update_windows_block = (
 require(
     update_start >= 0
     and "install.ps1" in update_windows_block
-    and "powershell -ExecutionPolicy Bypass -File" in update_windows_block,
+    and "powershell -File" in update_windows_block,
     "cbm_cmd_update must print the install.ps1 command on Windows",
+)
+# The printed command must NOT carry an execution-policy override. That is a
+# canonical malicious-loader pattern, and emitting it as a string literal put
+# the signature inside every Windows artifact we ship — to save the user one
+# documented step. The hand-off above is the property this contract cares
+# about; the bypass flag was only ever the literal form it happened to take.
+# Unblock-File covers the common case and the README covers the rest.
+require(
+    "ExecutionPolicy" not in update_windows_block,
+    "cbm_cmd_update must not print an execution-policy override "
+    "(document it instead of shipping the pattern in the binary)",
 )
 require(
     "cbm_windows_launcher" not in cli_source

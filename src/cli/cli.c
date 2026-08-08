@@ -5277,6 +5277,53 @@ static bool cbm_install_subagent_reminder_script(const char *home, const char *b
     return cbm_write_owned_hook_script_with_legacy(script_path, script, legacy, 1U);
 }
 
+/* #1387 dry-run predicate: would writing this hook script succeed, or would
+ * the owned-document migration refuse it because the file on disk is not ours?
+ * Read-only — it must never touch the filesystem, since a dry run promises
+ * exactly that. An unreadable/unsafe state counts as "would not succeed": the
+ * preview should warn rather than promise. */
+static bool cbm_hook_script_write_would_succeed(const char *home, const char *binary_path,
+                                                const char *script_name) {
+    if (!home || !binary_path || !script_name) {
+        return false;
+    }
+    char config_dir[CLI_BUF_1K];
+    cbm_claude_config_dir(home, config_dir, sizeof(config_dir));
+    if (!config_dir[0]) {
+        return false;
+    }
+    char script_path[CLI_BUF_1K];
+    int written =
+        snprintf(script_path, sizeof(script_path), "%s/hooks/%s", config_dir, script_name);
+    if (written <= 0 || (size_t)written >= sizeof(script_path)) {
+        return false;
+    }
+    const char *prefix = cmm_gate_script_prefix;
+    if (strcmp(script_name, CMM_SESSION_REMINDER_SCRIPT) == 0) {
+        prefix = cmm_session_script_prefix;
+    } else if (strcmp(script_name, CMM_SUBAGENT_REMINDER_SCRIPT) == 0) {
+        prefix = cmm_subagent_script_prefix;
+    }
+    char script[CLI_BUF_8K];
+    if (cbm_build_current_hook_script(prefix, binary_path, script, sizeof(script)) != CLI_OK) {
+        return false;
+    }
+    /* Released shapes are accepted by the real write, so they must be accepted
+     * here too or the preview would warn about a script that upgrades fine. */
+    char released[CLI_BUF_8K];
+    const char *candidates[2];
+    size_t candidate_count = 0U;
+    if (strcmp(script_name, CMM_HOOK_GATE_SCRIPT) == 0 &&
+        cbm_build_released_gate_script(binary_path, released, sizeof(released)) == CLI_OK) {
+        candidates[candidate_count++] = released;
+    } else if (strcmp(script_name, CMM_SESSION_REMINDER_SCRIPT) == 0) {
+        candidates[candidate_count++] = cmm_released_session_script;
+    } else if (strcmp(script_name, CMM_SUBAGENT_REMINDER_SCRIPT) == 0) {
+        candidates[candidate_count++] = cmm_released_subagent_script;
+    }
+    return cbm_text_owned_document_status(script_path, script, candidates, candidate_count) == 0;
+}
+
 int cbm_upsert_claude_subagent_hooks(const char *settings_path) {
     char command[CLI_BUF_8K];
     char previous_command[CLI_BUF_8K];
@@ -7030,6 +7077,18 @@ static void install_claude_code_config(const char *home, const char *binary_path
     bool gate_ok = dry_run;
     bool session_ok = dry_run;
     bool subagent_ok = dry_run;
+    if (dry_run) {
+        /* #1387 (second half): the dry run claimed EVERY hook group as
+         * installable because these flags were simply `true`. When the on-disk
+         * script is not ours the real install refuses to rewrite it, so the
+         * preview promised what the run could not deliver and the reporter had
+         * no way to see the loss coming. Predict each refusal read-only. */
+        gate_ok = cbm_hook_script_write_would_succeed(home, binary_path, CMM_HOOK_GATE_SCRIPT);
+        session_ok =
+            cbm_hook_script_write_would_succeed(home, binary_path, CMM_SESSION_REMINDER_SCRIPT);
+        subagent_ok =
+            cbm_hook_script_write_would_succeed(home, binary_path, CMM_SUBAGENT_REMINDER_SCRIPT);
+    }
     if (!dry_run) {
         char hook_path[CLI_BUF_1K];
         gate_ok = cbm_install_hook_gate_script(home, binary_path);
@@ -7075,6 +7134,22 @@ static void install_claude_code_config(const char *home, const char *binary_path
     }
     if (subagent_ok) {
         printf("  hooks: SubagentStart (MCP usage reminder for subagents)\n");
+    }
+    if (dry_run) {
+        /* Name every script the real run would refuse. Silence is what made
+         * #1387 invisible in advance: the group simply went unmentioned, which
+         * reads as "nothing to do" rather than "this will be skipped". */
+        static const char *const preview_scripts[] = {
+            CMM_HOOK_GATE_SCRIPT, CMM_SESSION_REMINDER_SCRIPT, CMM_SUBAGENT_REMINDER_SCRIPT};
+        const bool preview_ok[] = {gate_ok, session_ok, subagent_ok};
+        for (size_t i = 0U; i < sizeof(preview_scripts) / sizeof(preview_scripts[0]); i++) {
+            if (!preview_ok[i]) {
+                printf("  hooks: %s/hooks/%s would be skipped — the file there is not ours "
+                       "(modified, or written by another install), so the rewrite is refused "
+                       "and existing hook entries are left untouched\n",
+                       config_dir, preview_scripts[i]);
+            }
+        }
     }
 
     /* Migration nudge: when CLAUDE_CONFIG_DIR is set and a legacy ~/.claude tree
@@ -11278,18 +11353,29 @@ int cbm_cmd_update(int argc, char **argv) {
         }
         printf("codebase-memory-mcp update (current: %s)\n\n", CBM_VERSION);
 #ifdef _WIN32
+        /* The printed command deliberately carries NO execution-policy override.
+         * A policy-bypass invocation is one of the most heavily weighted
+         * malicious-script patterns there is, and emitting it as a literal put
+         * that signature inside every Windows artifact we distribute — to save
+         * the user one documented step. Pointing at Unblock-File reaches the
+         * same outcome and leaves the policy decision with them. README's
+         * Windows install section carries the override for the
+         * restricted-policy case: documentation is the right place to hand out
+         * that incantation, a shipped binary is not. */
         printf("The update runs from install.ps1, not from this process. Close any\n"
                "running sessions, then run\n\n");
         if (have_dir) {
-            printf("  powershell -ExecutionPolicy Bypass -File \"%s\\install.ps1\"\n\n", self_dir);
+            printf("  powershell -File \"%s\\install.ps1\"\n\n", self_dir);
         } else {
-            printf("  powershell -ExecutionPolicy Bypass -File install.ps1\n"
+            printf("  powershell -File install.ps1\n"
                    "  (ships in the release archive, and is placed beside the\n"
                    "  binary on install)\n\n");
         }
         printf("It downloads the latest release, verifies its checksum, and replaces\n"
-               "this binary in place. If PowerShell refuses to run the script because\n"
-               "it came from the internet, Unblock-File it first.\n");
+               "this binary in place. If PowerShell refuses to run the script, it is\n"
+               "usually because the file arrived from the internet: run\n"
+               "'Unblock-File install.ps1' first. If your execution policy still\n"
+               "blocks it, the README's Windows install section lists the options.\n");
 #else
         printf("The update runs from install.sh, not from this process. Run\n\n");
         if (have_dir) {
