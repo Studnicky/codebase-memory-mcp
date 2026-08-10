@@ -78,7 +78,7 @@ typedef struct KotlinLSPContext {
     CBMArena *arena;
     const char *source;
     int source_len;
-    const CBMTypeRegistry *registry;
+    CBMTypeRegistry *registry;
     CBMScope *current_scope;
 
     /* Package context. Empty string for default package. */
@@ -151,7 +151,7 @@ typedef struct KotlinLSPContext {
 
 /* Initialize a KotlinLSPContext for processing one file. */
 void kotlin_lsp_init(KotlinLSPContext *ctx, CBMArena *arena, const char *source, int source_len,
-                     const CBMTypeRegistry *registry, const char *package_qn, const char *module_qn,
+                     CBMTypeRegistry *registry, const char *package_qn, const char *module_qn,
                      const char *project_name, const char *rel_path, CBMResolvedCallArray *out);
 
 /* Add an import mapping. local_name is the name used in code (alias or

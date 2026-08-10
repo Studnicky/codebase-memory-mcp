@@ -12,6 +12,7 @@
 
 #include "../type_rep.h"
 #include "../type_registry.h"
+#include "../py_lsp.h"
 #include <string.h>
 
 #define CBM_PYTHON_STDLIB_GENERATED 1

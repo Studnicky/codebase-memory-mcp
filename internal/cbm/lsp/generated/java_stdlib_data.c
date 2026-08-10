@@ -98,7 +98,6 @@ void cbm_java_stdlib_register(CBMTypeRegistry *reg, CBMArena *arena) {
     static const char *parents_exception[] = {"java.lang.Throwable", NULL};
     static const char *parents_error[] = {"java.lang.Throwable", NULL};
     static const char *parents_runtime_exc[] = {"java.lang.Exception", NULL};
-    static const char *parents_io_exc[] = {"java.lang.Exception", NULL};
     static const char *parents_number[] = {"java.lang.Object", NULL};
     static const char *parents_integer[] = {"java.lang.Number", NULL};
     static const char *parents_long[] = {"java.lang.Number", NULL};

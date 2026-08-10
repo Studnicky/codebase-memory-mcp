@@ -298,17 +298,37 @@ TEST(index_parse_partial_reported) {
     }
     rh_to_fwd_slashes(lp.tmpdir);
 
-    /* Both #ifdef branches open `guarded(...) {` sharing ONE close brace —
-     * brace-unbalanced for a preprocessor-blind parse → ERROR region. */
-    ri_write_text(lp.tmpdir, "split.c",
-                  "void ok_before(void) { }\n"
-                  "#ifdef FEATURE_A\n"
-                  "static int guarded(int x) {\n"
+    /* Two preprocessor-split loops promote the C tree root to ERROR while the
+     * trailing function remains recoverable. The coverage record must describe
+     * the inner failures, not the full file. */
+    ri_write_text(lp.tmpdir, "root_error.c",
+                  "int first(int force) {\n"
+                  "    for (int i = 0; i < 1; i++) {\n"
+                  "        int value;\n"
+                  "#ifndef X\n"
+                  "        if (value) {\n"
                   "#else\n"
-                  "static int guarded_alt(int x) {\n"
+                  "        if (!value) {\n"
                   "#endif\n"
-                  "    return x + 1;\n"
-                  "}\n");
+                  "            continue;\n"
+                  "        }\n"
+                  "    }\n"
+                  "    return force;\n"
+                  "}\n"
+                  "int second(int force) {\n"
+                  "    for (int i = 0; i < 1; i++) {\n"
+                  "        int value;\n"
+                  "#ifndef X\n"
+                  "        if (value) {\n"
+                  "#else\n"
+                  "        if (!value) {\n"
+                  "#endif\n"
+                  "            continue;\n"
+                  "        }\n"
+                  "    }\n"
+                  "    return force;\n"
+                  "}\n"
+                  "int recovered(void) { return 1; }\n");
     ri_write_text(lp.tmpdir, "good.py", "def alpha():\n    return 1\n");
 
     char logpath[700];
@@ -344,20 +364,21 @@ TEST(index_parse_partial_reported) {
     ASSERT_NOT_NULL(pp);
     yyjson_val *files = yyjson_obj_get(pp, "files");
     ASSERT_NOT_NULL(files);
-    int found_split = 0;
+    int found_root_error = 0;
     size_t idx = 0;
     size_t fmax = 0;
     yyjson_val *fe = NULL;
     yyjson_arr_foreach(files, idx, fmax, fe) {
         const char *fp = yyjson_get_str(yyjson_obj_get(fe, "path"));
         const char *ranges = yyjson_get_str(yyjson_obj_get(fe, "error_ranges"));
-        if (fp && strstr(fp, "split.c")) {
-            found_split = 1;
+        if (fp && strstr(fp, "root_error.c")) {
+            found_root_error = 1;
             ASSERT_NOT_NULL(ranges);
             ASSERT_GT((int)strlen(ranges), 0);
+            ASSERT_NULL(strstr(ranges, "1-27"));
         }
     }
-    ASSERT_TRUE(found_split);
+    ASSERT_TRUE(found_root_error);
     const char *note = yyjson_get_str(yyjson_obj_get(pp, "note"));
     ASSERT_NOT_NULL(note);
     /* Lean-note contract: best-effort framing + pointer to the full record. */
@@ -370,7 +391,7 @@ TEST(index_parse_partial_reported) {
     char *logtext = ri_slurp(logfile);
     ASSERT_NOT_NULL(logtext);
     ASSERT_NOT_NULL(strstr(logtext, "parse_partial"));
-    ASSERT_NOT_NULL(strstr(logtext, "split.c"));
+    ASSERT_NOT_NULL(strstr(logtext, "root_error.c"));
     free(logtext);
 
     /* The signal is persisted in the SEPARATE index_coverage table (never
@@ -381,7 +402,7 @@ TEST(index_parse_partial_reported) {
     ASSERT_EQ(cbm_store_coverage_get(store, lp.project, &rows, &cov_count), CBM_STORE_OK);
     int marked = 0;
     for (int i = 0; i < cov_count; i++) {
-        if (rows[i].rel_path && strstr(rows[i].rel_path, "split.c")) {
+        if (rows[i].rel_path && strstr(rows[i].rel_path, "root_error.c")) {
             ASSERT_NOT_NULL(rows[i].kind);
             ASSERT_STR_EQ("parse_partial", rows[i].kind);
             ASSERT_NOT_NULL(rows[i].detail);
@@ -396,14 +417,14 @@ TEST(index_parse_partial_reported) {
     snprintf(qargs, sizeof(qargs), "{\"project\":\"%s\"}", lp.project);
     char *qresp = cbm_mcp_handle_tool(lp.srv, "index_status", qargs);
     ASSERT_NOT_NULL(qresp);
-    ASSERT_NOT_NULL(strstr(qresp, "split.c"));
+    ASSERT_NOT_NULL(strstr(qresp, "root_error.c"));
     ASSERT_NOT_NULL(strstr(qresp, "parse_partial"));
     free(qresp);
 
     /* get_code_snippet on a symbol from the flagged file carries the
      * correlated coverage note (the result names its file, so the warning is
      * precisely anchored); the note never fires for clean files. */
-    snprintf(qargs, sizeof(qargs), "{\"project\":\"%s\",\"qualified_name\":\"ok_before\"}",
+    snprintf(qargs, sizeof(qargs), "{\"project\":\"%s\",\"qualified_name\":\"recovered\"}",
              lp.project);
     char *sresp = cbm_mcp_handle_tool(lp.srv, "get_code_snippet", qargs);
     ASSERT_NOT_NULL(sresp);
@@ -426,7 +447,7 @@ TEST(index_parse_partial_reported) {
              lp.project);
     char *gresp = cbm_mcp_handle_tool(lp.srv, "query_graph", qargs);
     ASSERT_NOT_NULL(gresp);
-    ASSERT_NOT_NULL(strstr(gresp, "split.c"));
+    ASSERT_NOT_NULL(strstr(gresp, "root_error.c"));
     free(gresp);
     snprintf(qargs, sizeof(qargs),
              "{\"project\":\"%s\",\"query\":\"MATCH (f:File) WHERE f.kind = "
@@ -434,7 +455,7 @@ TEST(index_parse_partial_reported) {
              lp.project);
     char *cresp = cbm_mcp_handle_tool(lp.srv, "query_graph", qargs);
     ASSERT_NOT_NULL(cresp);
-    ASSERT_NULL(strstr(cresp, "split.c")); /* code graph: no coverage rows */
+    ASSERT_NULL(strstr(cresp, "root_error.c")); /* code graph: no coverage rows */
     free(cresp);
 
     /* Clean neighbors still extract. */

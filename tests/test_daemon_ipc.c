@@ -2717,6 +2717,12 @@ static bool ipc_test_fd_read_all(int fd, void *buffer, size_t length) {
         if (received < 0 && errno == EINTR) {
             continue;
         }
+        const char *reason = received == 0 ? "eof" : "error";
+        int read_errno = received < 0 ? errno : 0;
+        fprintf(stderr,
+                "daemon IPC child report read failed: reason=%s result=%zd errno=%d offset=%zu "
+                "length=%zu\n",
+                reason, received, read_errno, offset, length);
         return false;
     }
     return true;
@@ -2957,6 +2963,7 @@ TEST(daemon_ipc_posix_lifetime_reservation_rejects_fork_inheritance) {
     pid_t child = -1;
     uint8_t child_result = 0;
     int child_status = -1;
+    bool received = false;
     int acquired = -1;
     int held_after_child = -1;
     bool parent_transfer_consumed = false;
@@ -2978,8 +2985,6 @@ TEST(daemon_ipc_posix_lifetime_reservation_rejects_fork_inheritance) {
         cbm_daemon_ipc_listener_t *unexpected =
             cbm_daemon_ipc_listen_reserved(endpoint, &inherited);
         child_result = unexpected == NULL && inherited == reservation ? 1 : 0;
-        cbm_daemon_ipc_listener_close(unexpected);
-        cbm_daemon_ipc_lifetime_reservation_release(inherited);
         bool reported = ipc_test_fd_write_all(result_pipe[1], &child_result, sizeof(child_result));
         (void)close(result_pipe[1]);
         _exit(reported && child_result == 1 ? 0 : 1);
@@ -2987,13 +2992,24 @@ TEST(daemon_ipc_posix_lifetime_reservation_rejects_fork_inheritance) {
     if (child > 0) {
         (void)close(result_pipe[1]);
         result_pipe[1] = -1;
-        bool received = ipc_test_fd_read_all(result_pipe[0], &child_result, sizeof(child_result));
+        received = ipc_test_fd_read_all(result_pipe[0], &child_result, sizeof(child_result));
         (void)close(result_pipe[0]);
         result_pipe[0] = -1;
         if (!received) {
             child_result = 0;
         }
         while (waitpid(child, &child_status, 0) < 0 && errno == EINTR) {}
+        if (!received || !WIFEXITED(child_status) || WEXITSTATUS(child_status) != 0 ||
+            child_result != 1) {
+            fprintf(stderr,
+                    "daemon IPC child report diagnostic: received=%d child_result=%u status=%d "
+                    "exited=%d exit_code=%d signaled=%d signal=%d\n",
+                    received, (unsigned int)child_result, child_status,
+                    WIFEXITED(child_status) ? 1 : 0,
+                    WIFEXITED(child_status) ? WEXITSTATUS(child_status) : -1,
+                    WIFSIGNALED(child_status) ? 1 : 0,
+                    WIFSIGNALED(child_status) ? WTERMSIG(child_status) : -1);
+        }
     }
     if (child_result == 1 && WIFEXITED(child_status) && WEXITSTATUS(child_status) == 0) {
         held_after_child = cbm_daemon_ipc_lifetime_reservation_probe(endpoint);
@@ -3015,6 +3031,7 @@ TEST(daemon_ipc_posix_lifetime_reservation_rejects_fork_inheritance) {
 
     ASSERT_EQ(acquired, 1);
     ASSERT_GT(child, 0);
+    ASSERT_TRUE(received);
     ASSERT_EQ(child_result, 1);
     ASSERT_TRUE(WIFEXITED(child_status));
     ASSERT_EQ(WEXITSTATUS(child_status), 0);

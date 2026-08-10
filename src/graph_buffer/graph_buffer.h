@@ -99,7 +99,7 @@ static inline bool cbm_edge_id_valid(cbm_edge_id_t id) {
 typedef struct {
     cbm_node_id_t id;           /* temp ID (sequential from 1) */
     const char *label;          /* pool-owned (interned); freed once by the pool, not here */
-    char *name;                 /* heap-owned */
+    char *name;                 /* heap-owned, NULL when the source omits a name */
     char *qualified_name;       /* heap-owned */
     const char *file_path;      /* pool-owned (interned); freed once by the pool, not here */
     int start_line;
@@ -163,7 +163,8 @@ int cbm_gbuf_merge(cbm_gbuf_t *dst, cbm_gbuf_t *src);
 /* ── Node operations ─────────────────────────────────────────────── */
 
 /* Upsert a node by qualified name. Returns the temp ID.
- * All string fields are copied (buffer owns the copies).
+ * All string fields are copied (buffer owns the copies). A NULL name remains
+ * absent; NULL properties normalize to "{}".
  * Returns 0 on error. */
 cbm_node_id_t cbm_gbuf_upsert_node(cbm_gbuf_t *gb, const char *label, const char *name,
                                    const char *qualified_name, const char *file_path,
@@ -180,7 +181,8 @@ const cbm_gbuf_node_t *cbm_gbuf_find_by_id(const cbm_gbuf_t *gb, cbm_node_id_t i
 int cbm_gbuf_find_by_label(const cbm_gbuf_t *gb, const char *label, const cbm_gbuf_node_t ***out,
                            int *count);
 
-/* Find nodes by name (exact). Sets *out and *count. Caller does NOT free. */
+/* Find named nodes by exact name. Unnamed nodes have no name-index entry, so
+ * NULL is invalid. Sets *out and *count; caller does NOT free. */
 int cbm_gbuf_find_by_name(const cbm_gbuf_t *gb, const char *name, const cbm_gbuf_node_t ***out,
                           int *count);
 

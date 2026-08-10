@@ -2457,6 +2457,12 @@ cbm_daemon_ipc_listener_t *cbm_daemon_ipc_listen_reserved(
     cbm_daemon_ipc_lifetime_reservation_t **reservation_io) {
     cbm_daemon_ipc_lifetime_reservation_t *lifetime_reservation =
         reservation_io ? *reservation_io : NULL;
+    /* A reservation copied through fork belongs to the parent process. Reject
+     * it before touching runtime state or the logger so this path remains
+     * safe for a child that reports and exits immediately. */
+    if (!lifetime_reservation || lifetime_reservation->owner_pid != getpid()) {
+        return NULL;
+    }
     if (!lifetime_reservation_matches_endpoint(endpoint, lifetime_reservation)) {
         cbm_log_error("daemon.ipc.listen_failed", "stage", "reservation_validation");
         return NULL;

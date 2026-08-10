@@ -82,9 +82,7 @@ static void register_local_func_or_type_from_file(JavaLSPContext *ctx, CBMTypeRe
 static const char *strip_generics(CBMArena *a, const char *type_text);
 static const char *unwrap_array_text(CBMArena *a, const char *type_text, int *out_array_dim);
 static char *java_node_text(JavaLSPContext *ctx, TSNode node);
-static bool is_node_kind(TSNode node, const char *kind);
 static TSNode child_by_kind(TSNode parent, const char *kind);
-static const CBMType *box_primitive(CBMArena *a, const char *prim);
 static int count_call_args(TSNode call_node);
 static const CBMType *propagate_template(CBMArena *a, const char *recv_qn, const char *method_name,
                                          const CBMType *const *recv_targs, int recv_targ_count,
@@ -194,12 +192,6 @@ static char *java_node_text(JavaLSPContext *ctx, TSNode node) {
     return cbm_node_text(ctx->arena, node, ctx->source);
 }
 
-static bool is_node_kind(TSNode node, const char *kind) {
-    if (ts_node_is_null(node))
-        return false;
-    return strcmp(ts_node_type(node), kind) == 0;
-}
-
 static TSNode child_by_kind(TSNode parent, const char *kind) {
     if (ts_node_is_null(parent))
         return parent;
@@ -250,24 +242,6 @@ static const char *unwrap_array_text(CBMArena *a, const char *type_text, int *ou
     if (dim == 0)
         return type_text;
     return cbm_arena_strndup(a, type_text, n);
-}
-
-/* Map primitive name → boxed wrapper QN. */
-static const CBMType *box_primitive(CBMArena *a, const char *prim) {
-    if (!prim)
-        return cbm_type_unknown();
-    static const char *map[][2] = {
-        {"boolean", "java.lang.Boolean"}, {"byte", "java.lang.Byte"},
-        {"char", "java.lang.Character"},  {"short", "java.lang.Short"},
-        {"int", "java.lang.Integer"},     {"long", "java.lang.Long"},
-        {"float", "java.lang.Float"},     {"double", "java.lang.Double"},
-        {"void", "java.lang.Void"},
-    };
-    for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i++) {
-        if (strcmp(prim, map[i][0]) == 0)
-            return cbm_type_named(a, map[i][1]);
-    }
-    return cbm_type_unknown();
 }
 
 /* ── Initialization ───────────────────────────────────────────────── */
@@ -346,8 +320,6 @@ static void pop_enclosing_class(JavaLSPContext *ctx) {
 }
 
 /* ── Type-AST → CBMType ───────────────────────────────────────────── */
-
-static const CBMType *parse_type_arguments(JavaLSPContext *ctx, TSNode targs_node);
 
 const CBMType *java_parse_type_node(JavaLSPContext *ctx, TSNode node) {
     if (ts_node_is_null(node))
@@ -462,16 +434,6 @@ const CBMType *java_parse_type_node(JavaLSPContext *ctx, TSNode node) {
     if (!txt)
         return cbm_type_unknown();
     return cbm_type_named(ctx->arena, txt);
-}
-
-static const CBMType *parse_type_arguments(JavaLSPContext *ctx, TSNode targs_node) {
-    if (ts_node_is_null(targs_node))
-        return NULL;
-    if (strcmp(ts_node_type(targs_node), "type_arguments") != 0)
-        return NULL;
-    if (ts_node_named_child_count(targs_node) == 0)
-        return NULL;
-    return java_parse_type_node(ctx, ts_node_named_child(targs_node, 0));
 }
 
 /* ── Type-name resolution (JLS §6.5) ──────────────────────────────── */
@@ -1861,7 +1823,7 @@ static void java_emit_unresolved_kind(JavaLSPContext *ctx, const char *expr_text
     rc.caller_qn = ctx->enclosing_method_qn;
     rc.callee_qn = expr_text ? expr_text : "?";
     rc.strategy = "lsp_unresolved";
-    rc.confidence = 0.0f;
+    rc.confidence = 0.0;
     rc.reason = reason;
     rc.kind = kind;
     cbm_resolvedcall_push(ctx->resolved_calls, ctx->arena, rc);
@@ -1974,12 +1936,12 @@ static bool java_emit_interface_resolution(JavaLSPContext *ctx, const char *ifac
         const CBMRegisteredFunc *cf = cbm_registry_lookup_method(ctx->registry, sole_impl, mname);
         const char *target =
             cf ? cf->qualified_name : cbm_arena_sprintf(ctx->arena, "%s.%s", sole_impl, mname);
-        java_emit_resolved(ctx, target, "lsp_interface_resolve", 0.85f);
+        java_emit_resolved(ctx, target, "lsp_interface_resolve", 0.85);
         return true;
     }
     if (impl_count >= 2) {
         java_emit_resolved(ctx, cbm_arena_sprintf(ctx->arena, "%s.%s", iface_qn, mname),
-                           "lsp_interface_dispatch", 0.80f);
+                           "lsp_interface_dispatch", 0.80);
         return true;
     }
     return false; /* impl_count == 0: caller falls back to type_dispatch. */
@@ -2005,7 +1967,7 @@ static void resolve_method_call(JavaLSPContext *ctx, TSNode call) {
                 if (f->receiver_type && strcmp(f->receiver_type, ctx->enclosing_class_qn) != 0) {
                     strategy = "lsp_inherited_dispatch";
                 }
-                java_emit_resolved(ctx, f->qualified_name, strategy, 0.95f);
+                java_emit_resolved(ctx, f->qualified_name, strategy, 0.95);
                 return;
             }
         }
@@ -2017,7 +1979,7 @@ static void resolve_method_call(JavaLSPContext *ctx, TSNode call) {
                 continue;
             const CBMRegisteredFunc *f = java_lookup_method(ctx, outer, mname, arity);
             if (f) {
-                java_emit_resolved(ctx, f->qualified_name, "lsp_outer_dispatch", 0.92f);
+                java_emit_resolved(ctx, f->qualified_name, "lsp_outer_dispatch", 0.92);
                 return;
             }
         }
@@ -2056,12 +2018,12 @@ static void resolve_method_call(JavaLSPContext *ctx, TSNode call) {
                 }
             }
             if (f) {
-                java_emit_resolved(ctx, f->qualified_name, "lsp_static_import", 0.92f);
+                java_emit_resolved(ctx, f->qualified_name, "lsp_static_import", 0.92);
                 return;
             }
             /* Couldn't find the method — emit the qualified path anyway so
              * the registry-name resolver can pick it up. */
-            java_emit_resolved(ctx, target, "lsp_static_import_text", 0.80f);
+            java_emit_resolved(ctx, target, "lsp_static_import_text", 0.80);
             return;
         }
         /* Fall back to default: emit unresolved. */
@@ -2075,7 +2037,7 @@ static void resolve_method_call(JavaLSPContext *ctx, TSNode call) {
             ctx->enclosing_super_qn ? ctx->enclosing_super_qn : "java.lang.Object";
         const CBMRegisteredFunc *f = java_lookup_method(ctx, super_qn, mname, arity);
         if (f) {
-            java_emit_resolved(ctx, f->qualified_name, "lsp_super_dispatch", 0.95f);
+            java_emit_resolved(ctx, f->qualified_name, "lsp_super_dispatch", 0.95);
             return;
         }
         java_emit_unresolved(ctx, mname, "super_no_match");
@@ -2088,7 +2050,7 @@ static void resolve_method_call(JavaLSPContext *ctx, TSNode call) {
             const CBMRegisteredFunc *f =
                 java_lookup_method(ctx, ctx->enclosing_class_qn, mname, arity);
             if (f) {
-                java_emit_resolved(ctx, f->qualified_name, "lsp_this_dispatch", 0.95f);
+                java_emit_resolved(ctx, f->qualified_name, "lsp_this_dispatch", 0.95);
                 return;
             }
         }
@@ -2104,7 +2066,7 @@ static void resolve_method_call(JavaLSPContext *ctx, TSNode call) {
             if (cls_qn) {
                 const CBMRegisteredFunc *f = java_lookup_method(ctx, cls_qn, mname, arity);
                 if (f) {
-                    java_emit_resolved(ctx, f->qualified_name, "lsp_static_call", 0.95f);
+                    java_emit_resolved(ctx, f->qualified_name, "lsp_static_call", 0.95);
                     return;
                 }
             }
@@ -2136,7 +2098,7 @@ static void resolve_method_call(JavaLSPContext *ctx, TSNode call) {
             if (f->receiver_type && strcmp(f->receiver_type, recv_qn) != 0) {
                 strategy = "lsp_inherited_dispatch";
             }
-            java_emit_resolved(ctx, f->qualified_name, strategy, 0.95f);
+            java_emit_resolved(ctx, f->qualified_name, strategy, 0.95);
             return;
         }
         /* Interface dispatch with no directly-registered method: resolve to a
@@ -2147,7 +2109,7 @@ static void resolve_method_call(JavaLSPContext *ctx, TSNode call) {
                 return;
             }
             java_emit_resolved(ctx, cbm_arena_sprintf(ctx->arena, "%s.%s", recv_qn, mname),
-                               "lsp_interface_dispatch", 0.80f);
+                               "lsp_interface_dispatch", 0.80);
             return;
         }
         java_emit_unresolved(ctx, cbm_arena_sprintf(ctx->arena, "%s.%s", recv_qn, mname),
@@ -2759,7 +2721,7 @@ static void resolve_method_reference(JavaLSPContext *ctx, TSNode mref,
          * as a callable target; if the constructor is absent/unmaterialized,
          * the usage pass will retain the type occurrence as ordinary USAGE. */
         if (cf && cf->qualified_name) {
-            java_emit_resolved_reference_at(ctx, cf->qualified_name, "lsp_method_ref_ctor", 0.90f,
+            java_emit_resolved_reference_at(ctx, cf->qualified_name, "lsp_method_ref_ctor", 0.90,
                                             name_node);
         } else {
             java_emit_unresolved_reference_at(
@@ -2783,7 +2745,7 @@ static void resolve_method_reference(JavaLSPContext *ctx, TSNode mref,
     if (!m)
         m = java_lookup_method(ctx, type_qn, mname, 0);
     if (m) {
-        java_emit_resolved_reference_at(ctx, m->qualified_name, "lsp_method_ref", 0.90f, name_node);
+        java_emit_resolved_reference_at(ctx, m->qualified_name, "lsp_method_ref", 0.90, name_node);
     } else {
         java_emit_unresolved_reference_at(ctx,
                                           cbm_arena_sprintf(ctx->arena, "%s.%s", type_qn, mname),
@@ -2964,7 +2926,7 @@ static void java_resolve_calls_in_node_inner(JavaLSPContext *ctx, TSNode node) {
                 if (!cf)
                     cf = cbm_registry_lookup_method(ctx->registry, qn, short_name);
                 if (cf) {
-                    java_emit_resolved(ctx, cf->qualified_name, "lsp_constructor", 0.95f);
+                    java_emit_resolved(ctx, cf->qualified_name, "lsp_constructor", 0.95);
                 } else {
                     /* No explicit constructor in the registry, so there is no
                      * `Class.Class` ctor node to point at. Resolve the `new Foo()`
@@ -2972,7 +2934,7 @@ static void java_resolve_calls_in_node_inner(JavaLSPContext *ctx, TSNode node) {
                      * equals the textual callee_name ("Foo"), so the pipeline
                      * join matches, and the class node always exists, so a CALLS
                      * edge forms carrying the strategy. */
-                    java_emit_resolved(ctx, qn, "lsp_constructor_synth", 0.85f);
+                    java_emit_resolved(ctx, qn, "lsp_constructor_synth", 0.85);
                 }
             }
         }

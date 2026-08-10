@@ -1,154 +1,264 @@
 #!/usr/bin/env python3
-"""NULL-discipline gate. Zero tolerance — no allow-list, no baseline.
+"""NULL-discipline gate.
 
-NULL is allowed to mean exactly one thing: "there is no object here." A malloc
-that failed, a lookup that found nothing. That is unavoidable in C and is not
-what this gate is about.
+NULL means that no object exists.  This gate rejects NULL callback slots and
+ratchets decoded-string guards through a reviewed, per-occurrence inventory.
+The inventory is intentionally permissive about removals: eliminating a guard
+after establishing its producer contract is progress.  It rejects only new,
+unclassified guards, where a reviewer would otherwise have no record of which
+NULL contract is being preserved.
 
-What this gate forbids is NULL used as a VALUE — a slot the program acts on
-without being able to tell that nothing is there. Two shapes, both of which have
-already cost this codebase real breakage:
-
-  callable-slot   A NULL where a function pointer is expected. Nothing checks
-                  it; it gets called. sqlite's xInit is exactly this: passing
-                  NULL to mean "nothing to initialise" jumps to address 0 and
-                  the process dies with no diagnostic. A no-op is a function
-                  that does nothing — not the absence of one.
-
-  decoded-null    A string-valued accessor that returns NULL, forcing every
-                  call site to write `x ? x : ""`. The sites that remember are
-                  fine; the ones that forget dereference NULL. The fix belongs
-                  in the accessor: return "", and publish an explicit predicate
-                  where the difference between "" and absent genuinely matters.
-
-Detection of callable-slot covers BOTH initializer forms. The designated form
-(`.xInit = NULL`) is the easy one; the positional form (`{f, g, NULL, NULL}`)
-is the one that actually bit, so struct layouts are parsed — including from
-vendored headers, which are excluded from violation scanning but are exactly
-where the foreign callback structs are declared.
-
-  --report     list current violations
-  --self-test  prove the detector catches a known-bad positional initializer
+  --report     show decoded-null records grouped by classification
+  --self-test  prove callable detection and the decoded-null ratchet
 """
 import argparse
+from collections import defaultdict
+from dataclasses import dataclass
+import hashlib
 import os
 import re
 import subprocess
 import sys
+import tempfile
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(SCRIPT_DIR)
+INVENTORY_PATH = os.path.join(SCRIPT_DIR, "null-discipline-decoded.inventory.tsv")
 
-# Scanned for violations.
 SCAN_ROOTS = ("src", "internal")
-# Scanned only for struct layouts. Foreign callback structs live here, and a
-# layout we cannot see is a violation we cannot detect.
 LAYOUT_ROOTS = ("src", "internal", "vendored")
+
+CLASSIFICATIONS = (
+    "allocation-failure",
+    "lookup-not-found",
+    "semantically-absent",
+    "display-log-boundary",
+    "wrongly-nullable-decoded-string",
+)
+FAMILIES = (
+    "cli-display",
+    "cypher-metadata",
+    "daemon-status",
+    "extractor-metadata",
+    "fqn-oom",
+    "graph-property-presence",
+    "json-display",
+    "lookup-default",
+    "lsp-ast-metadata",
+    "pipeline-metadata",
+    "runtime-metadata",
+    "sql-decoder",
+)
 
 FN_PTR_FIELD_RE = re.compile(r'\(\s*\*\s*([A-Za-z_]\w*)\s*\)\s*\(')
 STRUCT_BLOCK_RE = re.compile(
     r'(?:typedef\s+)?struct\s+(?:([A-Za-z_]\w*)\s*)?\{(.*?)\}\s*([A-Za-z_]\w*)?\s*;',
     re.DOTALL)
 DESIGNATED_NULL_RE = re.compile(r'\.\s*([A-Za-z_]\w*)\s*=\s*NULL\s*[,}]')
-DECODED_NULL_RE = re.compile(r'\b([A-Za-z_][\w\->\.]*)\s*\?\s*\1\s*:\s*"')
+DECODED_NULL_RE = re.compile(
+    r'\b(?P<expression>[A-Za-z_][\w\->\.]*)\s*\?\s*'
+    r'(?P=expression)\s*:\s*(?P<fallback>"(?:[^"\\]|\\.)*")')
+
+
+@dataclass(frozen=True)
+class Violation:
+    """One detected NULL use and its review identity, if decoded."""
+
+    path: str
+    line: int
+    kind: str
+    detail: str
+    identity: str = ""
+    expression: str = ""
+    fallback: str = ""
+
+
+@dataclass(frozen=True)
+class InventoryRecord:
+    """The reviewed semantic classification and producer/accessor family."""
+
+    classification: str
+    family: str
 
 
 def _find(roots, exts, drop_vendored):
-    pattern = " -o ".join(f"-name '*{e}'" for e in exts)
-    cmd = f"find {' '.join(roots)} \\( {pattern} \\)"
+    pattern = " -o ".join(f"-name '*{extension}'" for extension in exts)
+    command = f"find {' '.join(roots)} \\( {pattern} \\)"
     if drop_vendored:
-        cmd += " | grep -v vendored"
-    out = subprocess.run(["bash", "-c", cmd], cwd=PROJECT_DIR,
-                         capture_output=True, text=True).stdout.split()
-    return sorted(out)
+        command += " | grep -v vendored"
+    result = subprocess.run(
+        ["bash", "-c", command], cwd=PROJECT_DIR, check=False,
+        capture_output=True, text=True)
+    return sorted(result.stdout.split())
 
 
 def struct_layouts():
-    """Map each struct type name to the field positions that are function
-    pointers, plus the set of every function-pointer field name seen anywhere.
-
-    Both are needed: positions catch the positional initializer, names catch
-    the designated one.
-    """
+    """Return function-pointer field positions and names from visible layouts."""
     positions = {}
     names = set()
     for path in _find(LAYOUT_ROOTS, (".h", ".c"), drop_vendored=False):
         try:
-            with open(os.path.join(PROJECT_DIR, path), errors="replace") as fh:
-                text = fh.read()
+            with open(os.path.join(PROJECT_DIR, path), errors="replace") as source:
+                text = source.read()
         except OSError:
             continue
         for tag, body, alias in STRUCT_BLOCK_RE.findall(text):
-            fn_positions = set()
+            field_positions = set()
             for index, field in enumerate(
-                    [f for f in body.split(";") if f.strip()]):
-                m = FN_PTR_FIELD_RE.search(field)
-                if m:
-                    fn_positions.add(index)
-                    names.add(m.group(1))
-            if not fn_positions:
+                    field for field in body.split(";") if field.strip()):
+                match = FN_PTR_FIELD_RE.search(field)
+                if match:
+                    field_positions.add(index)
+                    names.add(match.group(1))
+            if not field_positions:
                 continue
             for key in (tag, alias):
                 if key:
-                    positions.setdefault(key, set()).update(fn_positions)
+                    positions.setdefault(key, set()).update(field_positions)
     return positions, names
 
 
 def _split_top_level(text):
     """Split an initializer body on commas that are not nested."""
     parts, depth, current = [], 0, ""
-    for ch in text:
-        if ch in "([{":
+    for character in text:
+        if character in "([{":
             depth += 1
-        elif ch in ")]}":
+        elif character in ")]}":
             depth -= 1
-        if ch == "," and depth == 0:
+        if character == "," and depth == 0:
             parts.append(current)
             current = ""
             continue
-        current += ch
+        current += character
     parts.append(current)
     return parts
 
 
+def _normalize_expression(expression):
+    return " ".join(expression.split())
+
+
+def _normalized_conditional(expression, fallback):
+    expression = _normalize_expression(expression)
+    return f"{expression} ? {expression} : {_normalize_expression(fallback)}"
+
+
+def _decoded_identity(path, expression, fallback, ordinal):
+    """Return a location-independent identity for the entire NULL conditional."""
+    digest = hashlib.sha256(
+        _normalized_conditional(expression, fallback).encode("utf-8")).hexdigest()
+    return f"{path}|{digest}|{ordinal}"
+
+
 def find_violations(positions, names):
+    """Detect callable NULLs and decoded-string guards in first-party code."""
     found = []
-    type_alt = "|".join(re.escape(t) for t in sorted(positions)) if positions else None
-    # Both spellings matter. `TYPE name = {...};` puts the type before the `=`;
-    # a compound literal `name = (TYPE){...};` puts it after, and that is the
-    # form the sqlite allocator bug was written in.
+    decoded_candidates = []
+    type_alt = "|".join(re.escape(name) for name in sorted(positions))
     init_res = ([
-        re.compile(r'\b(?:struct\s+)?(' + type_alt + r')\b[^;{=]*=\s*\{(.*?)\}\s*;', re.DOTALL),
-        re.compile(r'\(\s*(?:struct\s+)?(' + type_alt + r')\s*\)\s*\{(.*?)\}', re.DOTALL),
+        re.compile(
+            r'\b(?:struct\s+)?(' + type_alt + r')\b[^;{=]*=\s*\{(.*?)\}\s*;',
+            re.DOTALL),
+        re.compile(r'\(\s*(?:struct\s+)?(' + type_alt + r')\s*\)\s*\{(.*?)\}',
+                   re.DOTALL),
     ] if type_alt else [])
 
     for path in _find(SCAN_ROOTS, (".c", ".h"), drop_vendored=True):
-        with open(os.path.join(PROJECT_DIR, path), errors="replace") as fh:
-            text = fh.read()
+        with open(os.path.join(PROJECT_DIR, path), errors="replace") as source:
+            text = source.read()
         lines = text.split("\n")
 
-        for i, line in enumerate(lines, start=1):
-            stripped = line.lstrip()
-            if stripped.startswith(("*", "//", "/*")):
+        for line_number, line in enumerate(lines, start=1):
+            if line.lstrip().startswith(("*", "//", "/*")):
                 continue
-            m = DESIGNATED_NULL_RE.search(line)
-            if m and m.group(1) in names:
-                found.append((path, i, "callable-slot", m.group(1)))
-            for dm in DECODED_NULL_RE.finditer(line):
-                leaf = dm.group(1).split("->")[-1].split(".")[-1]
-                found.append((path, i, "decoded-null", leaf))
+            match = DESIGNATED_NULL_RE.search(line)
+            if match and match.group(1) in names:
+                found.append(Violation(path, line_number, "callable-slot", match.group(1)))
+            for decoded in DECODED_NULL_RE.finditer(line):
+                expression = _normalize_expression(decoded.group("expression"))
+                detail = expression.split("->")[-1].split(".")[-1]
+                decoded_candidates.append((
+                    path, line_number, detail, expression, decoded.group("fallback")))
 
         for init_re in init_res:
-            for m in init_re.finditer(text):
-                type_name, body = m.group(1), m.group(2)
+            for match in init_re.finditer(text):
+                type_name, body = match.group(1), match.group(2)
                 if "." in body:
-                    continue  # designated form, handled above
-                line_no = text[:m.start()].count("\n") + 1
+                    continue
+                line_number = text[:match.start()].count("\n") + 1
                 for index, part in enumerate(_split_top_level(body)):
                     if part.strip() == "NULL" and index in positions[type_name]:
-                        found.append((path, line_no, "callable-slot",
-                                      f"{type_name}[{index}]"))
-    return sorted(set(found))
+                        found.append(Violation(
+                            path, line_number, "callable-slot", f"{type_name}[{index}]"))
+
+    ordinals = defaultdict(int)
+    for path, line_number, detail, expression, fallback in decoded_candidates:
+        key = (path, _normalized_conditional(expression, fallback))
+        ordinals[key] += 1
+        found.append(Violation(
+            path, line_number, "decoded-null", detail,
+            _decoded_identity(path, expression, fallback, ordinals[key]), expression, fallback))
+    return sorted(found, key=lambda item: (item.path, item.line, item.kind, item.detail))
+
+
+def load_inventory(path=INVENTORY_PATH):
+    """Read reviewed decoded-null identities, classifications, and families."""
+    records = {}
+    try:
+        with open(path, encoding="utf-8") as inventory:
+            for line_number, line in enumerate(inventory, start=1):
+                text = line.rstrip("\n")
+                if not text or text.startswith("#"):
+                    continue
+                try:
+                    identity, classification, family = text.split("\t")
+                except ValueError as exc:
+                    raise ValueError(
+                        f"{path}:{line_number}: expected identity<TAB>classification<TAB>family") from exc
+                if classification not in CLASSIFICATIONS:
+                    raise ValueError(
+                        f"{path}:{line_number}: unknown classification {classification!r}")
+                if family not in FAMILIES:
+                    raise ValueError(f"{path}:{line_number}: unknown family {family!r}")
+                if identity in records:
+                    raise ValueError(f"{path}:{line_number}: duplicate identity {identity}")
+                records[identity] = InventoryRecord(classification, family)
+    except OSError as exc:
+        raise ValueError(f"cannot read decoded-null inventory {path}: {exc}") from exc
+    return records
+
+
+def ratchet_missing(decoded, inventory):
+    return [record for record in decoded if record.identity not in inventory]
+
+
+def decoded_report(decoded, inventory):
+    """Render decoded-null records by reviewed classification and source family."""
+    grouped = defaultdict(lambda: defaultdict(list))
+    for record in decoded:
+        review = inventory.get(record.identity)
+        classification = review.classification if review else "UNCLASSIFIED"
+        family = review.family if review else "UNCLASSIFIED"
+        grouped[classification][family].append(record)
+    lines = []
+    classifications = list(CLASSIFICATIONS)
+    if "UNCLASSIFIED" in grouped:
+        classifications.append("UNCLASSIFIED")
+    for classification in classifications:
+        families = grouped.get(classification, {})
+        lines.append(f"{classification} ({sum(len(records) for records in families.values())}):")
+        for family in sorted(families):
+            lines.append(f"  {family} ({len(families[family])}):")
+            for record in families[family]:
+                lines.append(
+                    f"    {record.path}:{record.line}\t{record.identity}\t"
+                    f"{record.expression} : {record.fallback}")
+    lines.append(
+        f"\n{len(decoded)} decoded-null site(s): " + ", ".join(
+            f"{classification}={sum(len(records) for records in grouped.get(classification, {}).values())}"
+            for classification in classifications))
+    return "\n".join(lines)
 
 
 SELF_TEST = '''
@@ -160,34 +270,56 @@ static probe_methods m = {probe_malloc, NULL};
 '''
 
 
+def _positional_callable_detected(text):
+    local_positions = {}
+    for tag, body, alias in STRUCT_BLOCK_RE.findall(text):
+        positions = {
+            index for index, field in enumerate(body.split(";"))
+            if field.strip() and FN_PTR_FIELD_RE.search(field)
+        }
+        for key in (tag, alias):
+            if key and positions:
+                local_positions.setdefault(key, set()).update(positions)
+    type_alt = "|".join(re.escape(name) for name in local_positions)
+    initializer = re.compile(
+        r'\b(?:struct\s+)?(' + type_alt + r')\b[^;{=]*=\s*\{(.*?)\}\s*;', re.DOTALL)
+    return any(
+        part.strip() == "NULL" and index in local_positions[match.group(1)]
+        for match in initializer.finditer(text)
+        for index, part in enumerate(_split_top_level(match.group(2))))
+
+
 def self_test():
-    """Prove the positional detector catches the shape that actually crashed."""
-    import tempfile
-    positions, names = struct_layouts()
-    with tempfile.TemporaryDirectory() as tmp:
-        path = os.path.join(tmp, "probe.c")
-        with open(path, "w") as fh:
-            fh.write(SELF_TEST)
-        text = open(path).read()
-        local_positions, local_names = {}, set()
-        for tag, body, alias in STRUCT_BLOCK_RE.findall(text):
-            fn = {i for i, f in enumerate([x for x in body.split(";") if x.strip()])
-                  if FN_PTR_FIELD_RE.search(f)}
-            for key in (tag, alias):
-                if key and fn:
-                    local_positions.setdefault(key, set()).update(fn)
-        hit = False
-        alt = "|".join(re.escape(t) for t in local_positions)
-        rx = re.compile(r'\b(?:struct\s+)?(' + alt + r')\b[^;{=]*=\s*\{(.*?)\}\s*;', re.DOTALL)
-        for m in rx.finditer(text):
-            for index, part in enumerate(_split_top_level(m.group(2))):
-                if part.strip() == "NULL" and index in local_positions[m.group(1)]:
-                    hit = True
-    if hit:
-        print("SELF-TEST OK: a positional NULL in a function-pointer slot is detected")
+    """Prove the detector and inventory ratchet reject only unreviewed data."""
+    positional = _positional_callable_detected(SELF_TEST)
+    probe = Violation(
+        "src/probe.c", 17, "decoded-null", "name",
+        _decoded_identity("src/probe.c", "node->name", '""', 1), "node->name", '""')
+    review = InventoryRecord("semantically-absent", "graph-property-presence")
+    matching_inventory = {probe.identity: review}
+    matching_passes = not ratchet_missing([probe], matching_inventory)
+    unclassified = ratchet_missing([probe], {})
+    removed_record_passes = not ratchet_missing(
+        [probe], {probe.identity: review,
+                  "removed|record|1": InventoryRecord("lookup-not-found", "lookup-default")})
+    fallback_changed = Violation(
+        "src/probe.c", 17, "decoded-null", "name",
+        _decoded_identity("src/probe.c", "node->name", '"(missing)"', 1),
+        "node->name", '"(missing)"')
+    fallback_change_is_unclassified = (
+        ratchet_missing([fallback_changed], matching_inventory) == [fallback_changed])
+    visible_report = decoded_report([probe], {})
+    report_visible = (probe.identity in visible_report
+                      and "UNCLASSIFIED" in visible_report
+                      and "graph-property-presence" in decoded_report([probe], matching_inventory))
+    unclassified_fails_with_identity = (
+        len(unclassified) == 1 and unclassified[0].identity == probe.identity)
+    if (positional and matching_passes and unclassified_fails_with_identity
+            and fallback_change_is_unclassified and removed_record_passes and report_visible):
+        print("SELF-TEST OK: positional callable, classified inventory, missing identity, "
+              "fallback identity, removed inventory, and family report are verified")
         return 0
-    print("SELF-TEST FAILED: the detector would miss a NULL callable slot.")
-    print("A gate that cannot catch its own motivating bug must not be trusted.")
+    print("SELF-TEST FAILED: NULL-discipline detection or ratchet contract regressed")
     return 1
 
 
@@ -205,51 +337,35 @@ def main():
     if not positions:
         print("MISSING: no struct layouts parsed — refusing to report a clean tree.")
         return 1
-
-    violations = find_violations(positions, names)
-
-    if args.report:
-        for path, line, kind, detail in violations:
-            print(f"{path}:{line}\t{kind}\t{detail}")
-        by_kind = {}
-        for _, _, kind, _ in violations:
-            by_kind[kind] = by_kind.get(kind, 0) + 1
-        print(f"\n{len(violations)} violation(s): " +
-              ", ".join(f"{k}={v}" for k, v in sorted(by_kind.items())))
-        return 0
-
-    callable = [v for v in violations if v[2] == "callable-slot"]
-    decoded = [v for v in violations if v[2] == "decoded-null"]
-
-    # callable-slot is enforced at zero, with no allow-list. There is no
-    # legitimate reason to put NULL in a slot that will be called: sqlite's
-    # xInit proved that the caller does not check, it just jumps.
-    if callable:
-        print(f"BLOCKED: {len(callable)} NULL in a slot that will be called. "
-              "This rule has no allow-list by design.")
-        for path, line, _, detail in callable:
-            print(f"  {path}:{line}  {detail}")
-        print("\nGive the slot a real no-op function. NULL is not one — it is an "
-              "address the callee will jump to.")
+    try:
+        inventory = load_inventory()
+    except ValueError as exc:
+        print(f"BLOCKED: {exc}")
         return 1
 
-    # decoded-null is reported, not enforced. Driving it to zero blindly is
-    # wrong: `properties_json ? properties_json : "{}"` is correct code, because
-    # "" is not a valid empty property set and the absence is real. The fix for
-    # the ones that ARE wrong is a proper sentinel established where the value
-    # is constructed, which then makes the guard dead rather than moved.
-    if decoded:
-        print(f"OK: no NULL in a callable slot. "
-              f"{len(decoded)} decoded-null site(s) remain (reported, not gated):")
-        shown = {}
-        for _, _, _, detail in decoded:
-            shown[detail] = shown.get(detail, 0) + 1
-        for detail, count in sorted(shown.items(), key=lambda kv: -kv[1])[:10]:
-            print(f"  {count:4d}  {detail}")
-        print("  run --report for the full list")
-        return 0
+    violations = find_violations(positions, names)
+    callable_slots = [item for item in violations if item.kind == "callable-slot"]
+    decoded = [item for item in violations if item.kind == "decoded-null"]
+    report = decoded_report(decoded, inventory)
+    print(report)
 
-    print("OK: no NULL used as a value")
+    if args.report:
+        return 0
+    if callable_slots:
+        print(f"\nBLOCKED: {len(callable_slots)} NULL callable slot(s).")
+        for record in callable_slots:
+            print(f"  {record.path}:{record.line}\t{record.detail}")
+        return 1
+
+    missing = ratchet_missing(decoded, inventory)
+    if missing:
+        print(f"\nBLOCKED: {len(missing)} decoded-null record(s) lack a reviewed classification:")
+        for record in missing:
+            print(f"  {record.identity}\t{record.path}:{record.line}\t"
+                  f"{record.expression} : {record.fallback}")
+        return 1
+
+    print("\nOK: no NULL callable slots; every decoded-null site is classified")
     return 0
 
 

@@ -30,7 +30,7 @@ typedef struct {
     int64_t id;
     const char *project;
     const char *label;          /* Function, Class, Method, Module, File, ... */
-    const char *name;           /* short name */
+    const char *name;           /* short name; NULL when the source omits one */
     const char *qualified_name; /* full dotted path */
     const char *file_path;      /* relative file path */
     int start_line;

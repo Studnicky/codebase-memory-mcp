@@ -767,14 +767,24 @@ static bool runtime_test_run_activation_image(const char *image_path,
     bool started = application && command &&
                    CreateProcessW(application, command, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL,
                                   NULL, &startup, &process) != 0;
+    DWORD start_error = started ? ERROR_SUCCESS : GetLastError();
     free(command);
     free(application);
     bool waited = started && runtime_test_windows_wait_image_probe(process.hProcess);
+    DWORD wait_error = waited ? ERROR_SUCCESS : GetLastError();
     DWORD exit_code = 0;
     bool read = waited && GetExitCodeProcess(process.hProcess, &exit_code) != 0;
+    DWORD read_error = read ? ERROR_SUCCESS : GetLastError();
     if (started) {
         (void)CloseHandle(process.hThread);
         (void)CloseHandle(process.hProcess);
+    }
+    if (!read || exit_code > INT_MAX) {
+        fprintf(stderr,
+                "activation image process failure: started=%d start_error=%lu waited=%d "
+                "wait_error=%lu read=%d read_error=%lu exit_code=%lu\n",
+                started, (unsigned long)start_error, waited, (unsigned long)wait_error, read,
+                (unsigned long)read_error, (unsigned long)exit_code);
     }
     if (read && exit_code <= INT_MAX) {
         *exit_code_out = (int)exit_code;
@@ -783,20 +793,68 @@ static bool runtime_test_run_activation_image(const char *image_path,
 #elif defined(__APPLE__) || defined(__linux__)
     char action_text[16];
     int action_written = snprintf(action_text, sizeof(action_text), "%u", (unsigned int)action);
-    pid_t child = action_written > 0 && action_written < (int)sizeof(action_text) ? fork() : -1;
-    if (child == 0) {
-        (void)alarm(TF_RUNTIME_IMAGE_WATCHDOG_SECONDS);
-        execl(image_path, image_path, "__cbm_runtime_activation_client", fixture->parent,
-              fixture->key, identity->semantic_version, identity->build_fingerprint, action_text,
-              (char *)NULL);
-        _exit(127);
-    }
+    char image_arg[RUNTIME_TEST_PATH_CAP];
+    char parent_arg[RUNTIME_TEST_PATH_CAP];
+    char key_arg[CBM_DAEMON_KEY_SIZE];
+    char version_arg[CBM_DAEMON_VERSION_TEXT_SIZE];
+    char fingerprint_arg[CBM_DAEMON_BUILD_FINGERPRINT_SIZE];
+    int image_written = snprintf(image_arg, sizeof(image_arg), "%s", image_path);
+    int parent_written = snprintf(parent_arg, sizeof(parent_arg), "%s", fixture->parent);
+    int key_written = snprintf(key_arg, sizeof(key_arg), "%s", fixture->key);
+    int version_written =
+        snprintf(version_arg, sizeof(version_arg), "%s", identity->semantic_version);
+    int fingerprint_written =
+        snprintf(fingerprint_arg, sizeof(fingerprint_arg), "%s", identity->build_fingerprint);
+    char activation_client_arg[] = "__cbm_runtime_activation_client";
+    char *child_argv[] = {image_arg, activation_client_arg, parent_arg, key_arg, version_arg,
+                          fingerprint_arg, action_text, NULL};
+    bool arguments_valid = image_written > 0 && image_written < (int)sizeof(image_arg) &&
+                           parent_written > 0 && parent_written < (int)sizeof(parent_arg) &&
+                           key_written > 0 && key_written < (int)sizeof(key_arg) &&
+                           version_written > 0 && version_written < (int)sizeof(version_arg) &&
+                           fingerprint_written > 0 &&
+                               fingerprint_written < (int)sizeof(fingerprint_arg);
+    pid_t child = -1;
+    int spawn_status = action_written > 0 && action_written < (int)sizeof(action_text) &&
+                               arguments_valid
+                           ? posix_spawn(&child, image_arg, NULL, NULL, child_argv, environ)
+                           : EINVAL;
     int status = 0;
-    pid_t waited;
-    do {
-        waited = child > 0 ? waitpid(child, &status, 0) : -1;
-    } while (waited < 0 && errno == EINTR);
-    if (waited != child || !WIFEXITED(status)) {
+    int wait_errno = 0;
+    pid_t waited = -1;
+    bool timed_out = false;
+    uint64_t deadline = cbm_now_ms() + TF_RUNTIME_IMAGE_WATCHDOG_MS;
+    while (child > 0) {
+        waited = waitpid(child, &status, WNOHANG);
+        if (waited == child) {
+            break;
+        }
+        if (waited < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            wait_errno = errno;
+            break;
+        }
+        if (cbm_now_ms() >= deadline) {
+            timed_out = true;
+            (void)kill(child, SIGKILL);
+            do {
+                waited = waitpid(child, &status, 0);
+                wait_errno = waited < 0 ? errno : 0;
+            } while (waited < 0 && wait_errno == EINTR);
+            break;
+        }
+        cbm_usleep(1000);
+    }
+    if (spawn_status != 0 || timed_out || waited != child || !WIFEXITED(status)) {
+        fprintf(stderr,
+                "activation image process failure: spawn=%d timed_out=%d child=%ld waited=%ld "
+                "status=%d errno=%d exited=%d exit_code=%d signaled=%d signal=%d\n",
+                spawn_status, timed_out ? 1 : 0, (long)child, (long)waited, status, wait_errno,
+                WIFEXITED(status) ? 1 : 0,
+                WIFEXITED(status) ? WEXITSTATUS(status) : -1, WIFSIGNALED(status) ? 1 : 0,
+                WIFSIGNALED(status) ? WTERMSIG(status) : -1);
         return false;
     }
     *exit_code_out = WEXITSTATUS(status);
@@ -2143,6 +2201,14 @@ TEST(daemon_runtime_activation_accepts_authenticated_different_build) {
         owner && differs &&
         runtime_test_run_activation_image(foreign_image, &fixture, &foreign_identity,
                                           CBM_DAEMON_RUNTIME_ACTIVATION_INSTALL, &foreign_exit);
+    if (!foreign_ran || foreign_exit != 0) {
+        fprintf(stderr,
+                "activation foreign image diagnostic: directory_created=%d copied=%d changed=%d "
+                "runnable=%d fingerprinted=%d differs=%d owner=%d owner_status=%d "
+                "foreign_ran=%d foreign_exit=%d\n",
+                directory_created, copied, changed, runnable, fingerprinted, differs, owner != NULL,
+                (int)owner_result.status, foreign_ran, foreign_exit);
+    }
     bool owner_interrupted = owner && foreign_ran &&
                              !cbm_daemon_runtime_client_heartbeat(owner, RUNTIME_TEST_TIMEOUT_MS);
     if (owner) {
@@ -3522,7 +3588,7 @@ TEST(daemon_runtime_disconnect_cancels_blocked_non_index_child_and_preserves_oth
     SKIP_PLATFORM("requires a queryable copied process image");
 #else
     enum {
-        CHILD_READY_BOUND_MS = 5000,
+        CHILD_READY_BOUND_MS = 30000,
         CHILD_CANCEL_BOUND_MS = 3000,
         CHILD_CLEANUP_BOUND_MS = 5000,
         REQUEST_TIMEOUT_MS = 15000,

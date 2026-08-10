@@ -1707,7 +1707,8 @@ static void scan_node(sqlite3_stmt *stmt, cbm_node_t *n) {
     n->id = sqlite3_column_int64(stmt, 0);
     n->project = heap_strdup((const char *)sqlite3_column_text(stmt, SKIP_ONE));
     n->label = heap_strdup((const char *)sqlite3_column_text(stmt, CBM_SZ_2));
-    n->name = heap_strdup((const char *)sqlite3_column_text(stmt, CBM_SZ_3));
+    const char *name = (const char *)sqlite3_column_text(stmt, CBM_SZ_3);
+    n->name = name && name[0] != '\0' ? heap_strdup(name) : NULL;
     n->qualified_name = heap_strdup((const char *)sqlite3_column_text(stmt, CBM_SZ_4));
     n->file_path = heap_strdup((const char *)sqlite3_column_text(stmt, CBM_SZ_5));
     n->start_line = sqlite3_column_int(stmt, CBM_SZ_6);

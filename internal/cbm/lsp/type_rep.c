@@ -10,6 +10,14 @@ enum { TR_MIN_PLAUSIBLE_PTR = 4096 };
 // Singleton UNKNOWN type (no allocation needed).
 static const CBMType unknown_singleton = {.kind = CBM_TYPE_UNKNOWN};
 
+static bool type_array_allocation_size(size_t element_count, size_t element_size,
+                                       size_t *allocation_size) {
+    if (element_count >= SIZE_MAX / element_size)
+        return false;
+    *allocation_size = (element_count + 1U) * element_size;
+    return true;
+}
+
 const CBMType *cbm_type_unknown(void) {
     return &unknown_singleton;
 }
@@ -76,38 +84,47 @@ const CBMType *cbm_type_func(CBMArena *a, const char **param_names, const CBMTyp
 
     // Copy all arrays into arena memory to avoid dangling stack pointers.
     if (return_types) {
-        int count = 0;
+        size_t count = 0;
         while (return_types[count])
             count++;
+        size_t allocation_size = 0;
+        if (!type_array_allocation_size(count, sizeof(const CBMType *), &allocation_size))
+            return &unknown_singleton;
         const CBMType **arr =
-            (const CBMType **)cbm_arena_alloc(a, (count + 1) * sizeof(const CBMType *));
+            (const CBMType **)cbm_arena_alloc(a, allocation_size);
         if (arr) {
-            for (int i = 0; i < count; i++)
+            for (size_t i = 0; i < count; i++)
                 arr[i] = return_types[i];
             arr[count] = NULL;
             t->data.func.return_types = arr;
         }
     }
     if (param_types) {
-        int count = 0;
+        size_t count = 0;
         while (param_types[count])
             count++;
+        size_t allocation_size = 0;
+        if (!type_array_allocation_size(count, sizeof(const CBMType *), &allocation_size))
+            return &unknown_singleton;
         const CBMType **arr =
-            (const CBMType **)cbm_arena_alloc(a, (count + 1) * sizeof(const CBMType *));
+            (const CBMType **)cbm_arena_alloc(a, allocation_size);
         if (arr) {
-            for (int i = 0; i < count; i++)
+            for (size_t i = 0; i < count; i++)
                 arr[i] = param_types[i];
             arr[count] = NULL;
             t->data.func.param_types = arr;
         }
     }
     if (param_names) {
-        int count = 0;
+        size_t count = 0;
         while (param_names[count])
             count++;
-        const char **arr = (const char **)cbm_arena_alloc(a, (count + 1) * sizeof(const char *));
+        size_t allocation_size = 0;
+        if (!type_array_allocation_size(count, sizeof(const char *), &allocation_size))
+            return &unknown_singleton;
+        const char **arr = (const char **)cbm_arena_alloc(a, allocation_size);
         if (arr) {
-            for (int i = 0; i < count; i++)
+            for (size_t i = 0; i < count; i++)
                 arr[i] = param_names[i];
             arr[count] = NULL;
             t->data.func.param_names = arr;
@@ -146,9 +163,25 @@ const CBMType *cbm_type_func_replace_returns(CBMArena *a, const CBMType *old_sig
     if (!old_signature || old_signature->kind != CBM_TYPE_FUNC)
         return cbm_type_unknown();
 
-    /* cbm_type_func only reads and then copies this vector into arena memory. */
+    if (!new_return_types)
+        return cbm_type_func(a, old_signature->data.func.param_names,
+                             old_signature->data.func.param_types, NULL);
+
+    size_t return_count = 0;
+    while (new_return_types[return_count])
+        return_count++;
+    size_t allocation_size = 0;
+    if (!type_array_allocation_size(return_count, sizeof(const CBMType *), &allocation_size))
+        return cbm_type_unknown();
+    const CBMType **returns = (const CBMType **)cbm_arena_alloc(a, allocation_size);
+    if (!returns)
+        return cbm_type_func(a, old_signature->data.func.param_names,
+                             old_signature->data.func.param_types, NULL);
+    for (size_t i = 0; i < return_count; i++)
+        returns[i] = new_return_types[i];
+    returns[return_count] = NULL;
     return cbm_type_func(a, old_signature->data.func.param_names,
-                         old_signature->data.func.param_types, (const CBMType **)new_return_types);
+                         old_signature->data.func.param_types, returns);
 }
 
 const CBMType *cbm_type_builtin(CBMArena *a, const char *name) {
@@ -162,14 +195,19 @@ const CBMType *cbm_type_builtin(CBMArena *a, const char *name) {
 }
 
 const CBMType *cbm_type_tuple(CBMArena *a, const CBMType **elems, int count) {
+    if (count < 0)
+        return &unknown_singleton;
     CBMType *t = (CBMType *)cbm_arena_alloc(a, sizeof(CBMType));
     if (!t)
         return &unknown_singleton;
     memset(t, 0, sizeof(CBMType));
     t->kind = CBM_TYPE_TUPLE;
     // Copy elems array
+    size_t allocation_size = 0;
+    if (!type_array_allocation_size((size_t)count, sizeof(const CBMType *), &allocation_size))
+        return &unknown_singleton;
     const CBMType **arr =
-        (const CBMType **)cbm_arena_alloc(a, (count + 1) * sizeof(const CBMType *));
+        (const CBMType **)cbm_arena_alloc(a, allocation_size);
     if (!arr)
         return &unknown_singleton;
     for (int i = 0; i < count; i++)
@@ -219,8 +257,12 @@ const CBMType *cbm_type_template(CBMArena *a, const char *name, const CBMType **
     t->kind = CBM_TYPE_TEMPLATE;
     t->data.template_type.template_name = cbm_arena_strdup(a, name);
     if (args && arg_count > 0) {
+        size_t allocation_size = 0;
+        if (!type_array_allocation_size((size_t)arg_count, sizeof(const CBMType *),
+                                        &allocation_size))
+            return &unknown_singleton;
         const CBMType **arr =
-            (const CBMType **)cbm_arena_alloc(a, (arg_count + 1) * sizeof(const CBMType *));
+            (const CBMType **)cbm_arena_alloc(a, allocation_size);
         if (arr) {
             for (int i = 0; i < arg_count; i++)
                 arr[i] = args[i];
@@ -276,8 +318,11 @@ const CBMType *cbm_type_union(CBMArena *a, const CBMType **members, int count) {
 
     // Flatten: nested UNIONs unfold their members into the parent.
     int flat_cap = count * 2 + 4;
+    size_t allocation_size = 0;
+    if (!type_array_allocation_size((size_t)flat_cap, sizeof(const CBMType *), &allocation_size))
+        return &unknown_singleton;
     const CBMType **flat =
-        (const CBMType **)cbm_arena_alloc(a, (size_t)flat_cap * sizeof(const CBMType *));
+        (const CBMType **)cbm_arena_alloc(a, allocation_size);
     if (!flat)
         return &unknown_singleton;
     int flat_count = 0;
@@ -308,8 +353,11 @@ const CBMType *cbm_type_union(CBMArena *a, const CBMType **members, int count) {
         return &unknown_singleton;
     memset(t, 0, sizeof(CBMType));
     t->kind = CBM_TYPE_UNION;
+    if (!type_array_allocation_size((size_t)unique_count, sizeof(const CBMType *),
+                                    &allocation_size))
+        return &unknown_singleton;
     const CBMType **arr =
-        (const CBMType **)cbm_arena_alloc(a, (unique_count + 1) * sizeof(const CBMType *));
+        (const CBMType **)cbm_arena_alloc(a, allocation_size);
     if (!arr)
         return &unknown_singleton;
     for (int i = 0; i < unique_count; i++)
@@ -348,17 +396,22 @@ const CBMType *cbm_type_protocol(CBMArena *a, const char *qualified_name, const 
     t->kind = CBM_TYPE_PROTOCOL;
     t->data.protocol.qualified_name = qualified_name ? cbm_arena_strdup(a, qualified_name) : NULL;
 
-    int n = 0;
+    size_t n = 0;
     if (method_names) {
         while (method_names[n])
             n++;
     }
     if (n > 0) {
-        const char **names = (const char **)cbm_arena_alloc(a, (n + 1) * sizeof(const char *));
+        size_t names_allocation_size = 0;
+        size_t signatures_allocation_size = 0;
+        if (!type_array_allocation_size(n, sizeof(const char *), &names_allocation_size) ||
+            !type_array_allocation_size(n, sizeof(const CBMType *), &signatures_allocation_size))
+            return &unknown_singleton;
+        const char **names = (const char **)cbm_arena_alloc(a, names_allocation_size);
         const CBMType **sigs =
-            (const CBMType **)cbm_arena_alloc(a, (n + 1) * sizeof(const CBMType *));
+            (const CBMType **)cbm_arena_alloc(a, signatures_allocation_size);
         if (names && sigs) {
-            for (int i = 0; i < n; i++) {
+            for (size_t i = 0; i < n; i++) {
                 names[i] = cbm_arena_strdup(a, method_names[i]);
                 sigs[i] = method_sigs ? method_sigs[i] : NULL;
             }
@@ -391,8 +444,12 @@ const CBMType *cbm_type_callable(CBMArena *a, const CBMType **param_types, int p
     t->data.callable.param_count = param_count;
     t->data.callable.return_type = return_type ? return_type : &unknown_singleton;
     if (param_count > 0 && param_types) {
+        size_t allocation_size = 0;
+        if (!type_array_allocation_size((size_t)param_count, sizeof(const CBMType *),
+                                        &allocation_size))
+            return &unknown_singleton;
         const CBMType **arr =
-            (const CBMType **)cbm_arena_alloc(a, (param_count + 1) * sizeof(const CBMType *));
+            (const CBMType **)cbm_arena_alloc(a, allocation_size);
         if (arr) {
             for (int i = 0; i < param_count; i++)
                 arr[i] = param_types[i];
@@ -412,8 +469,11 @@ const CBMType *cbm_type_intersection(CBMArena *a, const CBMType **members, int c
     memset(t, 0, sizeof(CBMType));
     t->kind = CBM_TYPE_INTERSECTION;
     if (members && count > 0) {
+        size_t allocation_size = 0;
+        if (!type_array_allocation_size((size_t)count, sizeof(const CBMType *), &allocation_size))
+            return &unknown_singleton;
         const CBMType **arr =
-            (const CBMType **)cbm_arena_alloc(a, (count + 1) * sizeof(const CBMType *));
+            (const CBMType **)cbm_arena_alloc(a, allocation_size);
         if (arr) {
             for (int i = 0; i < count; i++)
                 arr[i] = members[i];
@@ -493,10 +553,17 @@ const CBMType *cbm_type_object_lit(CBMArena *a, const char **prop_names, const C
         while (prop_names[count] && prop_types[count])
             count++;
         if (count > 0) {
+            size_t names_allocation_size = 0;
+            size_t types_allocation_size = 0;
+            if (!type_array_allocation_size((size_t)count, sizeof(const char *),
+                                            &names_allocation_size) ||
+                !type_array_allocation_size((size_t)count, sizeof(const CBMType *),
+                                            &types_allocation_size))
+                return &unknown_singleton;
             const char **name_arr =
-                (const char **)cbm_arena_alloc(a, (count + 1) * sizeof(const char *));
+                (const char **)cbm_arena_alloc(a, names_allocation_size);
             const CBMType **type_arr =
-                (const CBMType **)cbm_arena_alloc(a, (count + 1) * sizeof(const CBMType *));
+                (const CBMType **)cbm_arena_alloc(a, types_allocation_size);
             if (name_arr && type_arr) {
                 for (int i = 0; i < count; i++) {
                     name_arr[i] = prop_names[i];
@@ -874,8 +941,14 @@ const CBMType *cbm_type_substitute(CBMArena *a, const CBMType *t, const char **t
             t->data.channel.direction);
     case CBM_TYPE_TUPLE: {
         int count = t->data.tuple.count;
+        if (count < 0)
+            return t;
+        size_t allocation_size = 0;
+        if (!type_array_allocation_size((size_t)count, sizeof(const CBMType *),
+                                        &allocation_size))
+            return t;
         const CBMType **elems =
-            (const CBMType **)cbm_arena_alloc(a, (count + 1) * sizeof(const CBMType *));
+            (const CBMType **)cbm_arena_alloc(a, allocation_size);
         if (!elems)
             return t;
         for (int i = 0; i < count; i++) {
@@ -889,8 +962,12 @@ const CBMType *cbm_type_substitute(CBMArena *a, const CBMType *t, const char **t
         int count = t->data.union_type.count;
         if (count <= 0 || !t->data.union_type.members)
             return t;
+        size_t allocation_size = 0;
+        if (!type_array_allocation_size((size_t)count, sizeof(const CBMType *),
+                                        &allocation_size))
+            return t;
         const CBMType **elems =
-            (const CBMType **)cbm_arena_alloc(a, (count + 1) * sizeof(const CBMType *));
+            (const CBMType **)cbm_arena_alloc(a, allocation_size);
         if (!elems)
             return t;
         for (int i = 0; i < count; i++) {

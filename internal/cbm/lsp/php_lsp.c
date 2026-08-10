@@ -492,7 +492,7 @@ const CBMType *php_parse_type_node(PHPLSPContext *ctx, TSNode node) {
 
 /* ── PHPDoc minimal parser ──────────────────────────────────────── */
 
-/* Strip leading "/**", trailing "*​/", and per-line "*" prefixes. Returns a
+/* Strip PHPDoc delimiters and per-line "*" prefixes. Returns a
  * mutable arena-allocated cleaned copy. */
 static char *phpdoc_clean(CBMArena *a, const char *raw) {
     if (!raw)
@@ -503,7 +503,7 @@ static char *phpdoc_clean(CBMArena *a, const char *raw) {
         return NULL;
     size_t w = 0;
     size_t i = 0;
-    /* Skip leading /* and ** */
+    /* Skip the opening delimiter. */
     while (i < n && (raw[i] == '/' || raw[i] == '*' || raw[i] == ' ' || raw[i] == '\t'))
         i++;
     bool at_line_start = false;
@@ -521,7 +521,8 @@ static char *phpdoc_clean(CBMArena *a, const char *raw) {
         }
         out[w++] = c;
     }
-    /* Trim trailing */ if (w >= 2 && out[w - 1] == '/' && out[w - 2] == '*')
+    /* Trim the closing delimiter. */
+    if (w >= 2 && out[w - 1] == '/' && out[w - 2] == '*')
         w -= 2;
     out[w] = '\0';
     return out;
@@ -797,8 +798,8 @@ static void bind_phpdoc_var(PHPLSPContext *ctx, const char *docstring) {
     }
 }
 
-/* Walk siblings backwards from `node` to find a leading PHPDoc comment
- * ("/**...*​/"). Returns cleaned doc text or NULL. */
+/* Walk siblings backwards from `node` to find a leading PHPDoc comment.
+ * Returns cleaned doc text or NULL. */
 static char *fetch_leading_phpdoc(PHPLSPContext *ctx, TSNode node) {
     TSNode parent = ts_node_parent(node);
     if (ts_node_is_null(parent))
@@ -1427,7 +1428,7 @@ static void emit_unresolved(PHPLSPContext *ctx, const char *expr_text, const cha
     rc.caller_qn = ctx->enclosing_func_qn;
     rc.callee_qn = expr_text ? expr_text : "?";
     rc.strategy = "lsp_unresolved";
-    rc.confidence = 0.0f;
+    rc.confidence = 0.0;
     rc.reason = reason;
     cbm_resolvedcall_push(ctx->resolved_calls, ctx->arena, rc);
 }
@@ -1625,7 +1626,7 @@ static void resolve_function_call(PHPLSPContext *ctx, TSNode call, CBMResolvedKi
         const CBMRegisteredFunc *invoke =
             class_qn ? php_lookup_method(ctx, class_qn, "__invoke") : NULL;
         if (invoke && invoke->qualified_name) {
-            emit_resolved_reason_kind(ctx, invoke->qualified_name, "php_invokable_reference", 0.95f,
+            emit_resolved_reason_kind(ctx, invoke->qualified_name, "php_invokable_reference", 0.95,
                                       name, kind);
         }
         return;
@@ -1636,7 +1637,7 @@ static void resolve_function_call(PHPLSPContext *ctx, TSNode call, CBMResolvedKi
     if (target) {
         const CBMRegisteredFunc *f = cbm_registry_lookup_func(ctx->registry, target);
         if (f) {
-            emit_resolved_kind(ctx, f->qualified_name, "php_function_namespaced", 0.95f, kind);
+            emit_resolved_kind(ctx, f->qualified_name, "php_function_namespaced", 0.95, kind);
             return;
         }
     }
@@ -1646,7 +1647,7 @@ static void resolve_function_call(PHPLSPContext *ctx, TSNode call, CBMResolvedKi
         const char *ns_qn = cbm_arena_sprintf(ctx->arena, "%s.%s", ctx->current_namespace_qn, name);
         const CBMRegisteredFunc *f = cbm_registry_lookup_func(ctx->registry, ns_qn);
         if (f) {
-            emit_resolved_kind(ctx, f->qualified_name, "php_function_namespaced", 0.95f, kind);
+            emit_resolved_kind(ctx, f->qualified_name, "php_function_namespaced", 0.95, kind);
             return;
         }
     }
@@ -1678,7 +1679,7 @@ static void resolve_function_call(PHPLSPContext *ctx, TSNode call, CBMResolvedKi
         }
     }
     if (best) {
-        emit_resolved_kind(ctx, best->qualified_name, "php_function_global_fallback", 0.70f, kind);
+        emit_resolved_kind(ctx, best->qualified_name, "php_function_global_fallback", 0.70, kind);
         return;
     }
     /* Unresolved — but DO NOT emit unresolved noise here; the unified
@@ -1719,7 +1720,7 @@ static void resolve_member_call(PHPLSPContext *ctx, TSNode call, CBMResolvedKind
         const char *strategy = (f->receiver_type && strcmp(f->receiver_type, class_qn) == 0)
                                    ? "php_method_typed"
                                    : "php_method_inherited";
-        emit_resolved_kind(ctx, f->qualified_name, strategy, 0.95f, kind);
+        emit_resolved_kind(ctx, f->qualified_name, strategy, 0.95, kind);
         return;
     }
     /* Receiver known but method missing — magic __call? The call dispatches to
@@ -1729,7 +1730,7 @@ static void resolve_member_call(PHPLSPContext *ctx, TSNode call, CBMResolvedKind
      * Emit above the join's confidence floor — dispatch to __call is certain. */
     if (class_has_magic_call(ctx, class_qn, false)) {
         emit_resolved_reason_kind(ctx, cbm_arena_sprintf(ctx->arena, "%s.__call", class_qn),
-                                  "php_method_dynamic", 0.85f, method_name, kind);
+                                  "php_method_dynamic", 0.85, method_name, kind);
         return;
     }
     /* Receiver known but class not in registry (e.g. vendor type not indexed,
@@ -1738,7 +1739,7 @@ static void resolve_member_call(PHPLSPContext *ctx, TSNode call, CBMResolvedKind
      * extractor's likely-incorrect short-name fallback. The bridge filters
      * unknown targets and yields no edge — better than a wrong edge. */
     emit_resolved_kind(ctx, cbm_arena_sprintf(ctx->arena, "%s.%s", class_qn, method_name),
-                       "php_method_typed_unindexed", 0.55f, kind);
+                       "php_method_typed_unindexed", 0.55, kind);
 }
 
 static void resolve_static_call(PHPLSPContext *ctx, TSNode call, CBMResolvedKind kind) {
@@ -1775,7 +1776,7 @@ static void resolve_static_call(PHPLSPContext *ctx, TSNode call, CBMResolvedKind
 
     const CBMRegisteredFunc *f = php_lookup_method(ctx, class_qn, method_name);
     if (f) {
-        emit_resolved_kind(ctx, f->qualified_name, strategy, 0.95f, kind);
+        emit_resolved_kind(ctx, f->qualified_name, strategy, 0.95, kind);
         return;
     }
     /* A first-class reference to an absent static method has an exact target
@@ -1785,20 +1786,20 @@ static void resolve_static_call(PHPLSPContext *ctx, TSNode call, CBMResolvedKind
     const CBMRegisteredFunc *magic_static = php_lookup_method(ctx, class_qn, "__callStatic");
     if (magic_static && kind == CBM_RESOLVED_CALL_REFERENCE) {
         emit_resolved_reason_kind(ctx, magic_static->qualified_name, "php_static_magic_reference",
-                                  0.95f, method_name, kind);
+                                  0.95, method_name, kind);
         return;
     }
     /* Facade detection: class has __callStatic in its chain. */
     if (magic_static) {
         emit_resolved_kind(ctx, cbm_arena_sprintf(ctx->arena, "%s.%s", class_qn, method_name),
-                           "php_dynamic_unresolved", 0.10f, kind);
+                           "php_dynamic_unresolved", 0.10, kind);
         return;
     }
     /* Class resolved (e.g., from a `use` clause), method unknown — emit
      * synthetic resolved call so the pipeline bridge can suppress the
      * unified extractor's name-fallback misroute. */
     emit_resolved_kind(ctx, cbm_arena_sprintf(ctx->arena, "%s.%s", class_qn, method_name),
-                       "php_static_unindexed", 0.55f, kind);
+                       "php_static_unindexed", 0.55, kind);
 }
 
 /* ── type narrowing ─────────────────────────────────────────────────
@@ -2126,11 +2127,6 @@ static void walk_with_narrowings(PHPLSPContext *ctx, TSNode body, const php_narr
     }
     php_resolve_calls_in_node(ctx, body);
     ctx->current_scope = saved;
-}
-
-/* Backwards-compat single-binding wrapper. */
-static void walk_with_narrowing(PHPLSPContext *ctx, TSNode body, const php_narrowing_t *nw) {
-    walk_with_narrowings(ctx, body, nw, nw ? 1 : 0);
 }
 
 /* Detect whether a statement node is a "leaves the function" terminator:

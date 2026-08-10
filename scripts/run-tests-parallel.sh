@@ -168,11 +168,10 @@ shard_filter() {
 # deadlines into deterministic failures while an idle machine passes 6/6.
 # They also all rendezvous through the shared per-account runtime namespace,
 # which the quiet tail keeps free of cross-suite admission traffic.
-# extraction carries the wide-flat SCALING-RATIO guard, which grows the input
-# 20x and asserts the time grows ~20x (linear) rather than ~128x (quadratic),
-# with a bound of 40x between them. Contention does not cancel out of that
-# ratio: the 400k-node measurement loses far more to memory pressure and
-# scheduling than the 20k one, so oversubscription inflates the ratio itself.
+# extraction and py_lsp_scale carry SCALING-RATIO guards that compare a small
+# input with a 20x larger one. Contention does not cancel out of either ratio:
+# the larger measurement loses far more to memory pressure and scheduling, so
+# oversubscription inflates the ratio itself.
 # Measured on the Windows arm64 VM: 18.5x alone (passes) vs 53.8x and 55x in
 # the 18-job wave (fails) — reproducible, 3 of 3. The bound is deliberately NOT
 # widened; see the calibration note in tests/test_extraction.c, which records
@@ -180,7 +179,7 @@ shard_filter() {
 # would move the test toward the very thing it exists to catch. Quiet is the
 # fix, and at ~22s the suite is cheap to run alone.
 SERIAL_SUITES="cli subprocess watcher incremental httpd ui index_resilience mcp \
-    extraction \
+    extraction py_lsp_scale \
     stack_overflow_a stack_overflow_b stack_overflow_c \
     index_supervisor daemon_application daemon_runtime daemon_frontend \
     daemon_bootstrap daemon_ipc"

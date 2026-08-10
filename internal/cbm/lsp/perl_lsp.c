@@ -61,8 +61,8 @@
 #define PERL_EVAL_MAX_DEPTH 8
 
 /* bless / constructor confidence levels (22-RESEARCH.md §3). */
-#define PERL_CONF_LITERAL 0.95f  /* bless($r, 'Literal'); resolved call */
-#define PERL_CONF_INFERRED 0.75f /* ref($class)||$class idiom */
+#define PERL_CONF_LITERAL 0.95  /* bless($r, 'Literal'); resolved call */
+#define PERL_CONF_INFERRED 0.75 /* ref($class)||$class idiom */
 
 /* Maximum AST-walk recursion depth for the resolution/scan passes. Mirrors
  * java_lsp's JAVA_LSP_MAX_WALK_DEPTH: the per-child recursion of

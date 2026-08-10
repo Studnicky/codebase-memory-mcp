@@ -218,12 +218,6 @@ static CBMScope *py_scope_push_checked(PyLSPContext *ctx) {
     return child;
 }
 
-static void py_scope_clear_callable(PyLSPContext *ctx, const char *name) {
-    if (cbm_scope_update_callable(ctx->current_scope, name, NULL)) {
-        ctx->type_cache_gen++;
-    }
-}
-
 static void py_scope_restore(PyLSPContext *ctx, CBMScope *saved) {
     ctx->type_cache_gen++;
     ctx->current_scope = saved;
@@ -867,7 +861,7 @@ static void py_emit_resolved_reference(PyLSPContext *ctx, const char *callee_qn,
     rc.caller_qn = ctx->enclosing_func_qn;
     rc.callee_qn = cbm_arena_strdup(ctx->arena, callee_qn);
     rc.strategy = strategy ? strategy : "lsp_callable_value_reference";
-    rc.confidence = 0.97f;
+    rc.confidence = 0.97;
     const char *leaf = strrchr(callee_qn, '.');
     leaf = leaf ? leaf + 1 : callee_qn;
     rc.reason = source_name && strcmp(source_name, leaf) != 0
@@ -888,7 +882,7 @@ static void py_emit_unresolved_reference(PyLSPContext *ctx, const char *candidat
     rc.caller_qn = ctx->enclosing_func_qn;
     rc.callee_qn = cbm_arena_strdup(ctx->arena, candidate_qn);
     rc.strategy = "lsp_unresolved";
-    rc.confidence = 0.0f;
+    rc.confidence = 0.0;
     rc.reason = "callable_value_not_in_registry";
     rc.kind = CBM_RESOLVED_CALL_REFERENCE;
     rc.site_start_byte = ts_node_start_byte(site);
@@ -1981,17 +1975,17 @@ static const CBMType *py_eval_expr_type_uncached(PyLSPContext *ctx, TSNode node)
             if (!ts_node_is_null(sub)) {
                 const char *sk = ts_node_type(sub);
                 if (strcmp(sk, "string") == 0) {
-                    char *lit = py_node_text(ctx, sub);
-                    if (lit) {
+                    char *key_text = py_node_text(ctx, sub);
+                    if (key_text) {
                         // Strip surrounding quotes.
-                        size_t llen = strlen(lit);
-                        if (llen >= 2 && (lit[0] == '"' || lit[0] == '\'') &&
-                            lit[llen - 1] == lit[0]) {
-                            lit[llen - 1] = '\0';
-                            lit++;
+                        size_t llen = strlen(key_text);
+                        if (llen >= 2 && (key_text[0] == '"' || key_text[0] == '\'') &&
+                            key_text[llen - 1] == key_text[0]) {
+                            key_text[llen - 1] = '\0';
+                            key_text++;
                         }
                         const CBMType *field =
-                            py_lookup_field(ctx, container->data.named.qualified_name, lit);
+                            py_lookup_field(ctx, container->data.named.qualified_name, key_text);
                         if (field)
                             return field;
                     }
@@ -2590,7 +2584,7 @@ static void py_emit_call_for(PyLSPContext *ctx, TSNode call_node) {
         if (cbm_scope_contains(ctx->current_scope, fname)) {
             const char *alias_target = cbm_scope_lookup_callable(ctx->current_scope, fname);
             if (alias_target) {
-                py_emit_resolved_call_reason(ctx, alias_target, "lsp_callable_alias", 0.97f, fname,
+                py_emit_resolved_call_reason(ctx, alias_target, "lsp_callable_alias", 0.97, fname,
                                              call_node);
                 return;
             }
@@ -2618,10 +2612,10 @@ static void py_emit_call_for(PyLSPContext *ctx, TSNode call_node) {
                 }
 
                 if (imported_alias) {
-                    py_emit_resolved_call_reason(ctx, qn, "lsp_import_alias", 0.85f, fname,
+                    py_emit_resolved_call_reason(ctx, qn, "lsp_import_alias", 0.85, fname,
                                                  call_node);
                 } else if (qn && cbm_registry_lookup_type(ctx->registry, qn)) {
-                    py_emit_resolved_call(ctx, qn, "lsp_constructor", 0.85f, call_node);
+                    py_emit_resolved_call(ctx, qn, "lsp_constructor", 0.85, call_node);
                 }
             }
             return;
@@ -2630,26 +2624,26 @@ static void py_emit_call_for(PyLSPContext *ctx, TSNode call_node) {
         const CBMType *in_scope = cbm_scope_lookup(ctx->current_scope, fname);
         if (!cbm_type_is_unknown(in_scope) && in_scope->kind == CBM_TYPE_NAMED) {
             const char *qn = in_scope->data.named.qualified_name;
-            py_emit_resolved_call(ctx, qn, "lsp_constructor", 0.85f, call_node);
+            py_emit_resolved_call(ctx, qn, "lsp_constructor", 0.85, call_node);
             return;
         }
         // Module-local function
         const CBMRegisteredFunc *f =
             cbm_registry_lookup_symbol(ctx->registry, ctx->module_qn, fname);
         if (f) {
-            py_emit_resolved_call(ctx, f->qualified_name, "lsp_direct", 0.95f, call_node);
+            py_emit_resolved_call(ctx, f->qualified_name, "lsp_direct", 0.95, call_node);
             return;
         }
         // Builtins (range / len / list / dict / str / int / print / ...).
         f = cbm_registry_lookup_symbol(ctx->registry, "builtins", fname);
         if (f) {
-            py_emit_resolved_call(ctx, f->qualified_name, "lsp_builtin", 0.92f, call_node);
+            py_emit_resolved_call(ctx, f->qualified_name, "lsp_builtin", 0.92, call_node);
             return;
         }
         const CBMRegisteredType *rt = cbm_registry_lookup_type(
             ctx->registry, cbm_arena_sprintf(ctx->arena, "builtins.%s", fname));
         if (rt) {
-            py_emit_resolved_call(ctx, rt->qualified_name, "lsp_builtin_constructor", 0.88f,
+            py_emit_resolved_call(ctx, rt->qualified_name, "lsp_builtin_constructor", 0.88,
                                   call_node);
             return;
         }
@@ -2672,7 +2666,7 @@ static void py_emit_call_for(PyLSPContext *ctx, TSNode call_node) {
                     /* The textual callee of `funcs["a"](v)` is the subscript base
                      * identifier ("funcs"), not the resolved target ("foo"), so
                      * stash it in `reason` for the join (see lsp_resolve.h). */
-                    py_emit_resolved_call_reason(ctx, tgt, "lsp_dict_dispatch", 0.86f, var_name,
+                    py_emit_resolved_call_reason(ctx, tgt, "lsp_dict_dispatch", 0.86, var_name,
                                                  call_node);
                     return;
                 }
@@ -2721,14 +2715,14 @@ static void py_emit_call_for(PyLSPContext *ctx, TSNode call_node) {
                                     fi ? fi->qualified_name
                                        : cbm_arena_sprintf(ctx->arena, "%s.__init__",
                                                            enclosing->embedded_types[i]);
-                                py_emit_resolved_call(ctx, init_qn, "lsp_super_init", 0.90f,
+                                py_emit_resolved_call(ctx, init_qn, "lsp_super_init", 0.90,
                                                       call_node);
                                 return;
                             }
                             const CBMRegisteredFunc *f =
                                 py_lookup_attribute(ctx, enclosing->embedded_types[i], attr_name);
                             if (f) {
-                                py_emit_resolved_call(ctx, f->qualified_name, "lsp_super", 0.88f,
+                                py_emit_resolved_call(ctx, f->qualified_name, "lsp_super", 0.88,
                                                       call_node);
                                 return;
                             }
@@ -2746,7 +2740,7 @@ static void py_emit_call_for(PyLSPContext *ctx, TSNode call_node) {
             const char *mod = obj_type->data.module.module_qn;
             const CBMRegisteredFunc *f = cbm_registry_lookup_symbol(ctx->registry, mod, attr_name);
             if (f) {
-                py_emit_resolved_call(ctx, f->qualified_name, "lsp_module_attr", 0.92f, call_node);
+                py_emit_resolved_call(ctx, f->qualified_name, "lsp_module_attr", 0.92, call_node);
                 return;
             }
             // An `import sibling` of an IN-PROJECT module records the module's QN
@@ -2777,7 +2771,7 @@ static void py_emit_call_for(PyLSPContext *ctx, TSNode call_node) {
                                 cbm_registry_lookup_symbol(ctx->registry, qual_mod, attr_name);
                             if (qf) {
                                 py_emit_resolved_call(ctx, qf->qualified_name, "lsp_module_attr",
-                                                      0.92f, call_node);
+                                                      0.92, call_node);
                                 return;
                             }
                         }
@@ -2786,14 +2780,14 @@ static void py_emit_call_for(PyLSPContext *ctx, TSNode call_node) {
             }
             // Best-effort: emit "module.attr" QN — Phase 9 cross-file may fix up.
             const char *qn = cbm_arena_sprintf(ctx->arena, "%s.%s", mod, attr_name);
-            py_emit_resolved_call(ctx, qn, "lsp_module_attr_unresolved", 0.55f, call_node);
+            py_emit_resolved_call(ctx, qn, "lsp_module_attr_unresolved", 0.55, call_node);
             return;
         }
         if (obj_type->kind == CBM_TYPE_NAMED) {
             const CBMRegisteredFunc *f =
                 py_lookup_attribute(ctx, obj_type->data.named.qualified_name, attr_name);
             if (f) {
-                py_emit_resolved_call(ctx, f->qualified_name, "lsp_method", 0.9f, call_node);
+                py_emit_resolved_call(ctx, f->qualified_name, "lsp_method", 0.9, call_node);
                 return;
             }
         }
@@ -2803,7 +2797,7 @@ static void py_emit_call_for(PyLSPContext *ctx, TSNode call_node) {
                 cbm_arena_sprintf(ctx->arena, "builtins.%s", obj_type->data.builtin.name);
             const CBMRegisteredFunc *f = py_lookup_attribute(ctx, recv_qn, attr_name);
             if (f) {
-                py_emit_resolved_call(ctx, f->qualified_name, "lsp_builtin_method", 0.9f,
+                py_emit_resolved_call(ctx, f->qualified_name, "lsp_builtin_method", 0.9,
                                       call_node);
                 return;
             }
@@ -2816,7 +2810,7 @@ static void py_emit_call_for(PyLSPContext *ctx, TSNode call_node) {
                 f = py_lookup_attribute(ctx, tname, attr_name);
             }
             if (f) {
-                py_emit_resolved_call(ctx, f->qualified_name, "lsp_generic_method", 0.88f,
+                py_emit_resolved_call(ctx, f->qualified_name, "lsp_generic_method", 0.88,
                                       call_node);
                 return;
             }
@@ -2842,7 +2836,7 @@ static void py_emit_call_for(PyLSPContext *ctx, TSNode call_node) {
                 }
             }
             if (matches == 1 && hit) {
-                py_emit_resolved_call(ctx, hit->qualified_name, "lsp_method_union", 0.85f,
+                py_emit_resolved_call(ctx, hit->qualified_name, "lsp_method_union", 0.85,
                                       call_node);
                 return;
             }
@@ -3189,7 +3183,7 @@ static void py_emit_dunder_call(PyLSPContext *ctx, const CBMType *recv, const ch
         return;
     const CBMRegisteredFunc *f = py_lookup_attribute(ctx, recv->data.named.qualified_name, dunder);
     if (f && f->qualified_name) {
-        py_emit_resolved_call(ctx, f->qualified_name, "lsp_operator_dunder", 0.85f, site);
+        py_emit_resolved_call(ctx, f->qualified_name, "lsp_operator_dunder", 0.85, site);
         /* A subscript (`s[k]`) / binary_operator (`a + b`) is not a syntactic
          * `call` node, so the extractor produced no CBMCall for it and the
          * resolved_call above would never be matched into a CALLS edge. Inject
@@ -3227,7 +3221,7 @@ static void py_emit_dunder_call(PyLSPContext *ctx, const CBMType *recv, const ch
          * injected until the project registry proves the target. */
         const char *candidate =
             cbm_arena_sprintf(ctx->arena, "%s.%s", recv->data.named.qualified_name, dunder);
-        py_emit_resolved_call_reason(ctx, candidate, "lsp_unresolved", 0.0f,
+        py_emit_resolved_call_reason(ctx, candidate, "lsp_unresolved", 0.0,
                                      "operator_method_not_in_registry", site);
     }
 }
@@ -3487,7 +3481,6 @@ static void py_resolve_calls_in_inner(PyLSPContext *ctx, TSNode node) {
  * builtin scalar names. Used by py_register_def, which runs before any
  * context is available. When module_qn is non-NULL, bare class names
  * are qualified as "<module_qn>.<name>" so registry lookups match. */
-static const CBMType *py_parse_type_text(CBMArena *arena, const char *ann);
 static const CBMType *py_parse_type_text_qn(CBMArena *arena, const char *ann,
                                             const char *module_qn);
 
@@ -3764,10 +3757,6 @@ static const CBMType *py_signature_param_type_adapter(CBMArena *arena, const cha
                                                       void *parser_ctx) {
     const PySignatureParamParserContext *ctx = (const PySignatureParamParserContext *)parser_ctx;
     return py_parse_type_text_qn(arena, text, ctx ? ctx->module_qn : NULL);
-}
-
-static const CBMType *py_parse_type_text(CBMArena *arena, const char *ann) {
-    return py_parse_type_text_qn(arena, ann, NULL);
 }
 
 /* Resolve a type-annotation text into a CBMType. Tries: scope lookup

@@ -57,7 +57,7 @@ static char *c_node_text(CLSPContext *ctx, TSNode node) {
 // --- Initialization ---
 
 void c_lsp_init(CLSPContext *ctx, CBMArena *arena, const char *source, int source_len,
-                const CBMTypeRegistry *registry, const char *module_qn, bool cpp_mode,
+                CBMTypeRegistry *registry, const char *module_qn, bool cpp_mode,
                 CBMResolvedCallArray *out) {
     memset(ctx, 0, sizeof(CLSPContext));
     ctx->arena = arena;
@@ -80,14 +80,16 @@ void c_lsp_add_include(CLSPContext *ctx, const char *header_path, const char *ns
     if (ctx->include_count % 32 == 0) {
         int new_cap = ctx->include_count + 32;
         const char **new_paths =
-            (const char **)cbm_arena_alloc(ctx->arena, (new_cap + 1) * sizeof(const char *));
+            (const char **)cbm_arena_alloc(ctx->arena, ((size_t)new_cap + 1U) * sizeof(const char *));
         const char **new_qns =
-            (const char **)cbm_arena_alloc(ctx->arena, (new_cap + 1) * sizeof(const char *));
+            (const char **)cbm_arena_alloc(ctx->arena, ((size_t)new_cap + 1U) * sizeof(const char *));
         if (!new_paths || !new_qns)
             return;
         if (ctx->include_paths && ctx->include_count > 0) {
-            memcpy(new_paths, ctx->include_paths, ctx->include_count * sizeof(const char *));
-            memcpy(new_qns, ctx->include_ns_qns, ctx->include_count * sizeof(const char *));
+            memcpy(new_paths, ctx->include_paths,
+                   (size_t)ctx->include_count * sizeof(const char *));
+            memcpy(new_qns, ctx->include_ns_qns,
+                   (size_t)ctx->include_count * sizeof(const char *));
         }
         ctx->include_paths = new_paths;
         ctx->include_ns_qns = new_qns;
@@ -104,11 +106,12 @@ static void c_add_using_namespace(CLSPContext *ctx, const char *ns_qn) {
             return;
         int new_cap = ctx->using_ns_cap == 0 ? 16 : ctx->using_ns_cap * 2;
         const char **new_arr =
-            (const char **)cbm_arena_alloc(ctx->arena, new_cap * sizeof(const char *));
+            (const char **)cbm_arena_alloc(ctx->arena, (size_t)new_cap * sizeof(const char *));
         if (!new_arr)
             return;
         if (ctx->using_namespaces && ctx->using_ns_count > 0)
-            memcpy(new_arr, ctx->using_namespaces, ctx->using_ns_count * sizeof(const char *));
+            memcpy(new_arr, ctx->using_namespaces,
+                   (size_t)ctx->using_ns_count * sizeof(const char *));
         ctx->using_namespaces = new_arr;
         ctx->using_ns_cap = new_cap;
     }
@@ -122,14 +125,16 @@ static void c_add_using_decl(CLSPContext *ctx, const char *short_name, const cha
             return;
         int new_cap = ctx->using_decl_cap == 0 ? 16 : ctx->using_decl_cap * 2;
         const char **new_names =
-            (const char **)cbm_arena_alloc(ctx->arena, new_cap * sizeof(const char *));
+            (const char **)cbm_arena_alloc(ctx->arena, (size_t)new_cap * sizeof(const char *));
         const char **new_qns =
-            (const char **)cbm_arena_alloc(ctx->arena, new_cap * sizeof(const char *));
+            (const char **)cbm_arena_alloc(ctx->arena, (size_t)new_cap * sizeof(const char *));
         if (!new_names || !new_qns)
             return;
         if (ctx->using_decl_names && ctx->using_decl_count > 0) {
-            memcpy(new_names, ctx->using_decl_names, ctx->using_decl_count * sizeof(const char *));
-            memcpy(new_qns, ctx->using_decl_qns, ctx->using_decl_count * sizeof(const char *));
+            memcpy(new_names, ctx->using_decl_names,
+                   (size_t)ctx->using_decl_count * sizeof(const char *));
+            memcpy(new_qns, ctx->using_decl_qns,
+                   (size_t)ctx->using_decl_count * sizeof(const char *));
         }
         ctx->using_decl_names = new_names;
         ctx->using_decl_qns = new_qns;
@@ -147,14 +152,16 @@ static void c_add_ns_alias(CLSPContext *ctx, const char *alias, const char *full
             return;
         int new_cap = ctx->ns_alias_cap == 0 ? 8 : ctx->ns_alias_cap * 2;
         const char **new_names =
-            (const char **)cbm_arena_alloc(ctx->arena, new_cap * sizeof(const char *));
+            (const char **)cbm_arena_alloc(ctx->arena, (size_t)new_cap * sizeof(const char *));
         const char **new_qns =
-            (const char **)cbm_arena_alloc(ctx->arena, new_cap * sizeof(const char *));
+            (const char **)cbm_arena_alloc(ctx->arena, (size_t)new_cap * sizeof(const char *));
         if (!new_names || !new_qns)
             return;
         if (ctx->ns_alias_names && ctx->ns_alias_count > 0) {
-            memcpy(new_names, ctx->ns_alias_names, ctx->ns_alias_count * sizeof(const char *));
-            memcpy(new_qns, ctx->ns_alias_qns, ctx->ns_alias_count * sizeof(const char *));
+            memcpy(new_names, ctx->ns_alias_names,
+                   (size_t)ctx->ns_alias_count * sizeof(const char *));
+            memcpy(new_qns, ctx->ns_alias_qns,
+                   (size_t)ctx->ns_alias_count * sizeof(const char *));
         }
         ctx->ns_alias_names = new_names;
         ctx->ns_alias_qns = new_qns;
@@ -172,17 +179,19 @@ static void c_add_fp_target(CLSPContext *ctx, const char *var_name, const char *
             return;
         int new_cap = ctx->fp_cap == 0 ? 16 : ctx->fp_cap * 2;
         const char **new_names =
-            (const char **)cbm_arena_alloc(ctx->arena, new_cap * sizeof(const char *));
+            (const char **)cbm_arena_alloc(ctx->arena, (size_t)new_cap * sizeof(const char *));
         const char **new_qns =
-            (const char **)cbm_arena_alloc(ctx->arena, new_cap * sizeof(const char *));
+            (const char **)cbm_arena_alloc(ctx->arena, (size_t)new_cap * sizeof(const char *));
         const CBMScope **new_scopes =
-            (const CBMScope **)cbm_arena_alloc(ctx->arena, new_cap * sizeof(const CBMScope *));
+            (const CBMScope **)cbm_arena_alloc(ctx->arena,
+                                                (size_t)new_cap * sizeof(const CBMScope *));
         if (!new_names || !new_qns || !new_scopes)
             return;
         if (ctx->fp_var_names && ctx->fp_count > 0) {
-            memcpy(new_names, ctx->fp_var_names, ctx->fp_count * sizeof(const char *));
-            memcpy(new_qns, ctx->fp_target_qns, ctx->fp_count * sizeof(const char *));
-            memcpy(new_scopes, ctx->fp_binding_scopes, ctx->fp_count * sizeof(const CBMScope *));
+            memcpy(new_names, ctx->fp_var_names, (size_t)ctx->fp_count * sizeof(const char *));
+            memcpy(new_qns, ctx->fp_target_qns, (size_t)ctx->fp_count * sizeof(const char *));
+            memcpy(new_scopes, ctx->fp_binding_scopes,
+                   (size_t)ctx->fp_count * sizeof(const CBMScope *));
         }
         ctx->fp_var_names = new_names;
         ctx->fp_target_qns = new_qns;
@@ -363,13 +372,13 @@ static void c_add_pending_template_call(CLSPContext *ctx, const char *func_qn,
         if (ctx->pending_tc_cap > INT_MAX / 2)
             return;
         int new_cap = ctx->pending_tc_cap == 0 ? 16 : ctx->pending_tc_cap * 2;
-        size_t sz = new_cap * sizeof(ctx->pending_template_calls[0]);
+        size_t sz = (size_t)new_cap * sizeof(ctx->pending_template_calls[0]);
         void *new_arr = cbm_arena_alloc(ctx->arena, sz);
         if (!new_arr)
             return;
         if (ctx->pending_template_calls && ctx->pending_tc_count > 0)
             memcpy(new_arr, ctx->pending_template_calls,
-                   ctx->pending_tc_count * sizeof(ctx->pending_template_calls[0]));
+                   (size_t)ctx->pending_tc_count * sizeof(ctx->pending_template_calls[0]));
         ctx->pending_template_calls = new_arr;
         ctx->pending_tc_cap = new_cap;
     }
@@ -455,7 +464,7 @@ static void c_resolve_pending_template_calls(CLSPContext *ctx, const CBMRegister
             // Look up the method on the concrete type
             const CBMRegisteredFunc *m = c_lookup_member(ctx, concrete_qn, method);
             if (m) {
-                c_emit_resolved_call(ctx, m->qualified_name, "lsp_template_instantiation", 0.90f);
+                c_emit_resolved_call(ctx, m->qualified_name, "lsp_template_instantiation", 0.90);
             }
             break;
         }
@@ -1073,13 +1082,13 @@ const CBMType *c_parse_type_node(CLSPContext *ctx, TSNode node) {
             strcmp(ts_node_type(name_child), "template_type") == 0) {
             // Build scope prefix from scope chain
             TSNode scope_node = ts_node_child_by_field_name(node, "scope", 5);
-            char *scope_text = NULL;
+            const char *scope_text = NULL;
             if (!ts_node_is_null(scope_node)) {
                 scope_text = c_node_text(ctx, scope_node);
                 if (scope_text) {
                     const char *alias_qn = c_resolve_ns_alias(ctx, scope_text);
                     if (alias_qn)
-                        scope_text = (char *)alias_qn;
+                        scope_text = alias_qn;
                 }
             }
             // Parse the template_type's own name
@@ -1751,7 +1760,7 @@ static const CBMType *c_eval_expr_type_inner(CLSPContext *ctx, TSNode node) {
                     //        TEMPLATE("std.shared_ptr", [Widget])
                     if (base_ret->kind == CBM_TYPE_NAMED) {
                         const CBMType **final_targs = (const CBMType **)cbm_arena_alloc(
-                            ctx->arena, (targ_count + 1) * sizeof(const CBMType *));
+                            ctx->arena, ((size_t)targ_count + 1U) * sizeof(const CBMType *));
                         for (int i = 0; i < targ_count; i++)
                             final_targs[i] = targs[i];
                         final_targs[targ_count] = NULL;
@@ -3095,8 +3104,10 @@ void c_process_statement(CLSPContext *ctx, TSNode node) {
                             } else if (strcmp(ik, "parenthesized_declarator") == 0 ||
                                        strcmp(ik, "pointer_declarator") == 0) {
                                 // Walk deeper: get last named child
-                                uint32_t nc = ts_node_named_child_count(inner);
-                                inner = nc > 0 ? ts_node_named_child(inner, nc - 1) : (TSNode){0};
+                                uint32_t child_count = ts_node_named_child_count(inner);
+                                inner = child_count > 0
+                                            ? ts_node_named_child(inner, child_count - 1)
+                                            : (TSNode){0};
                             } else {
                                 break;
                             }
@@ -3855,7 +3866,7 @@ static void c_emit_resolved_reference_at(CLSPContext *ctx, const char *callee_qn
     resolved.callee_qn = callee_qn;
     resolved.strategy = source_name && strcmp(source_name, target_leaf) != 0 ? "lsp_callable_alias"
                                                                              : "lsp_callable_value";
-    resolved.confidence = 0.95f;
+    resolved.confidence = 0.95;
     resolved.reason = source_name;
     resolved.kind = CBM_RESOLVED_CALL_REFERENCE;
     resolved.site_start_byte = ts_node_start_byte(site);
@@ -3903,7 +3914,7 @@ static void c_emit_unresolved_call(CLSPContext *ctx, const char *expr_text, cons
     rc.caller_qn = ctx->enclosing_func_qn;
     rc.callee_qn = expr_text ? expr_text : "?";
     rc.strategy = "lsp_unresolved";
-    rc.confidence = 0.0f;
+    rc.confidence = 0.0;
     rc.reason = reason;
     rc.source_origin = ctx->source_origin;
     cbm_resolvedcall_push(ctx->resolved_calls, ctx->arena, rc);
@@ -4014,7 +4025,7 @@ static void c_resolve_calls_in_node_inner(CLSPContext *ctx, TSNode node) {
                                     is_smart_ptr(obj_type->data.template_type.template_name))
                                     strategy = "lsp_smart_ptr_dispatch";
                                 c_emit_resolved_call_at(ctx, method->qualified_name, strategy,
-                                                        0.95f, node);
+                                                        0.95, node);
                                 goto recurse;
                             }
                         }
@@ -4093,13 +4104,13 @@ static void c_resolve_calls_in_node_inner(CLSPContext *ctx, TSNode node) {
                     if (!f)
                         f = cbm_registry_lookup_func(ctx->registry, qn);
                     if (f) {
-                        c_emit_resolved_call_at(ctx, f->qualified_name, "lsp_scoped", 0.95f, node);
+                        c_emit_resolved_call_at(ctx, f->qualified_name, "lsp_scoped", 0.95, node);
                         goto recurse;
                     }
                     // Try as method (Class::method) with type-aware overload resolution
                     const char *dot = strrchr(qn, '.');
                     if (dot) {
-                        size_t prefix_len = dot - qn;
+                        size_t prefix_len = (size_t)(dot - qn);
                         char *class_qn = (char *)cbm_arena_alloc(ctx->arena, prefix_len + 1);
                         memcpy(class_qn, qn, prefix_len);
                         class_qn[prefix_len] = '\0';
@@ -4113,7 +4124,7 @@ static void c_resolve_calls_in_node_inner(CLSPContext *ctx, TSNode node) {
                                                                     dot + 1, arg_types, arg_count);
                         }
                         if (m) {
-                            c_emit_resolved_call_at(ctx, m->qualified_name, "lsp_scoped", 0.95f,
+                            c_emit_resolved_call_at(ctx, m->qualified_name, "lsp_scoped", 0.95,
                                                     node);
                             goto recurse;
                         }
@@ -4130,7 +4141,7 @@ static void c_resolve_calls_in_node_inner(CLSPContext *ctx, TSNode node) {
                                 cbm_arena_sprintf(ctx->arena, "%s.%s", ctx->module_qn, bare_name));
                         }
                         if (nf) {
-                            c_emit_resolved_call_at(ctx, nf->qualified_name, "lsp_scoped", 0.90f,
+                            c_emit_resolved_call_at(ctx, nf->qualified_name, "lsp_scoped", 0.90,
                                                     node);
                             goto recurse;
                         }
@@ -4161,7 +4172,7 @@ static void c_resolve_calls_in_node_inner(CLSPContext *ctx, TSNode node) {
                             if (!f) {
                                 const char *dot = strrchr(qn, '.');
                                 if (dot) {
-                                    size_t plen = dot - qn;
+                                    size_t plen = (size_t)(dot - qn);
                                     char *cls = (char *)cbm_arena_alloc(ctx->arena, plen + 1);
                                     memcpy(cls, qn, plen);
                                     cls[plen] = '\0';
@@ -4182,7 +4193,7 @@ static void c_resolve_calls_in_node_inner(CLSPContext *ctx, TSNode node) {
                                 f = cbm_registry_lookup_func(ctx->registry, fqn);
                         }
                         if (f) {
-                            c_emit_resolved_call_at(ctx, f->qualified_name, "lsp_template", 0.95f,
+                            c_emit_resolved_call_at(ctx, f->qualified_name, "lsp_template", 0.95,
                                                     node);
                             // Resolve pending template calls at this call site
                             if (ctx->pending_tc_count > 0 && f->type_param_names) {
@@ -4216,7 +4227,7 @@ static void c_resolve_calls_in_node_inner(CLSPContext *ctx, TSNode node) {
                         // as orig so the join matches the call on the pointer name.
                         c_emit_resolved_call_orig_at(ctx, fp_target, name,
                                                      is_dll ? "lsp_dll_resolve" : "lsp_func_ptr",
-                                                     is_dll ? 0.80f : 0.85f, node);
+                                                     is_dll ? 0.80 : 0.85, node);
                         goto recurse;
                     }
 
@@ -4235,7 +4246,7 @@ static void c_resolve_calls_in_node_inner(CLSPContext *ctx, TSNode node) {
                                 c_lookup_member(ctx, type_qn, "operator()");
                             if (op) {
                                 c_emit_resolved_call_at(ctx, op->qualified_name, "lsp_operator",
-                                                        0.90f, node);
+                                                        0.90, node);
                                 goto recurse;
                             }
                         }
@@ -4251,7 +4262,7 @@ static void c_resolve_calls_in_node_inner(CLSPContext *ctx, TSNode node) {
                             // Constructor call
                             const char *ctor_qn =
                                 cbm_arena_sprintf(ctx->arena, "%s.%s", type_qn_str, name);
-                            c_emit_resolved_call_at(ctx, ctor_qn, "lsp_constructor", 0.95f, node);
+                            c_emit_resolved_call_at(ctx, ctor_qn, "lsp_constructor", 0.95, node);
                             goto recurse;
                         }
                     }
@@ -4268,7 +4279,7 @@ static void c_resolve_calls_in_node_inner(CLSPContext *ctx, TSNode node) {
                                 strategy = "lsp_implicit_this";
                             }
                         }
-                        c_emit_resolved_call_at(ctx, fqn, strategy, 0.95f, node);
+                        c_emit_resolved_call_at(ctx, fqn, strategy, 0.95, node);
                         // Resolve pending template calls at this call site
                         if (ctx->pending_tc_count > 0) {
                             const CBMRegisteredFunc *called =
@@ -4284,7 +4295,7 @@ static void c_resolve_calls_in_node_inner(CLSPContext *ctx, TSNode node) {
                         // ADL: search namespaces of argument types
                         const char *adl_qn = c_adl_resolve(ctx, name, node);
                         if (adl_qn) {
-                            c_emit_resolved_call_at(ctx, adl_qn, "lsp_adl", 0.90f, node);
+                            c_emit_resolved_call_at(ctx, adl_qn, "lsp_adl", 0.90, node);
                         } else {
                             c_emit_unresolved_call(ctx, name, "function_not_in_registry");
                         }
@@ -4325,7 +4336,7 @@ static void c_resolve_calls_in_node_inner(CLSPContext *ctx, TSNode node) {
                                 short_name = last_colon + 1;
                             const char *ctor_qn =
                                 cbm_arena_sprintf(ctx->arena, "%s.%s", type_qn, short_name);
-                            c_emit_resolved_call(ctx, ctor_qn, "lsp_constructor", 0.90f);
+                            c_emit_resolved_call(ctx, ctor_qn, "lsp_constructor", 0.90);
                         }
                     }
                 }
@@ -4355,7 +4366,7 @@ static void c_resolve_calls_in_node_inner(CLSPContext *ctx, TSNode node) {
                 const char *short_name = strrchr(type_qn, '.');
                 short_name = short_name ? short_name + 1 : type_qn;
                 const char *ctor_qn = cbm_arena_sprintf(ctx->arena, "%s.%s", type_qn, short_name);
-                c_emit_resolved_call_at(ctx, ctor_qn, "lsp_constructor", 0.95f, node);
+                c_emit_resolved_call_at(ctx, ctor_qn, "lsp_constructor", 0.95, node);
             }
         }
     }
@@ -4378,7 +4389,7 @@ static void c_resolve_calls_in_node_inner(CLSPContext *ctx, TSNode node) {
                 const CBMRegisteredFunc *dtor =
                     c_lookup_member_operator_by_arity(ctx, type_qn, dtor_name, 0);
                 if (dtor) {
-                    c_emit_resolved_call_at(ctx, dtor->qualified_name, "lsp_destructor", 0.90f,
+                    c_emit_resolved_call_at(ctx, dtor->qualified_name, "lsp_destructor", 0.90,
                                             node);
                 }
             }
@@ -4408,14 +4419,14 @@ static void c_resolve_calls_in_node_inner(CLSPContext *ctx, TSNode node) {
                                 m = c_lookup_member(ctx, type_qn, op_name);
                                 if (m)
                                     c_emit_resolved_call_at(ctx, m->qualified_name, "lsp_operator",
-                                                            0.90f, node);
+                                                            0.90, node);
                             }
                         }
                         if (!m) {
                             m = c_lookup_free_operator(ctx, op_name, lhs_type, rhs_type);
                             if (m) {
                                 c_emit_resolved_call_at(ctx, m->qualified_name, "lsp_operator_adl",
-                                                        0.90f, node);
+                                                        0.90, node);
                             }
                         }
                     }
@@ -4448,7 +4459,7 @@ static void c_resolve_calls_in_node_inner(CLSPContext *ctx, TSNode node) {
                                 m = c_lookup_member_operator_by_arity(ctx, type_qn, op_name, 1);
                                 if (m) {
                                     c_emit_resolved_call_at(ctx, m->qualified_name, "lsp_operator",
-                                                            0.90f, node);
+                                                            0.90, node);
                                 }
                             }
                         }
@@ -4456,7 +4467,7 @@ static void c_resolve_calls_in_node_inner(CLSPContext *ctx, TSNode node) {
                             m = c_lookup_free_operator(ctx, op_name, lhs_type, rhs_type);
                             if (m) {
                                 c_emit_resolved_call_at(ctx, m->qualified_name, "lsp_operator_adl",
-                                                        0.90f, node);
+                                                        0.90, node);
                             }
                         }
                     }
@@ -4491,7 +4502,7 @@ static void c_resolve_calls_in_node_inner(CLSPContext *ctx, TSNode node) {
                     type_qn ? c_lookup_member_operator_by_arity(ctx, type_qn, "operator->", 0)
                             : NULL;
                 if (method) {
-                    c_emit_resolved_call_at(ctx, method->qualified_name, "lsp_operator", 0.90f,
+                    c_emit_resolved_call_at(ctx, method->qualified_name, "lsp_operator", 0.90,
                                             node);
                 }
             }
@@ -4511,7 +4522,7 @@ static void c_resolve_calls_in_node_inner(CLSPContext *ctx, TSNode node) {
                     const CBMRegisteredFunc *m =
                         c_lookup_member_operator_by_arity(ctx, type_qn, "operator[]", 1);
                     if (m) {
-                        c_emit_resolved_call_at(ctx, m->qualified_name, "lsp_operator", 0.90f,
+                        c_emit_resolved_call_at(ctx, m->qualified_name, "lsp_operator", 0.90,
                                                 node);
                     }
                 }
@@ -4567,13 +4578,13 @@ static void c_resolve_calls_in_node_inner(CLSPContext *ctx, TSNode node) {
                         const CBMRegisteredFunc *m = c_lookup_member_operator_by_arity(
                             ctx, type_qn, op_name, explicit_arg_count);
                         if (m) {
-                            c_emit_resolved_call_at(ctx, m->qualified_name, "lsp_operator", 0.90f,
+                            c_emit_resolved_call_at(ctx, m->qualified_name, "lsp_operator", 0.90,
                                                     node);
                         } else if (explicit_arg_count == 0) {
                             m = c_lookup_free_unary_operator(ctx, op_name, op_type);
                             if (m) {
                                 c_emit_resolved_call_at(ctx, m->qualified_name, "lsp_operator_adl",
-                                                        0.90f, node);
+                                                        0.90, node);
                             }
                         }
                     }
@@ -4607,7 +4618,7 @@ static void c_resolve_calls_in_node_inner(CLSPContext *ctx, TSNode node) {
                                 short_name = short_name ? short_name + 1 : type_qn;
                                 const char *ctor_qn =
                                     cbm_arena_sprintf(ctx->arena, "%s.%s", type_qn, short_name);
-                                c_emit_resolved_call_at(ctx, ctor_qn, "lsp_copy_constructor", 0.85f,
+                                c_emit_resolved_call_at(ctx, ctor_qn, "lsp_copy_constructor", 0.85,
                                                         node);
                             }
                         }
@@ -4639,7 +4650,7 @@ static void c_resolve_calls_in_node_inner(CLSPContext *ctx, TSNode node) {
                 if (type_qn) {
                     const CBMRegisteredFunc *m = c_lookup_member(ctx, type_qn, "operator bool");
                     if (m) {
-                        c_emit_resolved_call_at(ctx, m->qualified_name, "lsp_conversion", 0.85f,
+                        c_emit_resolved_call_at(ctx, m->qualified_name, "lsp_conversion", 0.85,
                                                 node);
                     }
                 }
@@ -4897,11 +4908,12 @@ static void c_process_function(CLSPContext *ctx, TSNode func_node) {
     // positional fallback, which is graceful degradation.
     if (ctx->in_template && ctx->template_param_count > 0 && !ctx->registry_shared) {
         // Find the registered function and set type_param_names
-        for (int ri = 0; ri < ((CBMTypeRegistry *)ctx->registry)->func_count; ri++) {
-            CBMRegisteredFunc *rf = &((CBMTypeRegistry *)ctx->registry)->funcs[ri];
+        for (int ri = 0; ri < ctx->registry->func_count; ri++) {
+            CBMRegisteredFunc *rf = &ctx->registry->funcs[ri];
             if (strcmp(rf->qualified_name, func_qn) == 0 && !rf->type_param_names) {
                 const char **tpn = (const char **)cbm_arena_alloc(
-                    ctx->arena, (ctx->template_param_count + 1) * sizeof(const char *));
+                    ctx->arena,
+                    ((size_t)ctx->template_param_count + 1U) * sizeof(const char *));
                 for (int ti = 0; ti < ctx->template_param_count; ti++)
                     tpn[ti] = ctx->template_param_names[ti];
                 tpn[ctx->template_param_count] = NULL;
@@ -4943,8 +4955,8 @@ static void c_process_function(CLSPContext *ctx, TSNode func_node) {
     }
     // Set min_params on the registered function (for default-arg overload matching)
     if (total_params > 0 && defaulted_params > 0) {
-        for (int ri = 0; ri < ((CBMTypeRegistry *)ctx->registry)->func_count; ri++) {
-            CBMRegisteredFunc *rf = &((CBMTypeRegistry *)ctx->registry)->funcs[ri];
+        for (int ri = 0; ri < ctx->registry->func_count; ri++) {
+            CBMRegisteredFunc *rf = &ctx->registry->funcs[ri];
             if (strcmp(rf->qualified_name, func_qn) == 0 && rf->min_params < 0) {
                 rf->min_params = total_params - defaulted_params;
                 break;
@@ -5067,13 +5079,13 @@ static void c_process_body_child(CLSPContext *ctx, TSNode child) {
                                     if (ctx->in_template && ctx->template_param_count > 0) {
                                         const char **tpn = (const char **)cbm_arena_alloc(
                                             ctx->arena,
-                                            (ctx->template_param_count + 1) * sizeof(char *));
+                                            ((size_t)ctx->template_param_count + 1U) * sizeof(char *));
                                         for (int tp = 0; tp < ctx->template_param_count; tp++)
                                             tpn[tp] = ctx->template_param_names[tp];
                                         tpn[ctx->template_param_count] = NULL;
                                         rf.type_param_names = tpn;
                                     }
-                                    cbm_registry_add_func((CBMTypeRegistry *)ctx->registry, rf);
+                                    cbm_registry_add_func(ctx->registry, rf);
                                 }
                             }
                         }
@@ -5176,16 +5188,16 @@ static void c_process_class(CLSPContext *ctx, TSNode class_node) {
             // Store template param names on the registered type (for substitution)
             if (ctx->in_template && ctx->template_param_names && ctx->template_param_count > 0) {
                 CBMRegisteredType *rt = NULL;
-                for (int ri = 0; ri < ((CBMTypeRegistry *)ctx->registry)->type_count; ri++) {
-                    if (strcmp(((CBMTypeRegistry *)ctx->registry)->types[ri].qualified_name,
-                               class_qn) == 0) {
-                        rt = &((CBMTypeRegistry *)ctx->registry)->types[ri];
+                for (int ri = 0; ri < ctx->registry->type_count; ri++) {
+                    if (strcmp(ctx->registry->types[ri].qualified_name, class_qn) == 0) {
+                        rt = &ctx->registry->types[ri];
                         break;
                     }
                 }
                 if (rt && !rt->type_param_names) {
                     const char **tpn = (const char **)cbm_arena_alloc(
-                        ctx->arena, (ctx->template_param_count + 1) * sizeof(const char *));
+                    ctx->arena,
+                    ((size_t)ctx->template_param_count + 1U) * sizeof(const char *));
                     for (int pi = 0; pi < ctx->template_param_count; pi++)
                         tpn[pi] = ctx->template_param_names[pi];
                     tpn[ctx->template_param_count] = NULL;
@@ -5307,17 +5319,18 @@ static void c_process_class(CLSPContext *ctx, TSNode class_node) {
                         const char *dk = ts_node_type(cur);
                         if (strcmp(dk, "function_declarator") == 0) {
                             // Found method declaration — extract name
-                            TSNode name_node = ts_node_child_by_field_name(cur, "declarator", 10);
-                            if (ts_node_is_null(name_node))
+                            TSNode method_name_node =
+                                ts_node_child_by_field_name(cur, "declarator", 10);
+                            if (ts_node_is_null(method_name_node))
                                 break;
                             char *method_name = NULL;
-                            const char *nk = ts_node_type(name_node);
+                            const char *nk = ts_node_type(method_name_node);
                             if (strcmp(nk, "field_identifier") == 0 ||
                                 strcmp(nk, "identifier") == 0) {
-                                method_name = c_node_text(ctx, name_node);
+                                method_name = c_node_text(ctx, method_name_node);
                             } else if (strcmp(nk, "destructor_name") == 0 ||
                                        strcmp(nk, "operator_name") == 0) {
-                                method_name = c_node_text(ctx, name_node);
+                                method_name = c_node_text(ctx, method_name_node);
                             }
                             if (!method_name || !method_name[0])
                                 break;
@@ -5346,8 +5359,9 @@ static void c_process_class(CLSPContext *ctx, TSNode class_node) {
                                     existing->signature->kind == CBM_TYPE_FUNC &&
                                     existing->signature->data.func.return_types &&
                                     existing->signature->data.func.return_types[0]) {
-                                    int ek = existing->signature->data.func.return_types[0]->kind;
-                                    int nk2 = actual_ret ? actual_ret->kind : CBM_TYPE_UNKNOWN;
+                                    CBMTypeKind ek = existing->signature->data.func.return_types[0]->kind;
+                                    CBMTypeKind nk2 =
+                                        actual_ret ? actual_ret->kind : CBM_TYPE_UNKNOWN;
                                     // Upgrade if existing is NAMED and new is more specific
                                     if (ek == CBM_TYPE_NAMED &&
                                         (nk2 == CBM_TYPE_TEMPLATE || nk2 == CBM_TYPE_TYPE_PARAM ||
@@ -5360,9 +5374,14 @@ static void c_process_class(CLSPContext *ctx, TSNode class_node) {
                                         ctx->arena, 2 * sizeof(const CBMType *));
                                     new_rets[0] = actual_ret;
                                     new_rets[1] = NULL;
-                                    CBMRegisteredFunc *mut = (CBMRegisteredFunc *)existing;
-                                    mut->signature = cbm_type_func_replace_returns(
-                                        ctx->arena, existing->signature, new_rets);
+                                    for (int ri = 0; ri < ctx->registry->func_count; ri++) {
+                                        CBMRegisteredFunc *registered = &ctx->registry->funcs[ri];
+                                        if (registered == existing) {
+                                            registered->signature = cbm_type_func_replace_returns(
+                                                ctx->arena, existing->signature, new_rets);
+                                            break;
+                                        }
+                                    }
                                 }
                                 break;
                             }
@@ -5378,7 +5397,7 @@ static void c_process_class(CLSPContext *ctx, TSNode class_node) {
                             rf.receiver_type = ctx->enclosing_class_qn;
                             rf.signature = cbm_type_func(ctx->arena, NULL, NULL, rets);
                             rf.min_params = -1;
-                            cbm_registry_add_func((CBMTypeRegistry *)ctx->registry, rf);
+                            cbm_registry_add_func(ctx->registry, rf);
                             break;
                         } else if (strcmp(dk, "reference_declarator") == 0) {
                             actual_ret = cbm_type_reference(ctx->arena, actual_ret);
@@ -5708,7 +5727,7 @@ void cbm_run_c_lsp(CBMArena *arena, CBMFileResult *result, const char *source, i
                     bc_count++;
                 if (bc_count > 0) {
                     const char **embedded = (const char **)cbm_arena_alloc(
-                        arena, (bc_count + 1) * sizeof(const char *));
+                        arena, ((size_t)bc_count + 1U) * sizeof(const char *));
                     for (int j = 0; j < bc_count; j++) {
                         const char *bc = d->base_classes[j];
                         // Check if already qualified
@@ -5744,9 +5763,10 @@ void cbm_run_c_lsp(CBMArena *arena, CBMFileResult *result, const char *source, i
                 }
                 // Add this field
                 const char **new_fnames =
-                    (const char **)cbm_arena_alloc(arena, (existing + 2) * sizeof(const char *));
+                    (const char **)cbm_arena_alloc(arena,
+                                                    ((size_t)existing + 2U) * sizeof(const char *));
                 const CBMType **new_ftypes = (const CBMType **)cbm_arena_alloc(
-                    arena, (existing + 2) * sizeof(const CBMType *));
+                    arena, ((size_t)existing + 2U) * sizeof(const CBMType *));
                 if (new_fnames && new_ftypes) {
                     for (int j = 0; j < existing; j++) {
                         new_fnames[j] = parent_rt->field_names[j];
@@ -5783,7 +5803,7 @@ void cbm_run_c_lsp(CBMArena *arena, CBMFileResult *result, const char *source, i
                     count++;
                 if (count > 0) {
                     ret_types = (const CBMType **)cbm_arena_alloc(
-                        arena, (count + 1) * sizeof(const CBMType *));
+                        arena, ((size_t)count + 1U) * sizeof(const CBMType *));
                     for (int j = 0; j < count; j++)
                         ret_types[j] =
                             c_parse_return_type_text(arena, d->return_types[j], module_qn);
@@ -5858,7 +5878,8 @@ static void c_register_lsp_defs(CBMArena *arena, CBMTypeRegistry *reg, const cha
                 while (*src && embed_count < 31) {
                     const char *sep = strchr(src, '|');
                     if (sep) {
-                        embeds[embed_count++] = cbm_arena_strndup(arena, src, sep - src);
+                        embeds[embed_count++] =
+                            cbm_arena_strndup(arena, src, (size_t)(sep - src));
                         src = sep + 1;
                     } else {
                         embeds[embed_count++] = cbm_arena_strdup(arena, src);
@@ -5867,7 +5888,7 @@ static void c_register_lsp_defs(CBMArena *arena, CBMTypeRegistry *reg, const cha
                 }
                 if (embed_count > 0) {
                     const char **arr = (const char **)cbm_arena_alloc(
-                        arena, (embed_count + 1) * sizeof(const char *));
+                        arena, ((size_t)embed_count + 1U) * sizeof(const char *));
                     for (int j = 0; j < embed_count; j++)
                         arr[j] = embeds[j];
                     arr[embed_count] = NULL;
@@ -5884,7 +5905,7 @@ static void c_register_lsp_defs(CBMArena *arena, CBMTypeRegistry *reg, const cha
                 while (*fsrc && fcount < 63) {
                     const char *sep = strchr(fsrc, '|');
                     const char *end = sep ? sep : fsrc + strlen(fsrc);
-                    char *pair = cbm_arena_strndup(arena, fsrc, end - fsrc);
+                    char *pair = cbm_arena_strndup(arena, fsrc, (size_t)(end - fsrc));
                     char *colon = strchr(pair, ':');
                     if (colon) {
                         *colon = '\0';
@@ -5899,9 +5920,10 @@ static void c_register_lsp_defs(CBMArena *arena, CBMTypeRegistry *reg, const cha
                 }
                 if (fcount > 0) {
                     const char **fnarr =
-                        (const char **)cbm_arena_alloc(arena, (fcount + 1) * sizeof(const char *));
+                        (const char **)cbm_arena_alloc(arena,
+                                                        ((size_t)fcount + 1U) * sizeof(const char *));
                     const CBMType **ftarr = (const CBMType **)cbm_arena_alloc(
-                        arena, (fcount + 1) * sizeof(const CBMType *));
+                        arena, ((size_t)fcount + 1U) * sizeof(const CBMType *));
                     for (int j = 0; j < fcount; j++) {
                         fnarr[j] = fnames[j];
                         ftarr[j] = ftypes[j];
@@ -5934,7 +5956,7 @@ static void c_register_lsp_defs(CBMArena *arena, CBMTypeRegistry *reg, const cha
                 while (*rsrc && rcount < 15) {
                     const char *sep = strchr(rsrc, '|');
                     const char *end = sep ? sep : rsrc + strlen(rsrc);
-                    char *rt_text = cbm_arena_strndup(arena, rsrc, end - rsrc);
+                    char *rt_text = cbm_arena_strndup(arena, rsrc, (size_t)(end - rsrc));
                     rets[rcount++] = c_parse_return_type_text(arena, rt_text, def_module);
                     if (!sep)
                         break;
@@ -5942,7 +5964,7 @@ static void c_register_lsp_defs(CBMArena *arena, CBMTypeRegistry *reg, const cha
                 }
                 if (rcount > 0) {
                     const CBMType **rarr = (const CBMType **)cbm_arena_alloc(
-                        arena, (rcount + 1) * sizeof(const CBMType *));
+                        arena, ((size_t)rcount + 1U) * sizeof(const CBMType *));
                     for (int j = 0; j < rcount; j++)
                         rarr[j] = rets[j];
                     rarr[rcount] = NULL;
@@ -5998,7 +6020,7 @@ void cbm_run_c_lsp_cross_with_registry(CBMArena *arena, const char *source, int 
                                        const char **include_paths, const char **include_ns_qns,
                                        int include_count, TSTree *cached_tree,
                                        CBMResolvedCallArray *out) {
-    if (!source || source_len == 0 || !out || !reg)
+    if (!source || source_len <= 0 || !out || !reg)
         return;
 
     TSParser *parser = NULL;
@@ -6010,7 +6032,7 @@ void cbm_run_c_lsp_cross_with_registry(CBMArena *arena, const char *source, int 
             return;
         const TSLanguage *ts_lang = cpp_mode ? tree_sitter_cpp() : tree_sitter_c();
         ts_parser_set_language(parser, ts_lang);
-        tree = ts_parser_parse_string(parser, NULL, source, source_len);
+        tree = ts_parser_parse_string(parser, NULL, source, (uint32_t)source_len);
         ts_parser_delete(parser);
         owns_tree = true;
         if (!tree)
@@ -6036,7 +6058,7 @@ void cbm_run_c_lsp_cross(CBMArena *arena, const char *source, int source_len, co
                          const char **include_ns_qns, int include_count, TSTree *cached_tree,
                          CBMResolvedCallArray *out) {
 
-    if (!source || source_len == 0 || !out)
+    if (!source || source_len <= 0 || !out)
         return;
 
     CBMTypeRegistry reg;
@@ -6060,7 +6082,7 @@ void cbm_run_c_lsp_cross(CBMArena *arena, const char *source, int source_len, co
             return;
         const TSLanguage *ts_lang = cpp_mode ? tree_sitter_cpp() : tree_sitter_c();
         ts_parser_set_language(parser, ts_lang);
-        tree = ts_parser_parse_string(parser, NULL, source, source_len);
+        tree = ts_parser_parse_string(parser, NULL, source, (uint32_t)source_len);
         ts_parser_delete(parser);
         owns_tree = true;
         if (!tree)
@@ -6120,7 +6142,8 @@ void cbm_batch_c_lsp_cross(CBMArena *arena, CBMBatchCLSPFile *files, int file_co
         if (file_out.count > 0) {
             out[f].count = file_out.count;
             out[f].items =
-                (CBMResolvedCall *)cbm_arena_alloc(arena, file_out.count * sizeof(CBMResolvedCall));
+                (CBMResolvedCall *)cbm_arena_alloc(arena,
+                                                    (size_t)file_out.count * sizeof(CBMResolvedCall));
             for (int j = 0; j < file_out.count; j++) {
                 CBMResolvedCall *src = &file_out.items[j];
                 CBMResolvedCall *dst = &out[f].items[j];

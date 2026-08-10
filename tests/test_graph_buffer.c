@@ -6,6 +6,7 @@
  */
 #include "test_framework.h"
 #include "suites.h"
+#include "test_helpers.h"
 #include "graph_buffer/graph_buffer.h"
 #include "store/store.h"
 #include "foundation/constants.h"
@@ -117,6 +118,33 @@ TEST(gbuf_find_by_name) {
     int rc = cbm_gbuf_find_by_name(gb, "main", &nodes, &count);
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(count, 2);
+
+    cbm_gbuf_free(gb);
+    PASS();
+}
+
+/* A source symbol is allowed to be named "{}". That name is independent of
+ * an absent name and of the empty JSON object used for absent properties. */
+TEST(gbuf_missing_and_literal_empty_object_names_stay_distinct) {
+    cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
+    cbm_node_id_value(cbm_gbuf_upsert_node(gb, "Function", NULL, "pkg.unnamed", "f.go", 1, 5,
+                                           NULL));
+    cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "Function", "{}", "pkg.literal_empty_object", "f.go", 6, 10, NULL));
+
+    const cbm_gbuf_node_t **nodes = NULL;
+    int count = 0;
+    ASSERT_EQ(cbm_gbuf_find_by_name(gb, "{}", &nodes, &count), 0);
+    ASSERT_EQ(count, 1);
+    ASSERT_STR_EQ(nodes[0]->name, "{}");
+    ASSERT_STR_EQ(nodes[0]->properties_json, "{}");
+    ASSERT_EQ(cbm_gbuf_find_by_name(gb, NULL, &nodes, &count), CBM_NOT_FOUND);
+
+    const cbm_gbuf_node_t *unnamed = cbm_gbuf_find_by_qn(gb, "pkg.unnamed");
+    ASSERT_NOT_NULL(unnamed);
+    ASSERT_NULL(unnamed->name);
+    ASSERT_STR_EQ(unnamed->properties_json, "{}");
+    ASSERT_EQ(cbm_gbuf_node_count(gb), 2);
 
     cbm_gbuf_free(gb);
     PASS();
@@ -980,6 +1008,37 @@ TEST(gbuf_merge_overlapping_qns) {
     PASS();
 }
 
+/* Parallel extraction merges local graph buffers. An absent source name must
+ * remain absent while a literal "{}" name remains indexed after that merge. */
+TEST(gbuf_merge_preserves_missing_and_literal_empty_object_names) {
+    cbm_gbuf_t *dst = cbm_gbuf_new("test", "/tmp");
+    cbm_gbuf_t *src = cbm_gbuf_new("test", "/tmp");
+    cbm_node_id_value(cbm_gbuf_upsert_node(dst, "Function", NULL, "pkg.unnamed", "a.go", 1, 5,
+                                           NULL));
+    cbm_node_id_value(cbm_gbuf_upsert_node(src, "Function", "{}", "pkg.literal_empty_object",
+                                           "b.go", 1, 5, NULL));
+
+    ASSERT_EQ(cbm_gbuf_merge(dst, src), 0);
+    ASSERT_EQ(cbm_gbuf_node_count(dst), 2);
+
+    const cbm_gbuf_node_t *unnamed = cbm_gbuf_find_by_qn(dst, "pkg.unnamed");
+    ASSERT_NOT_NULL(unnamed);
+    ASSERT_NULL(unnamed->name);
+    const cbm_gbuf_node_t *literal = cbm_gbuf_find_by_qn(dst, "pkg.literal_empty_object");
+    ASSERT_NOT_NULL(literal);
+    ASSERT_STR_EQ(literal->name, "{}");
+
+    const cbm_gbuf_node_t **nodes = NULL;
+    int count = 0;
+    ASSERT_EQ(cbm_gbuf_find_by_name(dst, "{}", &nodes, &count), 0);
+    ASSERT_EQ(count, 1);
+    ASSERT_STR_EQ(nodes[0]->qualified_name, "pkg.literal_empty_object");
+
+    cbm_gbuf_free(dst);
+    cbm_gbuf_free(src);
+    PASS();
+}
+
 TEST(gbuf_merge_edge_dedup) {
     _Atomic int64_t shared = 1;
     cbm_gbuf_t *dst = cbm_gbuf_new_shared_ids("test", "/tmp", &shared);
@@ -1161,6 +1220,47 @@ TEST(gbuf_merge_into_store_preserves) {
     PASS();
 }
 
+TEST(gbuf_store_round_trip_preserves_missing_and_literal_empty_object_names) {
+    char directory[] = "/tmp/cbm_gbuf_names_XXXXXX";
+    ASSERT_NOT_NULL(cbm_mkdtemp(directory));
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/graph.db", directory);
+
+    cbm_gbuf_t *written = cbm_gbuf_new("proj", directory);
+    cbm_node_id_value(cbm_gbuf_upsert_node(written, "Function", NULL, "proj::unnamed", "a.go", 1,
+                                           5, NULL));
+    cbm_node_id_value(cbm_gbuf_upsert_node(written, "Function", "{}", "proj::literal_empty_object",
+                                           "b.go", 1, 5, NULL));
+    cbm_store_t *store = cbm_store_open_path(db_path);
+    ASSERT_NOT_NULL(store);
+    ASSERT_EQ(cbm_gbuf_flush_to_store(written, store), 0);
+    cbm_store_close(store);
+
+    cbm_gbuf_t *loaded = cbm_gbuf_new("proj", directory);
+    ASSERT_EQ(cbm_gbuf_load_from_db(loaded, db_path, "proj"), 0);
+    ASSERT_EQ(cbm_gbuf_node_count(loaded), 2);
+
+    const cbm_gbuf_node_t *unnamed = cbm_gbuf_find_by_qn(loaded, "proj::unnamed");
+    ASSERT_NOT_NULL(unnamed);
+    ASSERT_NULL(unnamed->name);
+    ASSERT_STR_EQ(unnamed->properties_json, "{}");
+    const cbm_gbuf_node_t *literal = cbm_gbuf_find_by_qn(loaded, "proj::literal_empty_object");
+    ASSERT_NOT_NULL(literal);
+    ASSERT_STR_EQ(literal->name, "{}");
+    ASSERT_STR_EQ(literal->properties_json, "{}");
+
+    const cbm_gbuf_node_t **nodes = NULL;
+    int count = 0;
+    ASSERT_EQ(cbm_gbuf_find_by_name(loaded, "{}", &nodes, &count), 0);
+    ASSERT_EQ(count, 1);
+    ASSERT_STR_EQ(nodes[0]->qualified_name, "proj::literal_empty_object");
+
+    cbm_gbuf_free(loaded);
+    cbm_gbuf_free(written);
+    th_rmtree(directory);
+    PASS();
+}
+
 /* ── Shared ID tests ──────────────────────────────────────────── */
 
 TEST(gbuf_shared_ids_unique) {
@@ -1280,6 +1380,7 @@ SUITE(graph_buffer) {
     RUN_TEST(gbuf_find_by_id);
     RUN_TEST(gbuf_find_by_label);
     RUN_TEST(gbuf_find_by_name);
+    RUN_TEST(gbuf_missing_and_literal_empty_object_names_stay_distinct);
     RUN_TEST(gbuf_delete_by_label);
     RUN_TEST(gbuf_insert_edge);
     RUN_TEST(gbuf_edge_dedup);
@@ -1320,6 +1421,7 @@ SUITE(graph_buffer) {
 
     /* Merge tests */
     RUN_TEST(gbuf_merge_overlapping_qns);
+    RUN_TEST(gbuf_merge_preserves_missing_and_literal_empty_object_names);
     RUN_TEST(gbuf_merge_edge_dedup);
     RUN_TEST(gbuf_merge_empty_src_into_populated_dst);
     RUN_TEST(gbuf_merge_populated_src_into_empty_dst);
@@ -1329,6 +1431,7 @@ SUITE(graph_buffer) {
     RUN_TEST(gbuf_flush_to_store_null);
     RUN_TEST(gbuf_flush_verify_store_data);
     RUN_TEST(gbuf_merge_into_store_preserves);
+    RUN_TEST(gbuf_store_round_trip_preserves_missing_and_literal_empty_object_names);
     RUN_TEST(gbuf_flush_skips_orphan_edges);
 
     /* Shared ID tests */

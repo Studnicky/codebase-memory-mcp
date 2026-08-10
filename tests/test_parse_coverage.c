@@ -105,6 +105,38 @@ static const char *PY_CLEAN = "def ok():\n"
                               "def ok2():\n"
                               "    return 2\n";
 
+/* Two preprocessor-split loops make tree-sitter C promote the outer tree to
+ * ERROR while retaining the normal trailing definition. This is deliberately
+ * small: a descendant ERROR fixture does not exercise root-ERROR handling. */
+static const char *C_ROOT_ERROR_RECOVERED =
+    "int first(int force) {\n"
+    "    for (int i = 0; i < 1; i++) {\n"
+    "        int value;\n"
+    "#ifndef X\n"
+    "        if (value) {\n"
+    "#else\n"
+    "        if (!value) {\n"
+    "#endif\n"
+    "            continue;\n"
+    "        }\n"
+    "    }\n"
+    "    return force;\n"
+    "}\n"
+    "int second(int force) {\n"
+    "    for (int i = 0; i < 1; i++) {\n"
+    "        int value;\n"
+    "#ifndef X\n"
+    "        if (value) {\n"
+    "#else\n"
+    "        if (!value) {\n"
+    "#endif\n"
+    "            continue;\n"
+    "        }\n"
+    "    }\n"
+    "    return force;\n"
+    "}\n"
+    "int recovered(void) { return 1; }\n";
+
 /* ── Tests ────────────────────────────────────────────────────────────────── */
 
 TEST(c_ifdef_split_brace_sets_parse_incomplete) {
@@ -246,6 +278,25 @@ TEST(c_trailing_recovered_defs_keep_flag) {
     PASS();
 }
 
+TEST(c_root_error_keeps_recovered_def_and_narrow_range) {
+    CBMFileResult *r = do_extract(C_ROOT_ERROR_RECOVERED, CBM_LANG_C, "root_error.c");
+    ASSERT_NOT_NULL(r);
+    ASSERT_STR_EQ(ts_node_type(ts_tree_root_node(r->cached_tree)), "ERROR");
+    ASSERT_FALSE(r->has_error);
+    ASSERT_TRUE(has_def(r, "recovered"));
+    ASSERT_TRUE(r->parse_incomplete);
+    ASSERT_GTE(r->error_region_count, 1);
+    ASSERT_NOT_NULL(r->error_ranges);
+    unsigned int start = 0;
+    unsigned int end = 0;
+    ASSERT_EQ(sscanf(r->error_ranges, "%u-%u", &start, &end), 2);
+    ASSERT_GTE(start, 1u);
+    ASSERT_LT(end, 27u); /* a root-wide range would end at the fixture EOF */
+    ASSERT_LTE(start, end);
+    cbm_free_result(r);
+    PASS();
+}
+
 /* ── Suite ────────────────────────────────────────────────────────────────── */
 
 SUITE(parse_coverage) {
@@ -258,4 +309,5 @@ SUITE(parse_coverage) {
     RUN_TEST(py_clean_file_not_flagged);
     RUN_TEST(error_region_cap_is_honored);
     RUN_TEST(c_trailing_recovered_defs_keep_flag);
+    RUN_TEST(c_root_error_keeps_recovered_def_and_narrow_range);
 }

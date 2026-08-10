@@ -12,7 +12,7 @@ typedef struct {
     CBMArena *arena;
     const char *source;
     int source_len;
-    const CBMTypeRegistry *registry;
+    CBMTypeRegistry *registry;
     CBMScope *current_scope;
 
     // Include map: header_path -> namespace QN prefix
@@ -103,7 +103,7 @@ typedef struct {
 // --- API ---
 
 void c_lsp_init(CLSPContext *ctx, CBMArena *arena, const char *source, int source_len,
-                const CBMTypeRegistry *registry, const char *module_qn, bool cpp_mode,
+                CBMTypeRegistry *registry, const char *module_qn, bool cpp_mode,
                 CBMResolvedCallArray *out);
 
 void c_lsp_add_include(CLSPContext *ctx, const char *header_path, const char *ns_qn);

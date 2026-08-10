@@ -131,20 +131,6 @@ static bool node_kind_is(TSNode node, const char *kind) {
     return strcmp(ts_node_type(node), kind) == 0;
 }
 
-// Find the first named child of `node` whose kind matches one of the listed kinds.
-static TSNode find_first_kind(TSNode node, const char *kind) {
-    if (ts_node_is_null(node))
-        return node;
-    uint32_t nc = ts_node_named_child_count(node);
-    for (uint32_t i = 0; i < nc; i++) {
-        TSNode c = ts_node_named_child(node, i);
-        if (!ts_node_is_null(c) && strcmp(ts_node_type(c), kind) == 0)
-            return c;
-    }
-    TSNode null_node = {0};
-    return null_node;
-}
-
 static void ts_emit_resolved_call_at(TSLSPContext *ctx, const char *callee_qn, const char *strategy,
                                      double confidence, TSNode site) {
     if (!ctx || !ctx->resolved_calls || !callee_qn || !ctx->enclosing_func_qn)
@@ -189,7 +175,7 @@ static void ts_emit_unresolved_call_at(TSLSPContext *ctx, const char *expr_text,
     rc.caller_qn = ctx->enclosing_func_qn;
     rc.callee_qn = expr_text ? expr_text : "?";
     rc.strategy = "lsp_unresolved";
-    rc.confidence = 0.0f;
+    rc.confidence = 0.0;
     rc.reason = reason;
     rc.kind = CBM_RESOLVED_INVOCATION;
     if (!ts_node_is_null(site)) {
@@ -1643,47 +1629,6 @@ static const CBMType *unwrap_passthrough_template(const CBMType *t) {
     return t;
 }
 
-// Build a UNION of LITERAL string types representing keyof T, where T is a registered
-// class/interface. Returns UNKNOWN if T has no fields or isn't registered.
-static const CBMType *eval_keyof(TSLSPContext *ctx, const CBMType *operand) {
-    if (!ctx || !operand)
-        return cbm_type_unknown();
-    const CBMType *base = simplify_type(ctx, operand);
-    if (!base || base->kind != CBM_TYPE_NAMED)
-        return cbm_type_unknown();
-    const CBMRegisteredType *rt =
-        cbm_registry_lookup_type(ctx->registry, base->data.named.qualified_name);
-    if (!rt || !rt->field_names || !rt->field_names[0])
-        return cbm_type_unknown();
-    int fc = 0;
-    while (rt->field_names[fc])
-        fc++;
-    const CBMType *members[64];
-    int mc = 0;
-    for (int i = 0; i < fc && mc < 63; i++) {
-        members[mc++] = cbm_type_ts_literal(ctx->arena, "string", rt->field_names[i]);
-    }
-    members[mc] = NULL;
-    if (mc == 0)
-        return cbm_type_unknown();
-    if (mc == 1)
-        return members[0];
-    return cbm_type_union(ctx->arena, members, mc);
-}
-
-// Evaluate T[K]: when K is a string literal, look up that field on T. When K is a
-// type parameter (or `keyof T` itself), return UNKNOWN — pragmatic v1.
-static const CBMType *eval_indexed_access(TSLSPContext *ctx, const CBMType *obj,
-                                          const CBMType *key) {
-    if (!ctx || !obj || !key)
-        return cbm_type_unknown();
-    if (key->kind == CBM_TYPE_TS_LITERAL && key->data.literal_ts.value &&
-        key->data.literal_ts.tag && strcmp(key->data.literal_ts.tag, "string") == 0) {
-        return lookup_member_type(ctx, obj, key->data.literal_ts.value);
-    }
-    return cbm_type_unknown();
-}
-
 // Look up a method on a receiver type — returns the registered func.
 static const CBMRegisteredFunc *lookup_method(TSLSPContext *ctx, const CBMType *recv,
                                               const char *method_name) {
@@ -2630,7 +2575,7 @@ static void resolve_value_references_at(TSLSPContext *ctx, TSNode call_node) {
             const CBMRegisteredFunc *target = lookup_method(ctx, receiver, method_name);
             if (target && target->qualified_name) {
                 ts_emit_resolved_reference(ctx, target->qualified_name,
-                                           "lsp_ts_bound_method_value_reference", 0.95f, property);
+                                           "lsp_ts_bound_method_value_reference", 0.95, property);
             }
             continue;
         }
@@ -2655,7 +2600,7 @@ static void resolve_value_references_at(TSLSPContext *ctx, TSNode call_node) {
             strategy = "lsp_ts_import_value_reference";
         }
         if (target) {
-            ts_emit_resolved_reference(ctx, target->qualified_name, strategy, 0.95f, arg);
+            ts_emit_resolved_reference(ctx, target->qualified_name, strategy, 0.95, arg);
         }
     }
 }
@@ -2686,7 +2631,7 @@ static void resolve_call_at(TSLSPContext *ctx, TSNode call_node) {
                             ts_lookup_namespace_call(ctx, on, mname, args, &is_import);
                         if (f) {
                             ts_emit_resolved_call_at(ctx, f->qualified_name, "lsp_ts_namespace",
-                                                     0.95f, call_node);
+                                                     0.95, call_node);
                             return;
                         }
                         if (is_import) {
@@ -2702,7 +2647,7 @@ static void resolve_call_at(TSLSPContext *ctx, TSNode call_node) {
                 const CBMRegisteredFunc *f = ts_lookup_method_for_call(ctx, recv, mname, args);
 
                 if (f) {
-                    ts_emit_resolved_call_at(ctx, f->qualified_name, "lsp_ts_method", 0.95f,
+                    ts_emit_resolved_call_at(ctx, f->qualified_name, "lsp_ts_method", 0.95,
                                              call_node);
                     return;
                 }
@@ -2724,7 +2669,7 @@ static void resolve_call_at(TSLSPContext *ctx, TSNode call_node) {
         if (ctx->module_qn) {
             const CBMRegisteredFunc *f = ts_lookup_symbol_for_call(ctx, ctx->module_qn, name, args);
             if (f) {
-                ts_emit_resolved_call_at(ctx, f->qualified_name, "lsp_ts_local", 0.95f, call_node);
+                ts_emit_resolved_call_at(ctx, f->qualified_name, "lsp_ts_local", 0.95, call_node);
                 return;
             }
         }
@@ -2735,7 +2680,7 @@ static void resolve_call_at(TSLSPContext *ctx, TSNode call_node) {
             if (lname && mqn && strcmp(lname, name) == 0) {
                 const CBMRegisteredFunc *f = ts_lookup_symbol_for_call(ctx, mqn, name, args);
                 if (f) {
-                    ts_emit_resolved_call_at(ctx, f->qualified_name, "lsp_ts_import", 0.95f,
+                    ts_emit_resolved_call_at(ctx, f->qualified_name, "lsp_ts_import", 0.95,
                                              call_node);
                     return;
                 }
@@ -3056,7 +3001,7 @@ static void resolve_jsx_element(TSLSPContext *ctx, TSNode element_node) {
         const CBMRegisteredFunc *f =
             cbm_registry_lookup_symbol(ctx->registry, ctx->module_qn, tag_name);
         if (f) {
-            ts_emit_resolved_call_at(ctx, f->qualified_name, "lsp_ts_jsx", 0.95f, tag);
+            ts_emit_resolved_call_at(ctx, f->qualified_name, "lsp_ts_jsx", 0.95, tag);
             return;
         }
     }
@@ -3084,7 +3029,7 @@ static void resolve_jsx_element(TSLSPContext *ctx, TSNode element_node) {
              * available. */
             const CBMRegisteredFunc *f = cbm_registry_lookup_symbol(ctx->registry, mqn, tag_name);
             if (f) {
-                ts_emit_resolved_call_at(ctx, f->qualified_name, "lsp_ts_jsx_import", 0.95f, tag);
+                ts_emit_resolved_call_at(ctx, f->qualified_name, "lsp_ts_jsx_import", 0.95, tag);
                 return;
             }
             ts_emit_unresolved_call_at(ctx, tag_name, "jsx_component_not_in_registry", tag);
@@ -5630,7 +5575,8 @@ void cbm_run_ts_lsp_cross_with_registry(CBMArena *arena, const char *source, int
             jsx_mode ? (js_mode ? tree_sitter_javascript() : tree_sitter_tsx())
                      : (js_mode ? tree_sitter_javascript() : tree_sitter_typescript());
         ts_parser_set_language(parser, lang);
-        tree = ts_parser_parse_string(parser, NULL, source, source_len);
+        uint32_t input_length = (uint32_t)source_len;
+        tree = ts_parser_parse_string(parser, NULL, source, input_length);
         ts_parser_delete(parser);
         if (!tree)
             return;
@@ -5841,7 +5787,8 @@ void cbm_run_ts_lsp_cross(CBMArena *arena, const char *source, int source_len,
             jsx_mode ? (js_mode ? tree_sitter_javascript() : tree_sitter_tsx())
                      : (js_mode ? tree_sitter_javascript() : tree_sitter_typescript());
         ts_parser_set_language(parser, lang);
-        tree = ts_parser_parse_string(parser, NULL, source, source_len);
+        uint32_t input_length = (uint32_t)source_len;
+        tree = ts_parser_parse_string(parser, NULL, source, input_length);
         ts_parser_delete(parser);
         if (!tree)
             return;

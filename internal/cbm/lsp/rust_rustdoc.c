@@ -44,9 +44,11 @@ static const char* join_path(CBMArena* arena, yyjson_val* path_arr,
     const char* crate_qn) {
     if (!path_arr || !yyjson_is_arr(path_arr)) return NULL;
     char buf[1024];
-    int off = 0;
+    size_t off = 0;
     if (crate_qn && crate_qn[0]) {
-        off = snprintf(buf, sizeof(buf), "%s", crate_qn);
+        int written = snprintf(buf, sizeof(buf), "%s", crate_qn);
+        if (written < 0 || (size_t)written >= sizeof(buf)) return NULL;
+        off = (size_t)written;
     }
     yyjson_val* part;
     yyjson_arr_iter it;
@@ -60,17 +62,18 @@ static const char* join_path(CBMArena* arena, yyjson_val* path_arr,
             first = false;
             continue;
         }
-        if (off > 0 && off < (int)sizeof(buf) - 1) {
+        if (off > 0 && off < sizeof(buf) - 1) {
             buf[off++] = '.';
         }
-        int n = snprintf(buf + off, sizeof(buf) - off, "%s", s);
-        if (n < 0) break;
-        off += n;
-        if (off >= (int)sizeof(buf) - 1) break;
+        size_t remaining = sizeof(buf) - off;
+        int written = snprintf(buf + off, remaining, "%s", s);
+        if (written < 0 || (size_t)written >= remaining) break;
+        off += (size_t)written;
+        if (off >= sizeof(buf) - 1) break;
         first = false;
     }
-    if (off <= 0) return NULL;
-    return cbm_arena_strndup(arena, buf, (size_t)off);
+    if (off == 0) return NULL;
+    return cbm_arena_strndup(arena, buf, off);
 }
 
 /* Convert a rustdoc Type JSON value into a CBMType. Best-effort —
@@ -197,7 +200,8 @@ static bool register_function(CBMTypeRegistry* reg, CBMArena* arena,
 int cbm_rust_rustdoc_ingest(CBMTypeRegistry* reg, CBMArena* arena,
     const char* json, int json_len, const char* crate_qn) {
     if (!reg || !arena || !json) return 0;
-    yyjson_doc* doc = yyjson_read(json, (size_t)(json_len > 0 ? json_len : strlen(json)), 0);
+    size_t json_size = json_len > 0 ? (size_t)json_len : strlen(json);
+    yyjson_doc* doc = yyjson_read(json, json_size, 0);
     if (!doc) return 0;
     yyjson_val* root = yyjson_doc_get_root(doc);
     if (!yyjson_is_obj(root)) { yyjson_doc_free(doc); return 0; }
