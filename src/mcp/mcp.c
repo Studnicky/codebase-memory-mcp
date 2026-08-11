@@ -6278,6 +6278,8 @@ enum {
     TRACE_CURSOR_LEG_FIELD_BYTES = 2,
     TRACE_CURSOR_HEX_RADIX = 16,
     TRACE_CURSOR_BOOLEAN_TRUE = 1,
+    TRACE_CURSOR_TOKEN_CAPACITY = 192,
+    TRACE_MINIMUM_LIMIT = 1,
 };
 
 static const uint64_t TRACE_FNV1A_64_PRIME = UINT64_C(0x100000001b3);
@@ -6821,83 +6823,73 @@ static int clamp_mcp_depth(int depth, const char *tool) {
     return depth;
 }
 
-static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
-    char *func_name = cbm_mcp_get_string_arg(args, "function_name");
-    char *project = get_project_arg(args);
-    cbm_store_t *store = resolve_store(srv, project);
-    char *direction = cbm_mcp_get_string_arg(args, "direction");
-    char *mode = cbm_mcp_get_string_arg(args, "mode");
-    char *param_name = cbm_mcp_get_string_arg(args, "parameter_name");
-    int depth = cbm_mcp_get_int_arg(args, "depth", MCP_DEFAULT_DEPTH);
-    depth = clamp_mcp_depth(depth, "trace_call_path");
-    /* Per-direction node budget for the BFS working set. The old fixed
-     * MCP_BFS_LIMIT silently truncated hub traces at 100 nodes with no
-     * signal; now the limit is a documented parameter and hitting it emits
-     * `truncated: true` (never a silent truncation — same policy as the
-     * depth clamp, #887). */
-    int trace_limit = cbm_mcp_get_int_arg(args, "limit", MCP_BFS_LIMIT);
-    if (trace_limit < 1) {
-        trace_limit = 1;
-    }
-    if (trace_limit > MCP_BFS_LIMIT_MAX) {
-        trace_limit = MCP_BFS_LIMIT_MAX;
-    }
-    bool risk_labels = cbm_mcp_get_bool_arg(args, "risk_labels");
-    bool include_tests = cbm_mcp_get_bool_arg(args, "include_tests");
-    /* Off by default: two extra columns on every row is exactly the kind of
-     * inflation the tree format exists to avoid. Opt in when you need to judge
-     * whether an edge is trustworthy. */
-    bool include_evidence = cbm_mcp_get_bool_arg(args, "include_evidence");
+typedef struct {
+    char *function_name;
+    char *project;
+    char *direction;
+    char *mode;
+    char *parameter_name;
+    int depth;
+    int limit;
+    bool risk_labels;
+    bool include_tests;
+    bool include_evidence;
+} trace_request_t;
 
-    if (!func_name) {
-        free(project);
-        free(direction);
-        free(mode);
-        free(param_name);
+static void trace_request_init(trace_request_t *request, const char *args) {
+    *request = (trace_request_t){
+        .function_name = cbm_mcp_get_string_arg(args, "function_name"),
+        .project = get_project_arg(args),
+        .direction = cbm_mcp_get_string_arg(args, "direction"),
+        .mode = cbm_mcp_get_string_arg(args, "mode"),
+        .parameter_name = cbm_mcp_get_string_arg(args, "parameter_name"),
+        .depth = clamp_mcp_depth(cbm_mcp_get_int_arg(args, "depth", MCP_DEFAULT_DEPTH),
+                                 "trace_call_path"),
+        .limit = cbm_mcp_get_int_arg(args, "limit", MCP_BFS_LIMIT),
+        .risk_labels = cbm_mcp_get_bool_arg(args, "risk_labels"),
+        .include_tests = cbm_mcp_get_bool_arg(args, "include_tests"),
+        .include_evidence = cbm_mcp_get_bool_arg(args, "include_evidence"),
+    };
+    if (request->limit < TRACE_MINIMUM_LIMIT) {
+        request->limit = TRACE_MINIMUM_LIMIT;
+    }
+    if (request->limit > MCP_BFS_LIMIT_MAX) {
+        request->limit = MCP_BFS_LIMIT_MAX;
+    }
+}
+
+static void trace_request_dispose(trace_request_t *request) {
+    free(request->function_name);
+    free(request->project);
+    free(request->direction);
+    free(request->mode);
+    free(request->parameter_name);
+    *request = (trace_request_t){0};
+}
+
+static char *trace_request_validate_store(cbm_store_t *store, const trace_request_t *request) {
+    if (!request->function_name) {
         return cbm_mcp_text_result("function_name is required", true);
     }
     if (!store) {
-        char *_err = build_project_list_error("project not found or not indexed");
-        char *_res = cbm_mcp_text_result(_err, true);
-        free(_err);
-        free(func_name);
-        free(project);
-        free(direction);
-        free(mode);
-        free(param_name);
-        return _res;
+        char *error = build_project_list_error("project not found or not indexed");
+        char *result = cbm_mcp_text_result(error, true);
+        free(error);
+        return result;
     }
+    return verify_project_indexed(store, request->project);
+}
 
-    char *not_indexed = verify_project_indexed(store, project);
-    if (not_indexed) {
-        free(func_name);
-        free(project);
-        free(direction);
-        free(mode);
-        free(param_name);
-        return not_indexed;
-    }
-
-    /* Pagination: decode + validate the resume cursor (if any) against the
-     * current store generation and the canonical params. Errors teach the
-     * recovery action instead of silently restarting from page 1. */
-    char generation[96];
-    (void)cbm_store_generation(store, generation, sizeof(generation));
+static char *trace_cursor_validate(const char *args, cbm_store_t *store,
+                                   const trace_request_t *request, char *generation,
+                                   size_t generation_capacity, trace_cursor_t *cursor,
+                                   bool *have_cursor, bool *generation_is_legacy) {
+    *have_cursor = false;
+    (void)cbm_store_generation(store, generation, generation_capacity);
+    *generation_is_legacy = strcmp(generation, "legacy") == 0;
     char *cursor_arg = cbm_mcp_get_string_arg(args, "cursor");
-    trace_cursor_t cur = {0};
-    bool have_cursor = false;
-    /* A "legacy" generation (pre-migration DB, e.g. opened read-only before
-     * any reindex) offers NO staleness detection: "legacy" == "legacy" across
-     * rebuilds, so a stale watermark would silently resume on wrong node ids.
-     * Cursors are therefore never minted nor accepted under it. */
-    bool gen_legacy = strcmp(generation, "legacy") == 0;
-    if (gen_legacy && cursor_arg && cursor_arg[0]) {
+    if (*generation_is_legacy && cursor_arg && cursor_arg[0]) {
         free(cursor_arg);
-        free(func_name);
-        free(project);
-        free(direction);
-        free(mode);
-        free(param_name);
         return cbm_mcp_text_result(
             "cursor_unsupported: this project's index predates generation tracking, so cursor "
             "staleness cannot be detected. Re-call with a higher 'limit' instead, or re-index "
@@ -6905,97 +6897,340 @@ static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
             true);
     }
     if (cursor_arg && cursor_arg[0]) {
-        uint64_t qh =
-            trace_params_hash(project, func_name, direction ? direction : "both", mode,
-                              cbm_mcp_get_int_arg(args, "depth", MCP_DEFAULT_DEPTH), include_tests,
-                              cbm_mcp_get_int_arg(args, "limit", MCP_BFS_LIMIT));
-        const char *cerr = trace_cursor_decode(cursor_arg, generation, qh, &cur);
-        if (cerr) {
-            free(cursor_arg);
-            free(func_name);
-            free(project);
-            free(direction);
-            free(mode);
-            free(param_name);
-            return cbm_mcp_text_result(cerr, true);
+        uint64_t query_hash = trace_params_hash(
+            request->project, request->function_name,
+            request->direction ? request->direction : "both", request->mode,
+            cbm_mcp_get_int_arg(args, "depth", MCP_DEFAULT_DEPTH), request->include_tests,
+            cbm_mcp_get_int_arg(args, "limit", MCP_BFS_LIMIT));
+        const char *error = trace_cursor_decode(cursor_arg, generation, query_hash, cursor);
+        free(cursor_arg);
+        if (error) {
+            return cbm_mcp_text_result(error, true);
         }
-        have_cursor = true;
+        *have_cursor = true;
+        return NULL;
     }
     free(cursor_arg);
-    if (!direction) {
-        direction = heap_strdup("both");
-    }
-    /* Teaching error: an unknown direction used to silently produce an empty
-     * trace (both leg flags false) — a field-eval agent burned four calls on
-     * "callers"/"callees" before falling back to Cypher. */
-    if (strcmp(direction, "inbound") != 0 && strcmp(direction, "outbound") != 0 &&
-        strcmp(direction, "both") != 0) {
-        char errbuf[CBM_SZ_256];
-        snprintf(errbuf, sizeof(errbuf),
-                 "invalid direction \"%s\" — use \"inbound\" (callers), \"outbound\" (callees), "
-                 "or \"both\"",
-                 direction);
-        free(func_name);
-        free(project);
-        free(direction);
-        free(mode);
-        free(param_name);
-        return cbm_mcp_text_result(errbuf, true);
-    }
+    return NULL;
+}
 
-    /* Find the node by name. If the bare-name lookup misses, fall back to
-     * qualified_name so callers passing a fully-qualified identifier (which
-     * the not-found hint actually recommends) hit the same path. The QN
-     * lookup uses the same scan_node helper as the bare lookup, so the
-     * shallow struct copy below transfers ownership of the strdup'd string
-     * fields cleanly and cbm_store_free_nodes will free them. */
-    cbm_node_t *nodes = NULL;
-    int node_count = 0;
-    cbm_store_find_nodes_by_name(store, project, func_name, &nodes, &node_count);
+static char *trace_request_normalize_direction(trace_request_t *request) {
+    if (!request->direction) {
+        request->direction = heap_strdup("both");
+    }
+    if (strcmp(request->direction, "inbound") == 0 || strcmp(request->direction, "outbound") == 0 ||
+        strcmp(request->direction, "both") == 0) {
+        return NULL;
+    }
+    char error[CBM_SZ_256];
+    snprintf(error, sizeof(error),
+             "invalid direction \"%s\" — use \"inbound\" (callers), \"outbound\" (callees), "
+             "or \"both\"",
+             request->direction);
+    return cbm_mcp_text_result(error, true);
+}
 
-    if (node_count == 0) {
-        cbm_node_t qn_node = {0};
-        if (cbm_store_find_node_by_qn(store, project, func_name, &qn_node) == CBM_STORE_OK) {
-            nodes = malloc(sizeof(cbm_node_t));
-            if (nodes) {
-                nodes[0] = qn_node;
-                node_count = 1;
+static char *trace_find_target_nodes(cbm_store_t *store, const trace_request_t *request,
+                                     cbm_node_t **nodes_out, int *node_count_out) {
+    *nodes_out = NULL;
+    *node_count_out = 0;
+    cbm_store_find_nodes_by_name(store, request->project, request->function_name, nodes_out,
+                                 node_count_out);
+    if (*node_count_out == 0) {
+        cbm_node_t qualified_node = {0};
+        if (cbm_store_find_node_by_qn(store, request->project, request->function_name,
+                                      &qualified_node) == CBM_STORE_OK) {
+            *nodes_out = malloc(sizeof(**nodes_out));
+            if (*nodes_out) {
+                (*nodes_out)[0] = qualified_node;
+                *node_count_out = 1;
             } else {
-                free_node_contents(&qn_node);
+                free_node_contents(&qualified_node);
             }
         }
     }
-
-    if (node_count == 0) {
-        enum { HINT_BUF_SZ = 512 };
-        char hint[HINT_BUF_SZ];
+    if (*node_count_out == 0) {
+        enum { TRACE_NOT_FOUND_HINT_CAPACITY = 512 };
+        char hint[TRACE_NOT_FOUND_HINT_CAPACITY];
         snprintf(hint, sizeof(hint),
                  "{\"error\":\"function not found\",\"function_name\":\"%s\","
                  "\"hint\":\"Use search_graph(name_pattern=\\\".*%s.*\\\") to find the exact "
                  "name, then pass it to trace_path.\"}",
-                 func_name, func_name);
-        free(func_name);
-        free(project);
-        free(direction);
-        free(mode);
-        free(param_name);
-        cbm_store_free_nodes(nodes, 0);
+                 request->function_name, request->function_name);
+        cbm_store_free_nodes(*nodes_out, 0);
+        *nodes_out = NULL;
         return cbm_mcp_text_result(hint, true);
     }
+    bool ambiguous = false;
+    (void)pick_resolved_node(*nodes_out, *node_count_out, &ambiguous);
+    if (!ambiguous) {
+        return NULL;
+    }
+    char *result = snippet_suggestions(request->function_name, *nodes_out, *node_count_out);
+    cbm_store_free_nodes(*nodes_out, *node_count_out);
+    *nodes_out = NULL;
+    *node_count_out = 0;
+    return result;
+}
 
-    /* Disambiguate same-named matches: prefer the real definition, and report
-     * ambiguity (rather than silently tracing nodes[0]) on a genuine tie — e.g.
-     * a C main() vs a same-named shell-script main(). */
-    bool trace_ambiguous = false;
-    int sel = pick_resolved_node(nodes, node_count, &trace_ambiguous);
-    if (trace_ambiguous) {
-        char *result = snippet_suggestions(func_name, nodes, node_count);
-        free(func_name);
-        free(project);
-        free(direction);
-        free(mode);
-        free(param_name);
-        cbm_store_free_nodes(nodes, node_count);
+typedef struct {
+    bool do_outbound;
+    bool do_inbound;
+    bool data_flow;
+    bool outbound_more;
+    bool inbound_more;
+    bool more_rows;
+    int outbound_total;
+    int inbound_total;
+    cbm_traverse_result_t outbound;
+    cbm_traverse_result_t inbound;
+    cbm_traverse_result_t outbound_view;
+    cbm_traverse_result_t inbound_view;
+    char next_cursor[TRACE_CURSOR_TOKEN_CAPACITY];
+} trace_page_t;
+
+static int trace_visible_node_count(const cbm_traverse_result_t *traversal, bool include_tests) {
+    int count = 0;
+    for (int index = 0; index < traversal->visited_count; index++) {
+        if (include_tests || !is_test_file(traversal->visited[index].node.file_path)) {
+            count++;
+        }
+    }
+    return count;
+}
+
+static void trace_page_run_traversals(trace_page_t *page, cbm_store_t *store,
+                                      const cbm_node_t *nodes, int node_count,
+                                      const char **edge_types, int edge_type_count,
+                                      const trace_request_t *request) {
+    if (page->do_outbound) {
+        bfs_union_same_name(store, nodes, node_count, "outbound", edge_types, edge_type_count,
+                            request->depth, MCP_BFS_LIMIT_MAX, &page->outbound);
+    }
+    if (page->do_inbound) {
+        bfs_union_same_name(store, nodes, node_count, "inbound", edge_types, edge_type_count,
+                            request->depth, MCP_BFS_LIMIT_MAX, &page->inbound);
+    }
+}
+
+static void trace_page_apply_window(trace_page_t *page, const trace_cursor_t *cursor,
+                                    bool have_cursor, int limit) {
+    int outbound_start = 0;
+    int inbound_start = 0;
+    if (have_cursor) {
+        if (cursor->leg == 'o') {
+            outbound_start = trace_watermark_index(&page->outbound, cursor->hop, cursor->node_id);
+        } else {
+            outbound_start = page->outbound.visited_count;
+            inbound_start = trace_watermark_index(&page->inbound, cursor->hop, cursor->node_id);
+        }
+    }
+    int budget = limit;
+    int outbound_length = page->do_outbound ? page->outbound.visited_count - outbound_start : 0;
+    if (outbound_length > budget) {
+        outbound_length = budget;
+    }
+    budget -= outbound_length;
+    int inbound_length = page->do_inbound ? page->inbound.visited_count - inbound_start : 0;
+    if (inbound_length > budget) {
+        inbound_length = budget;
+    }
+    page->outbound_more =
+        page->do_outbound && outbound_start + outbound_length < page->outbound.visited_count;
+    page->inbound_more =
+        page->do_inbound && inbound_start + inbound_length < page->inbound.visited_count;
+    page->more_rows = page->outbound_more || page->inbound_more;
+    page->outbound_view = page->outbound;
+    page->outbound_view.visited =
+        page->outbound.visited ? page->outbound.visited + outbound_start : NULL;
+    page->outbound_view.visited_count = outbound_length;
+    page->inbound_view = page->inbound;
+    page->inbound_view.visited =
+        page->inbound.visited ? page->inbound.visited + inbound_start : NULL;
+    page->inbound_view.visited_count = inbound_length;
+}
+
+static void trace_page_mint_cursor(trace_page_t *page, const char *generation,
+                                   const trace_request_t *request) {
+    if (!page->more_rows) {
+        return;
+    }
+    trace_cursor_t cursor = {0};
+    snprintf(cursor.generation, sizeof(cursor.generation), "%s", generation);
+    cursor.qhash =
+        trace_params_hash(request->project, request->function_name, request->direction,
+                          request->mode, request->depth, request->include_tests, request->limit);
+    const cbm_traverse_result_t *last_page =
+        page->outbound_more ? &page->outbound_view : &page->inbound_view;
+    if (!last_page->visited || last_page->visited_count <= 0) {
+        return;
+    }
+    cursor.leg = page->outbound_more ? 'o' : 'i';
+    const cbm_node_hop_t *last_visited = &last_page->visited[last_page->visited_count - SKIP_ONE];
+    cursor.hop = last_visited->hop;
+    cursor.node_id = last_visited->node.id;
+    trace_cursor_encode(&cursor, page->next_cursor, sizeof(page->next_cursor));
+}
+
+static void trace_page_init(trace_page_t *page, cbm_store_t *store, const cbm_node_t *nodes,
+                            int node_count, const char **edge_types, int edge_type_count,
+                            const trace_request_t *request, const trace_cursor_t *cursor,
+                            bool have_cursor, bool generation_is_legacy, const char *generation) {
+    *page = (trace_page_t){
+        .do_outbound =
+            strcmp(request->direction, "outbound") == 0 || strcmp(request->direction, "both") == 0,
+        .do_inbound =
+            strcmp(request->direction, "inbound") == 0 || strcmp(request->direction, "both") == 0,
+        .data_flow = request->mode && strcmp(request->mode, "data_flow") == 0,
+    };
+    trace_page_run_traversals(page, store, nodes, node_count, edge_types, edge_type_count, request);
+    trace_page_apply_window(page, cursor, have_cursor, request->limit);
+    page->outbound_total = trace_visible_node_count(&page->outbound, request->include_tests);
+    page->inbound_total = trace_visible_node_count(&page->inbound, request->include_tests);
+    if (!generation_is_legacy) {
+        trace_page_mint_cursor(page, generation, request);
+    }
+}
+
+static void trace_page_dispose(trace_page_t *page) {
+    if (page->do_outbound) {
+        cbm_store_traverse_free(&page->outbound);
+    }
+    if (page->do_inbound) {
+        cbm_store_traverse_free(&page->inbound);
+    }
+    *page = (trace_page_t){0};
+}
+
+static char *trace_render_toon(const char *function_name, const char *direction, const char *mode,
+                               cbm_traverse_result_t *outbound, cbm_traverse_result_t *inbound,
+                               bool do_outbound, bool do_inbound, int outbound_total,
+                               int inbound_total, bool risk_labels, bool include_tests,
+                               bool include_evidence, bool data_flow, bool more_rows,
+                               const char *next_cursor) {
+    cbm_sb_t output;
+    cbm_sb_init(&output);
+    cbm_tree_scalar_str(&output, "function", function_name);
+    cbm_tree_scalar_str(&output, "direction", direction);
+    if (mode) {
+        cbm_tree_scalar_str(&output, "mode", mode);
+    }
+    bool flat_trace = risk_labels || data_flow;
+    if (do_outbound) {
+        cbm_tree_scalar_int(&output, "callees_total", outbound_total);
+        if (flat_trace) {
+            bfs_to_toon_table(&output, "callees", outbound, risk_labels, include_tests, data_flow);
+        } else {
+            bfs_to_tree_table(&output, "callees", outbound, include_tests, include_evidence);
+        }
+    }
+    if (do_inbound) {
+        cbm_tree_scalar_int(&output, "callers_total", inbound_total);
+        if (flat_trace) {
+            bfs_to_toon_table(&output, "callers", inbound, risk_labels, include_tests, data_flow);
+        } else {
+            bfs_to_tree_table(&output, "callers", inbound, include_tests, include_evidence);
+        }
+    }
+    if (more_rows) {
+        cbm_tree_scalar_bool(&output, "truncated", true);
+        if (next_cursor[0]) {
+            cbm_tree_scalar_str(&output, "next", next_cursor);
+            cbm_tree_scalar_str(&output, "hint",
+                                "more rows exist — re-call with cursor set to 'next' and ALL "
+                                "other arguments identical (no duplicates), or narrow with "
+                                "depth/edge_types");
+        } else {
+            cbm_tree_scalar_str(&output, "hint",
+                                "more rows exist — re-call with a higher 'limit' (cursors "
+                                "unavailable: index predates generation tracking)");
+        }
+    }
+    return cbm_sb_finish(&output);
+}
+
+static char *trace_render_json(const char *function_name, const char *direction, const char *mode,
+                               cbm_traverse_result_t *outbound, cbm_traverse_result_t *inbound,
+                               bool do_outbound, bool do_inbound, int outbound_total,
+                               int inbound_total, bool risk_labels, bool include_tests,
+                               bool data_flow, bool more_rows, const char *next_cursor) {
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *root = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+    yyjson_mut_obj_add_str(doc, root, "function", function_name);
+    yyjson_mut_obj_add_str(doc, root, "direction", direction);
+    if (mode) {
+        yyjson_mut_obj_add_str(doc, root, "mode", mode);
+    }
+    if (do_outbound) {
+        yyjson_mut_obj_add_int(doc, root, "callees_total", outbound_total);
+        yyjson_mut_obj_add_val(
+            doc, root, "callees",
+            bfs_to_tree_json(doc, outbound, risk_labels, include_tests, data_flow));
+    }
+    if (do_inbound) {
+        yyjson_mut_obj_add_int(doc, root, "callers_total", inbound_total);
+        yyjson_mut_obj_add_val(
+            doc, root, "callers",
+            bfs_to_tree_json(doc, inbound, risk_labels, include_tests, data_flow));
+    }
+    if (more_rows) {
+        yyjson_mut_obj_add_bool(doc, root, "truncated", true);
+        if (next_cursor[0]) {
+            yyjson_mut_obj_add_strcpy(doc, root, "next_cursor", next_cursor);
+        }
+    }
+    char *json = yy_doc_to_str(doc);
+    yyjson_mut_doc_free(doc);
+    return json;
+}
+
+static char *trace_render_response(bool legacy_json, const char *function_name,
+                                   const char *direction, const char *mode,
+                                   cbm_traverse_result_t *outbound, cbm_traverse_result_t *inbound,
+                                   bool do_outbound, bool do_inbound, int outbound_total,
+                                   int inbound_total, bool risk_labels, bool include_tests,
+                                   bool include_evidence, bool data_flow, bool more_rows,
+                                   const char *next_cursor) {
+    if (legacy_json) {
+        return trace_render_json(function_name, direction, mode, outbound, inbound, do_outbound,
+                                 do_inbound, outbound_total, inbound_total, risk_labels,
+                                 include_tests, data_flow, more_rows, next_cursor);
+    }
+    return trace_render_toon(function_name, direction, mode, outbound, inbound, do_outbound,
+                             do_inbound, outbound_total, inbound_total, risk_labels, include_tests,
+                             include_evidence, data_flow, more_rows, next_cursor);
+}
+
+static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
+    trace_request_t request;
+    trace_request_init(&request, args);
+    cbm_store_t *store = resolve_store(srv, request.project);
+    char *result = trace_request_validate_store(store, &request);
+    if (result) {
+        trace_request_dispose(&request);
+        return result;
+    }
+    char generation[TRACE_CURSOR_GENERATION_CAPACITY];
+    trace_cursor_t cur = {0};
+    bool have_cursor = false;
+    bool generation_is_legacy = false;
+    result = trace_cursor_validate(args, store, &request, generation, sizeof(generation), &cur,
+                                   &have_cursor, &generation_is_legacy);
+    if (result) {
+        trace_request_dispose(&request);
+        return result;
+    }
+    result = trace_request_normalize_direction(&request);
+    if (result) {
+        trace_request_dispose(&request);
+        return result;
+    }
+    cbm_node_t *nodes = NULL;
+    int node_count = 0;
+    result = trace_find_target_nodes(store, &request, &nodes, &node_count);
+    if (result) {
+        trace_request_dispose(&request);
         return result;
     }
 
@@ -7008,211 +7243,25 @@ static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
     /* Edge types: explicit > mode-based > default */
     const char *edge_types[MCP_COL_16];
     int edge_type_count = 0;
-    yyjson_doc *et_doc_keep = resolve_trace_edge_types(args, mode, edge_types, &edge_type_count);
+    yyjson_doc *edge_types_document =
+        resolve_trace_edge_types(args, request.mode, edge_types, &edge_type_count);
+    trace_page_t page;
+    trace_page_init(&page, store, nodes, node_count, edge_types, edge_type_count, &request, &cur,
+                    have_cursor, generation_is_legacy, generation);
 
-    /* Run BFS for each requested direction.
-     * IMPORTANT: emitters borrow node-string pointers — traversal results
-     * must stay alive until after serialization. */
-    bool do_outbound = strcmp(direction, "outbound") == 0 || strcmp(direction, "both") == 0;
-    bool do_inbound = strcmp(direction, "inbound") == 0 || strcmp(direction, "both") == 0;
+    char *json = trace_render_response(
+        trace_legacy_json, request.function_name, request.direction, request.mode,
+        &page.outbound_view, &page.inbound_view, page.do_outbound, page.do_inbound,
+        page.outbound_total, page.inbound_total, request.risk_labels, request.include_tests,
+        request.include_evidence, page.data_flow, page.more_rows, page.next_cursor);
 
-    cbm_traverse_result_t tr_out = {0};
-    cbm_traverse_result_t tr_in = {0};
-
-    bool data_flow = mode && strcmp(mode, "data_flow") == 0;
-
-    (void)sel; /* union across all same-name nodes — see bfs_union_same_name (#546) */
-
-    /* Traverse with the SAFETY ceiling (not the page size): the recursive CTE
-     * enumerates the full depth-bounded reachable set regardless of LIMIT, so
-     * materializing up to MCP_BFS_LIMIT_MAX rows costs the same traversal —
-     * and gives exact totals plus the rows every later page needs. The page
-     * size (trace_limit) only bounds what THIS response emits. */
-    if (do_outbound) {
-        bfs_union_same_name(store, nodes, node_count, "outbound", edge_types, edge_type_count,
-                            depth, MCP_BFS_LIMIT_MAX, &tr_out);
-    }
-    if (do_inbound) {
-        bfs_union_same_name(store, nodes, node_count, "inbound", edge_types, edge_type_count, depth,
-                            MCP_BFS_LIMIT_MAX, &tr_in);
-    }
-
-    /* Page windows in canonical (hop,id) order. Legs drain in a fixed order
-     * (callees, then callers); a resume cursor starts its leg at the row
-     * after the watermark, and a page that finishes one leg with budget to
-     * spare continues into the next. */
-    int out_start = 0;
-    int in_start = 0;
-    if (have_cursor) {
-        if (cur.leg == 'o') {
-            out_start = trace_watermark_index(&tr_out, cur.hop, cur.node_id);
-        } else {
-            out_start = tr_out.visited_count; /* callees leg already drained */
-            in_start = trace_watermark_index(&tr_in, cur.hop, cur.node_id);
-        }
-    }
-    int budget = trace_limit;
-    int out_len = 0;
-    int in_len = 0;
-    if (do_outbound) {
-        out_len = tr_out.visited_count - out_start;
-        if (out_len > budget) {
-            out_len = budget;
-        }
-        budget -= out_len;
-    }
-    if (do_inbound) {
-        in_len = tr_in.visited_count - in_start;
-        if (in_len > budget) {
-            in_len = budget;
-        }
-    }
-    bool out_more = do_outbound && out_start + out_len < tr_out.visited_count;
-    bool in_more = do_inbound && in_start + in_len < tr_in.visited_count;
-    bool more_rows = out_more || in_more;
-    char next_tok[192] = "";
-    /* Never mint a cursor under a "legacy" generation (no staleness
-     * detection); the truncated flag + raise-limit hint still fire below. */
-    if (more_rows && !gen_legacy) {
-        trace_cursor_t nc = {0};
-        snprintf(nc.generation, sizeof(nc.generation), "%s", generation);
-        nc.qhash = trace_params_hash(project, func_name, direction, mode, depth, include_tests,
-                                     trace_limit);
-        if (out_more) {
-            nc.leg = 'o';
-            nc.hop = tr_out.visited[out_start + out_len - 1].hop;
-            nc.node_id = tr_out.visited[out_start + out_len - 1].node.id;
-        } else {
-            nc.leg = 'i';
-            nc.hop = tr_in.visited[in_start + in_len - 1].hop;
-            nc.node_id = tr_in.visited[in_start + in_len - 1].node.id;
-        }
-        trace_cursor_encode(&nc, next_tok, sizeof(next_tok));
-    }
-
-    /* Window views: visited offset + count; the full edges array stays
-     * attached so data_flow args resolve for boundary nodes whose incoming
-     * edge originated on an earlier page. */
-    cbm_traverse_result_t view_out = tr_out;
-    view_out.visited = tr_out.visited ? tr_out.visited + out_start : NULL;
-    view_out.visited_count = out_len;
-    cbm_traverse_result_t view_in = tr_in;
-    view_in.visited = tr_in.visited ? tr_in.visited + in_start : NULL;
-    view_in.visited_count = in_len;
-
-    /* Totals must count what the caller can actually enumerate: when
-     * include_tests=false the tables hide test-file rows, so raw
-     * visited_count overstated the reachable set (a field-eval agent read
-     * callers_total=175 against a handful of visible rows and distrusted
-     * the tool). Count with the same filter the emitters apply. */
-    int out_total = 0;
-    for (int i = 0; i < tr_out.visited_count; i++) {
-        if (include_tests || !is_test_file(tr_out.visited[i].node.file_path)) {
-            out_total++;
-        }
-    }
-    int in_total = 0;
-    for (int i = 0; i < tr_in.visited_count; i++) {
-        if (include_tests || !is_test_file(tr_in.visited[i].node.file_path)) {
-            in_total++;
-        }
-    }
-
-    char *json = NULL;
-    if (!trace_legacy_json) {
-        cbm_sb_t sb;
-        cbm_sb_init(&sb);
-        cbm_tree_scalar_str(&sb, "function", func_name);
-        cbm_tree_scalar_str(&sb, "direction", direction);
-        if (mode) {
-            cbm_tree_scalar_str(&sb, "mode", mode);
-        }
-        /* Grouped tree is THE default; risk_labels/data_flow keep the flat
-         * table (extra columns) in the same tree syntax. */
-        bool flat_trace = risk_labels || data_flow;
-        if (do_outbound) {
-            cbm_tree_scalar_int(&sb, "callees_total", out_total);
-            if (flat_trace) {
-                bfs_to_toon_table(&sb, "callees", &view_out, risk_labels, include_tests, data_flow);
-            } else {
-                bfs_to_tree_table(&sb, "callees", &view_out, include_tests, include_evidence);
-            }
-        }
-        if (do_inbound) {
-            cbm_tree_scalar_int(&sb, "callers_total", in_total);
-            if (flat_trace) {
-                bfs_to_toon_table(&sb, "callers", &view_in, risk_labels, include_tests, data_flow);
-            } else {
-                bfs_to_tree_table(&sb, "callers", &view_in, include_tests, include_evidence);
-            }
-        }
-        if (more_rows) {
-            cbm_tree_scalar_bool(&sb, "truncated", true);
-            if (next_tok[0]) {
-                cbm_tree_scalar_str(&sb, "next", next_tok);
-                cbm_tree_scalar_str(&sb, "hint",
-                                    "more rows exist — re-call with cursor set to 'next' and ALL "
-                                    "other arguments identical (no duplicates), or narrow with "
-                                    "depth/edge_types");
-            } else {
-                cbm_tree_scalar_str(&sb, "hint",
-                                    "more rows exist — re-call with a higher 'limit' (cursors "
-                                    "unavailable: index predates generation tracking)");
-            }
-        }
-        json = cbm_sb_finish(&sb);
-    } else {
-        yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-        yyjson_mut_val *root = yyjson_mut_obj(doc);
-        yyjson_mut_doc_set_root(doc, root);
-
-        yyjson_mut_obj_add_str(doc, root, "function", func_name);
-        yyjson_mut_obj_add_str(doc, root, "direction", direction);
-        if (mode) {
-            yyjson_mut_obj_add_str(doc, root, "mode", mode);
-        }
-        if (do_outbound) {
-            yyjson_mut_obj_add_int(doc, root, "callees_total", out_total);
-            yyjson_mut_obj_add_val(
-                doc, root, "callees",
-                bfs_to_tree_json(doc, &view_out, risk_labels, include_tests, data_flow));
-        }
-        if (do_inbound) {
-            yyjson_mut_obj_add_int(doc, root, "callers_total", in_total);
-            yyjson_mut_obj_add_val(
-                doc, root, "callers",
-                bfs_to_tree_json(doc, &view_in, risk_labels, include_tests, data_flow));
-        }
-        if (more_rows) {
-            yyjson_mut_obj_add_bool(doc, root, "truncated", true);
-            if (next_tok[0]) {
-                yyjson_mut_obj_add_strcpy(doc, root, "next_cursor", next_tok);
-            }
-        }
-        /* Serialize BEFORE freeing traversal results (yyjson borrows strings) */
-        json = yy_doc_to_str(doc);
-        yyjson_mut_doc_free(doc);
-    }
-
-    /* Now safe to free traversal data */
-    if (do_outbound) {
-        cbm_store_traverse_free(&tr_out);
-    }
-    if (do_inbound) {
-        cbm_store_traverse_free(&tr_in);
-    }
-
+    trace_page_dispose(&page);
     cbm_store_free_nodes(nodes, node_count);
-    free(func_name);
-    free(project);
-    free(direction);
-    free(mode);
-    free(param_name);
-    if (et_doc_keep) {
-        yyjson_doc_free(et_doc_keep);
+    trace_request_dispose(&request);
+    if (edge_types_document) {
+        yyjson_doc_free(edge_types_document);
     }
-
-    char *result = cbm_mcp_text_result(json, false);
+    result = cbm_mcp_text_result(json, false);
     free(json);
     return result;
 }
@@ -8533,6 +8582,99 @@ static char *resolved_repo_path_from_project_arg(const char *args) {
     return root_path;
 }
 
+static void index_invalidate_cached_store(cbm_mcp_server_t *srv) {
+    if (srv->owns_store && srv->store) {
+        cbm_store_close(srv->store);
+        srv->store = NULL;
+    }
+    free(srv->current_project);
+    srv->current_project = NULL;
+}
+
+static cbm_index_mode_t index_mode_from_string(const char *mode_string) {
+    if (mode_string && strcmp(mode_string, "fast") == 0) {
+        return CBM_MODE_FAST;
+    }
+    if (mode_string && strcmp(mode_string, "moderate") == 0) {
+        return CBM_MODE_MODERATE;
+    }
+    return CBM_MODE_FULL;
+}
+
+static char *index_run_in_process(cbm_mcp_server_t *srv, const char *args, const char *repo_path,
+                                  const char *mode_string, const char *name_override,
+                                  const char *mutation_project) {
+    if (!mcp_project_mutation_begin(srv, mutation_project)) {
+        return cbm_mcp_text_result("index operation blocked by another mutation for this project",
+                                   true);
+    }
+    if (mcp_request_cancelled(srv)) {
+        mcp_project_mutation_end(srv, mutation_project);
+        return cbm_mcp_text_result("index operation cancelled for this request", true);
+    }
+    cbm_pipeline_t *pipeline =
+        cbm_pipeline_new(repo_path, NULL, index_mode_from_string(mode_string));
+    if (!pipeline) {
+        mcp_project_mutation_end(srv, mutation_project);
+        return cbm_mcp_text_result("failed to create pipeline", true);
+    }
+    if (name_override && name_override[0] &&
+        !cbm_pipeline_set_project_name(pipeline, name_override)) {
+        cbm_pipeline_free(pipeline);
+        mcp_project_mutation_end(srv, mutation_project);
+        return cbm_mcp_text_result("invalid project name", true);
+    }
+    bool persistence = cbm_mcp_get_bool_arg(args, "persistence");
+    cbm_pipeline_set_persistence(pipeline, persistence);
+    char *project_name = heap_strdup(cbm_pipeline_project_name(pipeline));
+    try_artifact_bootstrap(project_name, repo_path);
+    index_invalidate_cached_store(srv);
+    cbm_pipeline_lock();
+    cbm_pipeline_bind_cancel_flag(pipeline, &srv->pipeline_cancel_requested);
+    srv->active_pipeline = pipeline;
+    int result_code = cbm_pipeline_run(pipeline);
+    srv->active_pipeline = NULL;
+    cbm_pipeline_unlock();
+    char **excluded_dirs = NULL;
+    int excluded_count = 0;
+    cbm_pipeline_get_excluded(pipeline, &excluded_dirs, &excluded_count);
+    cbm_file_error_t *file_errors = NULL;
+    int file_error_count = 0;
+    cbm_pipeline_get_file_errors(pipeline, &file_errors, &file_error_count);
+    cbm_mem_collect();
+    index_invalidate_cached_store(srv);
+    yyjson_mut_doc *document = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *root = yyjson_mut_obj(document);
+    yyjson_mut_doc_set_root(document, root);
+    yyjson_mut_obj_add_str(document, root, "project", project_name);
+    if (result_code == 0) {
+        char logfile_path[CBM_SZ_1K] = "";
+        bool has_logfile = write_skip_logfile(project_name, file_errors, file_error_count,
+                                              logfile_path, sizeof(logfile_path));
+        bool degraded = build_index_success_response(
+            srv, document, root, project_name, repo_path, persistence, pipeline, excluded_dirs,
+            excluded_count, file_errors, file_error_count, has_logfile ? logfile_path : NULL);
+        yyjson_mut_obj_add_str(document, root, "status", degraded ? "degraded" : "indexed");
+    } else {
+        yyjson_mut_obj_add_str(document, root, "status", "error");
+        yyjson_mut_obj_add_str(document, root, "hint",
+                               "Pipeline failed. Check repo_path exists and contains source files. "
+                               "Try mode='fast' for a quicker diagnostic run.");
+    }
+    char *json = yy_doc_to_str(document);
+    yyjson_mut_doc_free(document);
+    if (cbm_index_worker_active()) {
+        cbm_log_info("index.worker.fast_exit", "skip", "pipeline_free");
+    } else {
+        cbm_pipeline_free(pipeline);
+    }
+    free(project_name);
+    mcp_project_mutation_end(srv, mutation_project);
+    char *result = cbm_mcp_text_result(json, result_code != 0);
+    free(json);
+    return result;
+}
+
 static char *handle_index_repository(cbm_mcp_server_t *srv, const char *args) {
     if (!srv) {
         return cbm_mcp_text_result("MCP server is unavailable", true);
@@ -8652,143 +8794,12 @@ static char *handle_index_repository(cbm_mcp_server_t *srv, const char *args) {
             true);
     }
 
-    if (!mcp_project_mutation_begin(srv, mutation_project)) {
-        free(mutation_project);
-        free(repo_path);
-        free(mode_str);
-        free(name_override);
-        return cbm_mcp_text_result("index operation blocked by another mutation for this project",
-                                   true);
-    }
-    if (mcp_request_cancelled(srv)) {
-        mcp_project_mutation_end(srv, mutation_project);
-        free(mutation_project);
-        free(repo_path);
-        free(mode_str);
-        free(name_override);
-        return cbm_mcp_text_result("index operation cancelled for this request", true);
-    }
-
-    cbm_index_mode_t mode = CBM_MODE_FULL;
-    if (mode_str && strcmp(mode_str, "fast") == 0) {
-        mode = CBM_MODE_FAST;
-    } else if (mode_str && strcmp(mode_str, "moderate") == 0) {
-        mode = CBM_MODE_MODERATE;
-    }
-    free(mode_str);
-
-    bool persistence = cbm_mcp_get_bool_arg(args, "persistence");
-
-    cbm_pipeline_t *p = cbm_pipeline_new(repo_path, NULL, mode);
-    if (!p) {
-        mcp_project_mutation_end(srv, mutation_project);
-        free(mutation_project);
-        free(name_override);
-        free(repo_path);
-        return cbm_mcp_text_result("failed to create pipeline", true);
-    }
-    if (name_override && name_override[0] && !cbm_pipeline_set_project_name(p, name_override)) {
-        cbm_pipeline_free(p);
-        mcp_project_mutation_end(srv, mutation_project);
-        free(mutation_project);
-        free(name_override);
-        free(repo_path);
-        return cbm_mcp_text_result("invalid project name", true);
-    }
-    free(name_override);
-    cbm_pipeline_set_persistence(p, persistence);
-
-    char *project_name = heap_strdup(cbm_pipeline_project_name(p));
-
-    /* Bootstrap from artifact if no local DB exists */
-    try_artifact_bootstrap(project_name, repo_path);
-
-    /* Close cached store — pipeline will delete + recreate the .db file */
-    if (srv->owns_store && srv->store) {
-        cbm_store_close(srv->store);
-        srv->store = NULL;
-    }
-    free(srv->current_project);
-    srv->current_project = NULL;
-
-    /* Serialize pipeline runs to prevent concurrent writes.
-     * Track active pipeline so signal handler and notifications/cancelled
-     * can cancel it mid-run. */
-    cbm_pipeline_lock();
-    cbm_pipeline_bind_cancel_flag(p, &srv->pipeline_cancel_requested);
-    srv->active_pipeline = p;
-    int rc = cbm_pipeline_run(p);
-    srv->active_pipeline = NULL;
-    cbm_pipeline_unlock();
-
-    /* Capture the excluded-subtree list (#411) while the pipeline (which owns
-     * the strings) is still alive — the response builder copies them into the
-     * JSON doc, so they need only outlive that call, not cbm_pipeline_free. */
-    char **excluded_dirs = NULL;
-    int excluded_count = 0;
-    cbm_pipeline_get_excluded(p, &excluded_dirs, &excluded_count);
-
-    /* Capture the per-file skip list (Stage 2 / Track B) while the pipeline
-     * still owns the strings; the response builder copies them into the doc. */
-    cbm_file_error_t *file_errors = NULL;
-    int file_error_count = 0;
-    cbm_pipeline_get_file_errors(p, &file_errors, &file_error_count);
-
-    cbm_mem_collect(); /* return mimalloc pages to OS after large indexing */
-
-    /* Invalidate cached store so next query reopens the fresh database */
-    if (srv->owns_store && srv->store) {
-        cbm_store_close(srv->store);
-        srv->store = NULL;
-    }
-    free(srv->current_project);
-    srv->current_project = NULL;
-
-    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-    yyjson_mut_val *root = yyjson_mut_obj(doc);
-    yyjson_mut_doc_set_root(doc, root);
-
-    yyjson_mut_obj_add_str(doc, root, "project", project_name);
-
-    if (rc == 0) {
-        /* Write the per-run logfile ONLY when there were skips (no logfile on a
-         * clean run). The FULL list goes to the file; the JSON caps at 50. */
-        char logfile_path[CBM_SZ_1K];
-        logfile_path[0] = '\0';
-        bool has_logfile = write_skip_logfile(project_name, file_errors, file_error_count,
-                                              logfile_path, sizeof(logfile_path));
-        bool degraded = build_index_success_response(
-            srv, doc, root, project_name, repo_path, persistence, p, excluded_dirs, excluded_count,
-            file_errors, file_error_count, has_logfile ? logfile_path : NULL);
-        yyjson_mut_obj_add_str(doc, root, "status", degraded ? "degraded" : "indexed");
-    } else {
-        yyjson_mut_obj_add_str(doc, root, "status", "error");
-        yyjson_mut_obj_add_str(doc, root, "hint",
-                               "Pipeline failed. Check repo_path exists and contains source files. "
-                               "Try mode='fast' for a quicker diagnostic run.");
-    }
-
-    char *json = yy_doc_to_str(doc);
-    yyjson_mut_doc_free(doc);
-    /* Free the pipeline only after the response doc copied the excluded list.
-     * Supervised worker: skip the deep free — the process exits right after
-     * handing over the response (main.c fast-exits), and piecemeal-freeing a
-     * multi-GB graph before process death costs minutes on kernel-scale repos;
-     * the OS reclaims it wholesale at exit. In-process paths (tests, kill
-     * switch, degrade) still free normally. */
-    if (cbm_index_worker_active()) {
-        cbm_log_info("index.worker.fast_exit", "skip", "pipeline_free");
-    } else {
-        cbm_pipeline_free(p);
-    }
-    free(project_name);
+    char *result =
+        index_run_in_process(srv, args, repo_path, mode_str, name_override, mutation_project);
     free(repo_path);
-
-    mcp_project_mutation_end(srv, mutation_project);
     free(mutation_project);
-
-    char *result = cbm_mcp_text_result(json, rc != 0);
-    free(json);
+    free(mode_str);
+    free(name_override);
     return result;
 }
 
@@ -10717,7 +10728,13 @@ static void detect_module_of(const char *file, char *out, size_t outsz) {
  * DETECT_MODCAP (module, count) pairs; symbols beyond the cap land in
  * *overflow (surfaced as "(other)", never silently dropped). Shared by the
  * tree and json emitters so both encodings carry the same model. */
-enum { DETECT_MODCAP = 256 };
+enum {
+    DETECT_MODCAP = 256,
+    DETECT_MINIMUM_IMPACT_LIMIT = 1,
+    DETECT_FILE_CAPACITY_GROWTH = 2,
+    DETECT_INITIAL_FILE_CAPACITY = 16,
+    DETECT_MERGE_BASE_CAPACITY = 64,
+};
 
 static int detect_module_rollup(const cbm_traverse_result_t *impact, char mods[][CBM_SZ_128],
                                 int *mcnt, int *overflow) {
@@ -10950,8 +10967,8 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
     /* Per-symbol impacted-row display cap (the module rollup stays complete).
      * impacted_total always reports the true count, so this never hides scale. */
     int imp_limit = cbm_mcp_get_int_arg(args, "limit", MCP_DEFAULT_IMPACT_LIMIT);
-    if (imp_limit < 1) {
-        imp_limit = 1;
+    if (imp_limit < DETECT_MINIMUM_IMPACT_LIMIT) {
+        imp_limit = DETECT_MINIMUM_IMPACT_LIMIT;
     }
     if (imp_limit > MCP_BFS_LIMIT_MAX) {
         imp_limit = MCP_BFS_LIMIT_MAX;
@@ -11050,7 +11067,7 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
          * ("R  old -> new") keep the destination path. */
         char *path_line = line;
         if (len > PAIR_LEN && line[PAIR_LEN] == ' ' && strchr(" MADRCU?!", line[0]) &&
-            strchr(" MADRCU?!", line[1])) {
+            strchr(" MADRCU?!", line[SKIP_ONE])) {
             path_line = line + PAIR_LEN + SKIP_ONE;
             char *arrow = strstr(path_line, " -> ");
             if (arrow) {
@@ -11074,7 +11091,8 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
             continue;
         }
         if ((size_t)file_count >= file_cap) {
-            file_cap = file_cap ? file_cap * 2 : 16;
+            file_cap =
+                file_cap ? file_cap * DETECT_FILE_CAPACITY_GROWTH : DETECT_INITIAL_FILE_CAPACITY;
             files = cbm_realloc_or_abort(files, file_cap * sizeof(char *));
         }
         files[file_count++] = heap_strdup(path_line);
@@ -11089,7 +11107,7 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
 
     /* merge-base SHA: the exact commit the diff is measured against, so the
      * result is reproducible even as base_branch advances. Best-effort. */
-    char merge_base[64] = "";
+    char merge_base[DETECT_MERGE_BASE_CAPACITY] = "";
     {
         char mbcmd[CBM_SZ_2K];
 #ifdef _WIN32
@@ -11109,7 +11127,8 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
         if (mbfp && !mb_cancelled) {
             if (fgets(merge_base, sizeof(merge_base), mbfp)) {
                 size_t l = strlen(merge_base);
-                while (l > 0 && (merge_base[l - 1] == '\n' || merge_base[l - 1] == '\r')) {
+                while (l > 0 &&
+                       (merge_base[l - SKIP_ONE] == '\n' || merge_base[l - SKIP_ONE] == '\r')) {
                     merge_base[--l] = '\0';
                 }
             }
@@ -11392,182 +11411,211 @@ static cbm_store_t *open_adr_store_for_write(cbm_mcp_server_t *srv, cbm_store_t 
     return *owned_rw;
 }
 
+typedef struct {
+    char *project;
+    char *mode;
+    char *content;
+    bool write_request;
+    bool mutation_held;
+} adr_request_t;
+
+static void adr_request_init(adr_request_t *request, const char *args) {
+    *request = (adr_request_t){
+        .project = get_project_arg(args),
+        .mode = cbm_mcp_get_string_arg(args, "mode"),
+        .content = cbm_mcp_get_string_arg(args, "content"),
+    };
+    if (!request->mode) {
+        request->mode = heap_strdup("get");
+    }
+    request->write_request = request->content && (strcmp(request->mode, "update") == 0 ||
+                                                  strcmp(request->mode, "store") == 0);
+}
+
+static void adr_request_dispose(adr_request_t *request) {
+    free(request->project);
+    free(request->mode);
+    free(request->content);
+    *request = (adr_request_t){0};
+}
+
+static bool adr_has_sections_argument(const char *args) {
+    yyjson_doc *doc = yyjson_read(args, strlen(args), 0);
+    if (!doc) {
+        return false;
+    }
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    bool has_sections = root && yyjson_is_obj(root) && yyjson_obj_get(root, "sections") != NULL;
+    yyjson_doc_free(doc);
+    return has_sections;
+}
+
+static char *adr_begin_mutation(cbm_mcp_server_t *srv, adr_request_t *request) {
+    if (!request->write_request || !request->project) {
+        return NULL;
+    }
+    request->mutation_held = mcp_project_mutation_begin(srv, request->project);
+    if (!request->mutation_held) {
+        return cbm_mcp_text_result("project operation cancelled or blocked by an active index",
+                                   true);
+    }
+    if (!mcp_request_cancelled(srv)) {
+        return NULL;
+    }
+    mcp_project_mutation_end(srv, request->project);
+    request->mutation_held = false;
+    return cbm_mcp_text_result("project operation cancelled for this request", true);
+}
+
+static void adr_end_mutation(cbm_mcp_server_t *srv, adr_request_t *request) {
+    if (request->mutation_held) {
+        mcp_project_mutation_end(srv, request->project);
+        request->mutation_held = false;
+    }
+}
+
+static char *adr_resolve_store(cbm_mcp_server_t *srv, const adr_request_t *request,
+                               cbm_store_t **resolved_out) {
+    store_recovery_status_t recovery_status = STORE_RECOVERY_NONE;
+    *resolved_out = resolve_store_internal(srv, request->project, request->mutation_held,
+                                           !request->write_request, &recovery_status);
+    if (*resolved_out) {
+        return NULL;
+    }
+    if (recovery_status == STORE_RECOVERY_BUSY) {
+        return cbm_mcp_text_result("project is busy; retry after indexing", true);
+    }
+    if (recovery_status == STORE_RECOVERY_TRY_GUARD_UNAVAILABLE) {
+        return cbm_mcp_text_result("project recovery requires a nonblocking mutation guard", true);
+    }
+    char *error = build_no_store_error(request->project);
+    char *result = cbm_mcp_text_result(error, true);
+    free(error);
+    return result;
+}
+
+static char *adr_open_write_store(cbm_mcp_server_t *srv, const adr_request_t *request,
+                                  cbm_store_t *resolved, cbm_store_t **store_out,
+                                  cbm_store_t **owned_store_out) {
+    *store_out = resolved;
+    *owned_store_out = NULL;
+    if (!request->write_request) {
+        return NULL;
+    }
+    *store_out = open_adr_store_for_write(srv, resolved, owned_store_out);
+    return *store_out ? NULL : cbm_mcp_text_result("failed to open writable ADR store", true);
+}
+
+static void adr_try_migrate_legacy(cbm_mcp_server_t *srv, const adr_request_t *request,
+                                   cbm_store_t **resolved_io, cbm_store_t **store_io,
+                                   cbm_store_t **owned_store_io, cbm_adr_t *adr, bool *have_adr,
+                                   char **legacy_out) {
+    if (*have_adr || request->write_request) {
+        return;
+    }
+    char *root_path = project_root_from_store(*store_io, request->project);
+    *legacy_out = adr_read_legacy_file(root_path);
+    free(root_path);
+    if (!*legacy_out || !mcp_project_mutation_try_begin(srv, request->project)) {
+        return;
+    }
+    if (!mcp_request_cancelled(srv)) {
+        if (cbm_store_db_path(*resolved_io)) {
+            invalidate_cached_store(srv);
+            *resolved_io = resolve_store_internal(srv, request->project, true, false, NULL);
+            *store_io = NULL;
+        }
+        if (*resolved_io) {
+            *store_io = open_adr_store_for_write(srv, *resolved_io, owned_store_io);
+            if (*store_io) {
+                *have_adr = cbm_store_adr_get(*store_io, request->project, adr) == CBM_STORE_OK;
+                if (!*have_adr &&
+                    cbm_store_adr_store(*store_io, request->project, *legacy_out) == CBM_STORE_OK) {
+                    *have_adr = cbm_store_adr_get(*store_io, request->project, adr) == CBM_STORE_OK;
+                }
+            }
+        }
+    }
+    mcp_project_mutation_end(srv, request->project);
+}
+
+static char *adr_render_response(const adr_request_t *request, cbm_store_t *store, bool have_adr,
+                                 const cbm_adr_t *adr, const char *legacy, bool *is_error) {
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *root = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+    const char *content = have_adr ? adr->content : legacy;
+    *is_error = false;
+    if (request->write_request) {
+        if (cbm_store_adr_store(store, request->project, request->content) == CBM_STORE_OK) {
+            yyjson_mut_obj_add_str(doc, root, "status", "updated");
+            yyjson_mut_obj_add_str(doc, root, "semantics", "whole_document_replaced");
+        } else {
+            yyjson_mut_obj_add_str(doc, root, "status", "write_error");
+            *is_error = true;
+        }
+    } else if (strcmp(request->mode, "sections") == 0) {
+        adr_list_sections_from_content(doc, root, content);
+    } else if (content) {
+        yyjson_mut_obj_add_strcpy(doc, root, "content", content);
+    } else {
+        yyjson_mut_obj_add_str(doc, root, "content", "");
+        yyjson_mut_obj_add_str(doc, root, "status", "no_adr");
+        yyjson_mut_obj_add_str(doc, root, "adr_hint", ADR_EMPTY_HINT);
+    }
+    char *json = yy_doc_to_str(doc);
+    yyjson_mut_doc_free(doc);
+    return json;
+}
+
 static char *handle_manage_adr(cbm_mcp_server_t *srv, const char *args) {
-    char *project = get_project_arg(args);
-    char *mode_str = cbm_mcp_get_string_arg(args, "mode");
-    char *content = cbm_mcp_get_string_arg(args, "content");
-
-    if (!mode_str) {
-        mode_str = heap_strdup("get");
-    }
-
-    /* `sections` used to be advertised as an input argument, but it was never
-     * consumed: mode=update still replaced the whole document. Reject the old
-     * shape explicitly before opening a store so a stale client cannot mistake
-     * a whole-document replacement for a section-scoped update. */
-    bool has_sections_arg = false;
-    yyjson_doc *args_doc = yyjson_read(args, strlen(args), 0);
-    if (args_doc) {
-        yyjson_val *args_root = yyjson_doc_get_root(args_doc);
-        has_sections_arg =
-            args_root && yyjson_is_obj(args_root) && yyjson_obj_get(args_root, "sections") != NULL;
-        yyjson_doc_free(args_doc);
-    }
-    if (has_sections_arg) {
-        free(project);
-        free(mode_str);
-        free(content);
+    adr_request_t request;
+    adr_request_init(&request, args);
+    if (adr_has_sections_argument(args)) {
+        adr_request_dispose(&request);
         return cbm_mcp_text_result(
             "{\"status\":\"invalid_arguments\",\"error\":\"The sections argument is not an "
             "update primitive and has been removed. No ADR write was performed.\"}",
             true);
     }
-
-    bool write_request =
-        content && (strcmp(mode_str, "update") == 0 || strcmp(mode_str, "store") == 0);
-    bool mutation_held = false;
-    if (write_request && project) {
-        mutation_held = mcp_project_mutation_begin(srv, project);
-        if (!mutation_held) {
-            free(project);
-            free(mode_str);
-            free(content);
-            return cbm_mcp_text_result("project operation cancelled or blocked by an active index",
-                                       true);
-        }
-        if (mcp_request_cancelled(srv)) {
-            mcp_project_mutation_end(srv, project);
-            free(project);
-            free(mode_str);
-            free(content);
-            return cbm_mcp_text_result("project operation cancelled for this request", true);
-        }
+    char *result = adr_begin_mutation(srv, &request);
+    if (result) {
+        adr_request_dispose(&request);
+        return result;
     }
-
-    /* ADRs are stored in the SQLite store (project_summaries), the SAME
-     * backend the UI /api/adr endpoints use — so writes via the MCP tool and
-     * the UI are visible to each other (#256). */
-    store_recovery_status_t recovery_status = STORE_RECOVERY_NONE;
-    cbm_store_t *resolved =
-        resolve_store_internal(srv, project, mutation_held, !write_request, &recovery_status);
-    if (!resolved) {
-        char *res = NULL;
-        if (recovery_status == STORE_RECOVERY_BUSY) {
-            res = cbm_mcp_text_result("project is busy; retry after indexing", true);
-        } else if (recovery_status == STORE_RECOVERY_TRY_GUARD_UNAVAILABLE) {
-            res =
-                cbm_mcp_text_result("project recovery requires a nonblocking mutation guard", true);
-        } else {
-            char *err = build_no_store_error(project);
-            res = cbm_mcp_text_result(err, true);
-            free(err);
-        }
-        if (mutation_held) {
-            mcp_project_mutation_end(srv, project);
-        }
-        free(project);
-        free(mode_str);
-        free(content);
-        return res;
+    cbm_store_t *resolved = NULL;
+    result = adr_resolve_store(srv, &request, &resolved);
+    if (result) {
+        adr_end_mutation(srv, &request);
+        adr_request_dispose(&request);
+        return result;
     }
-
-    cbm_store_t *store = resolved;
+    cbm_store_t *store = NULL;
     cbm_store_t *owned_rw = NULL;
-    if (write_request) {
-        store = open_adr_store_for_write(srv, resolved, &owned_rw);
-        if (!store) {
-            if (mutation_held) {
-                mcp_project_mutation_end(srv, project);
-            }
-            free(project);
-            free(mode_str);
-            free(content);
-            return cbm_mcp_text_result("failed to open writable ADR store", true);
-        }
+    result = adr_open_write_store(srv, &request, resolved, &store, &owned_rw);
+    if (result) {
+        adr_end_mutation(srv, &request);
+        adr_request_dispose(&request);
+        return result;
     }
 
-    /* One-time migration: older versions wrote ADRs to a file at
-     * <root>/.codebase-memory/adr.md. A read never waits for the project lease:
-     * it returns the legacy content immediately and attempts migration only if
-     * a nonblocking acquire succeeds. */
-    cbm_adr_t adr;
-    memset(&adr, 0, sizeof(adr));
-    bool have_adr = (cbm_store_adr_get(store, project, &adr) == CBM_STORE_OK);
+    cbm_adr_t adr = {0};
+    bool have_adr = cbm_store_adr_get(store, request.project, &adr) == CBM_STORE_OK;
     char *legacy = NULL;
-    if (!have_adr && !write_request) {
-        char *root_path = project_root_from_store(store, project);
-        legacy = adr_read_legacy_file(root_path);
-        free(root_path);
-        if (legacy && mcp_project_mutation_try_begin(srv, project)) {
-            if (!mcp_request_cancelled(srv)) {
-                /* A publisher may have completed before the lease was granted.
-                 * File-backed stores must reopen after acquisition and trust
-                 * only that generation. Embedded stores have no publication
-                 * boundary, so retain their live handle. */
-                if (cbm_store_db_path(resolved)) {
-                    invalidate_cached_store(srv);
-                    resolved = NULL;
-                    store = NULL;
-                    resolved = resolve_store_internal(srv, project, true, false, NULL);
-                }
-                if (resolved) {
-                    store = open_adr_store_for_write(srv, resolved, &owned_rw);
-                    if (store) {
-                        have_adr = (cbm_store_adr_get(store, project, &adr) == CBM_STORE_OK);
-                        if (!have_adr &&
-                            cbm_store_adr_store(store, project, legacy) == CBM_STORE_OK) {
-                            have_adr = (cbm_store_adr_get(store, project, &adr) == CBM_STORE_OK);
-                        }
-                    }
-                }
-            }
-            mcp_project_mutation_end(srv, project);
-        }
-    }
-
-    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-    yyjson_mut_val *root_obj = yyjson_mut_obj(doc);
-    yyjson_mut_doc_set_root(doc, root_obj);
-
+    adr_try_migrate_legacy(srv, &request, &resolved, &store, &owned_rw, &adr, &have_adr, &legacy);
     bool is_error = false;
-    const char *adr_content = have_adr ? adr.content : legacy;
-    if (write_request) {
-        if (cbm_store_adr_store(store, project, content) == CBM_STORE_OK) {
-            yyjson_mut_obj_add_str(doc, root_obj, "status", "updated");
-            yyjson_mut_obj_add_str(doc, root_obj, "semantics", "whole_document_replaced");
-        } else {
-            yyjson_mut_obj_add_str(doc, root_obj, "status", "write_error");
-            is_error = true;
-        }
-    } else if (strcmp(mode_str, "sections") == 0) {
-        adr_list_sections_from_content(doc, root_obj, adr_content);
-    } else { /* get */
-        if (adr_content) {
-            yyjson_mut_obj_add_strcpy(doc, root_obj, "content", adr_content);
-        } else {
-            yyjson_mut_obj_add_str(doc, root_obj, "content", "");
-            yyjson_mut_obj_add_str(doc, root_obj, "status", "no_adr");
-            yyjson_mut_obj_add_str(doc, root_obj, "adr_hint", ADR_EMPTY_HINT);
-        }
-    }
-
-    char *json = yy_doc_to_str(doc);
-    yyjson_mut_doc_free(doc);
+    char *json = adr_render_response(&request, store, have_adr, &adr, legacy, &is_error);
     if (have_adr) {
         cbm_store_adr_free(&adr);
     }
     if (owned_rw) {
         cbm_store_close(owned_rw);
     }
-    if (mutation_held) {
-        mcp_project_mutation_end(srv, project);
-    }
+    adr_end_mutation(srv, &request);
     free(legacy);
-    free(project);
-    free(mode_str);
-    free(content);
+    adr_request_dispose(&request);
 
-    char *result = cbm_mcp_text_result(json, is_error);
+    result = cbm_mcp_text_result(json, is_error);
     free(json);
     return result;
 }
@@ -11923,133 +11971,157 @@ bool cbm_mcp_jsonrpc_response_prepend_notice(char **response_io, const char *not
     return true;
 }
 
+static long long mcp_elapsed_us(const struct timespec *started, const struct timespec *finished) {
+    return ((long long)(finished->tv_sec - started->tv_sec) * MCP_S_TO_US) +
+           ((long long)(finished->tv_nsec - started->tv_nsec) / MCP_MS_TO_US);
+}
+
+static void mcp_log_jsonrpc_request(const cbm_jsonrpc_request_t *request, const char *tool_name,
+                                    bool is_error, const struct timespec *started) {
+    struct timespec finished;
+    cbm_clock_gettime(CLOCK_MONOTONIC, &finished);
+    cbm_log_mcp_request(request->method, tool_name, is_error, mcp_elapsed_us(started, &finished));
+}
+
+static void mcp_handle_notification(cbm_mcp_server_t *srv, const cbm_jsonrpc_request_t *request) {
+    if (!request->method || strcmp(request->method, "notifications/cancelled") != 0) {
+        return;
+    }
+    if (cbm_mcp_cancel_request_matches(request->params_raw, srv->active_request_id,
+                                       srv->active_request_id_str) &&
+        cbm_mcp_server_cancel_active(srv)) {
+        cbm_log_info("mcp.cancelled", "match", "true");
+    }
+}
+
+static bool mcp_handle_standard_method(cbm_mcp_server_t *srv, const cbm_jsonrpc_request_t *request,
+                                       char **result_json, char **error_json) {
+    if (strcmp(request->method, "initialize") == 0) {
+        *result_json =
+            cbm_mcp_initialize_response_for_profile(request->params_raw, srv->tool_profile);
+        detect_session(srv);
+        if (srv->background_tasks && srv->tool_profile == CBM_MCP_TOOL_PROFILE_ALL) {
+            maybe_auto_index(srv);
+        }
+        return true;
+    }
+    if (strcmp(request->method, "ping") == 0) {
+        *result_json = heap_strdup("{}");
+        return true;
+    }
+    if (strcmp(request->method, "resources/list") == 0) {
+        *result_json = heap_strdup("{\"resources\":[]}");
+        return true;
+    }
+    if (strcmp(request->method, "resources/templates/list") == 0) {
+        *result_json = heap_strdup("{\"resourceTemplates\":[]}");
+        return true;
+    }
+    if (strcmp(request->method, "prompts/list") == 0) {
+        *result_json = cbm_mcp_prompts_list();
+        return true;
+    }
+    if (strcmp(request->method, "prompts/get") == 0) {
+        *result_json = cbm_mcp_prompt_get(request->params_raw, error_json);
+        return true;
+    }
+    if (strcmp(request->method, "tools/list") == 0) {
+        *result_json = cbm_mcp_tools_list_page(srv->tool_profile, request->params_raw);
+        return true;
+    }
+    return false;
+}
+
+static char *mcp_handle_tools_call(cbm_mcp_server_t *srv, const cbm_jsonrpc_request_t *request,
+                                   const struct timespec *request_started) {
+    char *tool_name = request->params_raw ? cbm_mcp_get_tool_name(request->params_raw) : NULL;
+    char *tool_args =
+        request->params_raw ? cbm_mcp_get_arguments(request->params_raw) : heap_strdup("{}");
+    srv->active_request_id = request->id;
+    free(srv->active_request_id_str);
+    srv->active_request_id_str = request->id_str ? heap_strdup(request->id_str) : NULL;
+    struct timespec started;
+    cbm_clock_gettime(CLOCK_MONOTONIC, &started);
+    char *result = cbm_mcp_handle_tool(srv, tool_name, tool_args);
+    srv->active_request_id = CBM_NOT_FOUND;
+    free(srv->active_request_id_str);
+    srv->active_request_id_str = NULL;
+    struct timespec finished;
+    cbm_clock_gettime(CLOCK_MONOTONIC, &finished);
+    bool is_error = result && strstr(result, "\"isError\":true") != NULL;
+    cbm_diag_record_query(mcp_elapsed_us(&started, &finished), is_error);
+    cbm_log_mcp_request(request->method, tool_name, is_error,
+                        mcp_elapsed_us(request_started, &finished));
+    free(tool_name);
+    free(tool_args);
+    return result;
+}
+
+static char *mcp_format_error_response(const cbm_jsonrpc_request_t *request, const char *error_json,
+                                       const struct timespec *started) {
+    cbm_jsonrpc_response_t response = {
+        .id = request->id,
+        .id_str = request->id_str,
+        .error_json = error_json,
+    };
+    char *result = cbm_jsonrpc_format_response(&response);
+    mcp_log_jsonrpc_request(request, NULL, true, started);
+    return result;
+}
+
+static char *mcp_format_method_not_found(const cbm_jsonrpc_request_t *request,
+                                         const struct timespec *started) {
+    enum { MCP_METHOD_ERROR_CAPACITY = 160 };
+    char error[MCP_METHOD_ERROR_CAPACITY];
+    snprintf(error, sizeof(error), "{\"code\":%d,\"message\":\"Method not found\"}",
+             JSONRPC_METHOD_NOT_FOUND);
+    return mcp_format_error_response(request, error, started);
+}
+
 char *cbm_mcp_server_handle(cbm_mcp_server_t *srv, const char *line) {
     cbm_jsonrpc_request_t req = {0};
     if (cbm_jsonrpc_parse(line, &req) < 0) {
         return cbm_jsonrpc_format_error(0, JSONRPC_PARSE_ERROR, "Parse error");
     }
-
-    /* Notifications (no id) → handle cancellation, then no response */
     if (!req.has_id) {
-        if (req.method && strcmp(req.method, "notifications/cancelled") == 0) {
-            if (cbm_mcp_cancel_request_matches(req.params_raw, srv->active_request_id,
-                                               srv->active_request_id_str) &&
-                cbm_mcp_server_cancel_active(srv)) {
-                cbm_log_info("mcp.cancelled", "match", "true");
-            }
-        }
+        mcp_handle_notification(srv, &req);
         cbm_jsonrpc_request_free(&req);
         return NULL;
     }
-
     if (!cbm_mcp_server_request_scope_begin(srv)) {
         int64_t request_id = req.id;
         cbm_jsonrpc_request_free(&req);
         return cbm_jsonrpc_format_error(request_id, JSONRPC_INTERNAL_ERROR,
                                         "Request cancellation scope unavailable");
     }
-
     struct timespec req_t0;
     cbm_clock_gettime(CLOCK_MONOTONIC, &req_t0);
     char *result_json = NULL;
     char *request_error_json = NULL;
     bool request_logged = false;
-
-    if (strcmp(req.method, "initialize") == 0) {
-        result_json = cbm_mcp_initialize_response_for_profile(req.params_raw, srv->tool_profile);
-        detect_session(srv);
-        if (srv->background_tasks && srv->tool_profile == CBM_MCP_TOOL_PROFILE_ALL) {
-            maybe_auto_index(srv);
-        }
-    } else if (strcmp(req.method, "ping") == 0) {
-        result_json = heap_strdup("{}");
-    } else if (strcmp(req.method, "resources/list") == 0) {
-        /* This server exposes no resources, but clients probe these on
-         * connect regardless of declared capabilities and surface -32601 as
-         * a failed connection (#958). Empty lists are interoperable. */
-        result_json = heap_strdup("{\"resources\":[]}");
-    } else if (strcmp(req.method, "resources/templates/list") == 0) {
-        result_json = heap_strdup("{\"resourceTemplates\":[]}");
-    } else if (strcmp(req.method, "prompts/list") == 0) {
-        result_json = cbm_mcp_prompts_list();
-    } else if (strcmp(req.method, "prompts/get") == 0) {
-        result_json = cbm_mcp_prompt_get(req.params_raw, &request_error_json);
-    } else if (strcmp(req.method, "tools/list") == 0) {
-        result_json = cbm_mcp_tools_list_page(srv->tool_profile, req.params_raw);
-    } else if (strcmp(req.method, "tools/call") == 0) {
-        char *tool_name = req.params_raw ? cbm_mcp_get_tool_name(req.params_raw) : NULL;
-        char *tool_args =
-            req.params_raw ? cbm_mcp_get_arguments(req.params_raw) : heap_strdup("{}");
-        srv->active_request_id = req.id;
-        free(srv->active_request_id_str);
-        srv->active_request_id_str = req.id_str ? heap_strdup(req.id_str) : NULL;
-
-        struct timespec t0;
-        cbm_clock_gettime(CLOCK_MONOTONIC, &t0);
-        result_json = cbm_mcp_handle_tool(srv, tool_name, tool_args);
-        srv->active_request_id = CBM_NOT_FOUND;
-        free(srv->active_request_id_str);
-        srv->active_request_id_str = NULL;
-        struct timespec t1;
-        cbm_clock_gettime(CLOCK_MONOTONIC, &t1);
-        long long dur_us = ((long long)(t1.tv_sec - t0.tv_sec) * MCP_S_TO_US) +
-                           ((long long)(t1.tv_nsec - t0.tv_nsec) / MCP_MS_TO_US);
-        bool is_err = (result_json != NULL) && (strstr(result_json, "\"isError\":true") != NULL);
-        cbm_diag_record_query(dur_us, is_err);
-        long long request_dur_us = ((long long)(t1.tv_sec - req_t0.tv_sec) * MCP_S_TO_US) +
-                                   ((long long)(t1.tv_nsec - req_t0.tv_nsec) / MCP_MS_TO_US);
-        cbm_log_mcp_request(req.method, tool_name, is_err, request_dur_us);
+    bool is_tool_call = strcmp(req.method, "tools/call") == 0;
+    bool handled =
+        is_tool_call || mcp_handle_standard_method(srv, &req, &result_json, &request_error_json);
+    if (is_tool_call) {
+        result_json = mcp_handle_tools_call(srv, &req, &req_t0);
         request_logged = true;
-
-        free(tool_name);
-        free(tool_args);
-    } else {
-        /* Echo the original id (string or numeric, issue #253) on the error. */
-        char err_obj[160];
-        snprintf(err_obj, sizeof(err_obj), "{\"code\":%d,\"message\":\"Method not found\"}",
-                 JSONRPC_METHOD_NOT_FOUND);
-        cbm_jsonrpc_response_t err_resp = {
-            .id = req.id,
-            .id_str = req.id_str,
-            .error_json = err_obj,
-        };
-        char *err = cbm_jsonrpc_format_response(&err_resp);
-        struct timespec t1;
-        cbm_clock_gettime(CLOCK_MONOTONIC, &t1);
-        long long dur_us = ((long long)(t1.tv_sec - req_t0.tv_sec) * MCP_S_TO_US) +
-                           ((long long)(t1.tv_nsec - req_t0.tv_nsec) / MCP_MS_TO_US);
-        cbm_log_mcp_request(req.method, NULL, true, dur_us);
+    }
+    if (!handled) {
+        char *result = mcp_format_method_not_found(&req, &req_t0);
         cbm_mcp_server_request_scope_end(srv);
         cbm_jsonrpc_request_free(&req);
-        return err;
+        return result;
     }
-
     if (request_error_json) {
-        cbm_jsonrpc_response_t err_resp = {
-            .id = req.id,
-            .id_str = req.id_str,
-            .error_json = request_error_json,
-        };
-        char *err = cbm_jsonrpc_format_response(&err_resp);
-        struct timespec t1;
-        cbm_clock_gettime(CLOCK_MONOTONIC, &t1);
-        long long dur_us = ((long long)(t1.tv_sec - req_t0.tv_sec) * MCP_S_TO_US) +
-                           ((long long)(t1.tv_nsec - req_t0.tv_nsec) / MCP_MS_TO_US);
-        cbm_log_mcp_request(req.method, NULL, true, dur_us);
+        char *result = mcp_format_error_response(&req, request_error_json, &req_t0);
         free(request_error_json);
         cbm_mcp_server_request_scope_end(srv);
         cbm_jsonrpc_request_free(&req);
-        return err;
+        return result;
     }
-
     if (!request_logged) {
-        struct timespec t1;
-        cbm_clock_gettime(CLOCK_MONOTONIC, &t1);
-        long long dur_us = ((long long)(t1.tv_sec - req_t0.tv_sec) * MCP_S_TO_US) +
-                           ((long long)(t1.tv_nsec - req_t0.tv_nsec) / MCP_MS_TO_US);
-        cbm_log_mcp_request(req.method, NULL, false, dur_us);
+        mcp_log_jsonrpc_request(&req, NULL, false, &req_t0);
     }
-
     cbm_jsonrpc_response_t resp = {
         .id = req.id,
         .id_str = req.id_str,
