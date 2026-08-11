@@ -349,6 +349,8 @@ int cbm_daemon_ipc_wait_pending(const cbm_ipc_pending_ops_t *ops, uint32_t timeo
 enum {
     POSIX_STATUS_SUCCESS = 0,
     POSIX_STATUS_READY = 1,
+    POSIX_INVALID_DESCRIPTOR = -1,
+    POSIX_POLL_TIMEOUT_INFINITE = -1,
     POSIX_LOCK_STATUS_UNAVAILABLE = 0,
     POSIX_LOCK_STATUS_ACQUIRED = 1,
     POSIX_PATH_STATUS_ABSENT = 0,
@@ -394,12 +396,21 @@ static const uint8_t POSIX_SOCKET_PENDING_MAGIC[POSIX_SOCKET_RECORD_MAGIC_SIZE] 
     'C', 'B', 'M', 'P', 'E', 'N', 1, 0,
 };
 
+static const uid_t POSIX_INVALID_USER_ID = ~(uid_t)0;
+static const gid_t POSIX_INVALID_GROUP_ID = ~(gid_t)0;
+
 typedef struct {
     dev_t device;
     ino_t inode;
     int64_t ctime_seconds;
     uint32_t ctime_nanoseconds;
 } posix_socket_identity_t;
+
+typedef enum {
+    POSIX_CONNECT_FAILURE = -1,
+    POSIX_CONNECT_RETRY = 0,
+    POSIX_CONNECT_CONNECTED = 1,
+} posix_connect_result_t;
 
 typedef struct {
     posix_socket_identity_t identity;
@@ -814,7 +825,8 @@ static bool private_regular_file_at_is_safe(int directory_fd, const char *base_n
 static int poll_until(int fd, short events, uint64_t deadline_ms) {
     for (;;) {
         struct pollfd descriptor = {.fd = fd, .events = events, .revents = 0};
-        int timeout_ms = deadline_ms == UINT64_MAX ? -1 : deadline_remaining_ms(deadline_ms);
+        int timeout_ms = deadline_ms == UINT64_MAX ? POSIX_POLL_TIMEOUT_INFINITE
+                                                   : deadline_remaining_ms(deadline_ms);
         int result = poll(&descriptor, POSIX_POLL_DESCRIPTOR_COUNT, timeout_ms);
         if (result > 0) {
             if ((descriptor.revents & events) != 0) {
@@ -833,8 +845,8 @@ static int poll_until(int fd, short events, uint64_t deadline_ms) {
 
 static bool socket_peer_is_current_user(int fd) {
 #if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
-    uid_t peer_uid = (uid_t)-1;
-    gid_t peer_gid = (gid_t)-1;
+    uid_t peer_uid = POSIX_INVALID_USER_ID;
+    gid_t peer_gid = POSIX_INVALID_GROUP_ID;
     return getpeereid(fd, &peer_uid, &peer_gid) == 0 && peer_uid == geteuid();
 #elif defined(__linux__)
     struct ucred credentials;
@@ -934,7 +946,7 @@ cbm_daemon_ipc_endpoint_t *cbm_daemon_ipc_endpoint_new(const char *instance_key,
         return NULL;
     }
 
-    cbm_daemon_ipc_endpoint_t *endpoint = calloc(1, sizeof(*endpoint));
+    cbm_daemon_ipc_endpoint_t *endpoint = calloc(POSIX_SINGLE_ALLOCATION, sizeof(*endpoint));
     if (!endpoint) {
         return NULL;
     }
@@ -996,7 +1008,7 @@ static cbm_daemon_ipc_endpoint_t *endpoint_snapshot_new(const cbm_daemon_ipc_end
     if (!endpoint_runtime_still_valid(endpoint)) {
         return NULL;
     }
-    cbm_daemon_ipc_endpoint_t *snapshot = calloc(1, sizeof(*snapshot));
+    cbm_daemon_ipc_endpoint_t *snapshot = calloc(POSIX_SINGLE_ALLOCATION, sizeof(*snapshot));
     if (!snapshot) {
         return NULL;
     }
@@ -2633,50 +2645,35 @@ static void posix_publication_abort(const cbm_daemon_ipc_endpoint_t *endpoint,
     (void)posix_directory_sync(endpoint->dir_fd);
 }
 
-cbm_daemon_ipc_listener_t *cbm_daemon_ipc_listen_reserved(
-    const cbm_daemon_ipc_endpoint_t *endpoint,
-    cbm_daemon_ipc_lifetime_reservation_t **reservation_io) {
-    cbm_daemon_ipc_lifetime_reservation_t *lifetime_reservation =
-        reservation_io ? *reservation_io : NULL;
-    /* A reservation copied through fork belongs to the parent process. Reject
-     * it before touching runtime state or the logger so this path remains
-     * safe for a child that reports and exits immediately. */
-    if (!lifetime_reservation || lifetime_reservation->owner_pid != getpid()) {
-        return NULL;
-    }
-    if (!lifetime_reservation_matches_endpoint(endpoint, lifetime_reservation)) {
-        cbm_log_error("daemon.ipc.listen_failed", "stage", "reservation_validation");
-        return NULL;
-    }
-    /* Stale removal happens only under the startup lock, before a daemon host
-     * transfers this lifetime reservation. The listener path itself never
-     * connects to, classifies, or removes pre-existing artifacts. */
+static bool posix_listener_namespace_is_absent(const cbm_daemon_ipc_endpoint_t *endpoint) {
     char identity_temp_name[POSIX_RECORD_TEMP_NAME_CAP];
     char pending_temp_name[POSIX_RECORD_TEMP_NAME_CAP];
     if (!posix_socket_record_temp_name(endpoint->socket_identity_name, identity_temp_name) ||
         !posix_socket_record_temp_name(endpoint->socket_pending_name, pending_temp_name)) {
         cbm_log_error("daemon.ipc.listen_failed", "stage", "temp_names");
-        return NULL;
+        return false;
     }
-    struct stat existing;
     const char *required_absent[] = {
         endpoint->socket_name,         endpoint->socket_anchor_name, endpoint->socket_identity_name,
         endpoint->socket_pending_name, identity_temp_name,           pending_temp_name,
     };
-    bool namespace_absent = true;
+    struct stat existing;
     for (size_t index = 0; index < sizeof(required_absent) / sizeof(required_absent[0]); index++) {
         if (fstatat(endpoint->dir_fd, required_absent[index], &existing, AT_SYMLINK_NOFOLLOW) ==
                 0 ||
             errno != ENOENT) {
-            namespace_absent = false;
-            break;
+            cbm_log_error("daemon.ipc.listen_failed", "stage", "namespace_validation");
+            return false;
         }
     }
-    if (!endpoint_runtime_still_valid(endpoint) || !namespace_absent) {
+    if (!endpoint_runtime_still_valid(endpoint)) {
         cbm_log_error("daemon.ipc.listen_failed", "stage", "namespace_validation");
-        return NULL;
+        return false;
     }
+    return true;
+}
 
+static cbm_daemon_ipc_listener_t *posix_listener_new(const cbm_daemon_ipc_endpoint_t *endpoint) {
     int fd = local_socket_new();
     if (fd < 0) {
         cbm_log_error("daemon.ipc.listen_failed", "stage", "socket_creation");
@@ -2716,23 +2713,24 @@ cbm_daemon_ipc_listener_t *cbm_daemon_ipc_listen_reserved(
         free(listener);
         return NULL;
     }
+    return listener;
+}
 
+static bool posix_listener_anchor_bind_and_secure(const cbm_daemon_ipc_endpoint_t *endpoint,
+                                                  cbm_daemon_ipc_listener_t *listener,
+                                                  posix_socket_identity_t *identity_out) {
     struct sockaddr_un address;
     socklen_t address_length;
     if (!unix_address_set(&address, endpoint->socket_anchor_address, &address_length)) {
         cbm_log_error("daemon.ipc.listen_failed", "stage", "socket_address");
-        cbm_daemon_ipc_listener_close(listener);
-        return NULL;
+        return false;
     }
-    if (bind(fd, (const struct sockaddr *)&address, address_length) != 0) {
-        int bind_error = errno;
+    if (bind(listener->fd, (const struct sockaddr *)&address, address_length) != 0) {
         char error_text[POSIX_SOCKET_ERROR_TEXT_CAP];
-        (void)snprintf(error_text, sizeof(error_text), "%d", bind_error);
+        (void)snprintf(error_text, sizeof(error_text), "%d", errno);
         cbm_log_error("daemon.ipc.listen_failed", "bind_errno", error_text);
-        cbm_daemon_ipc_listener_close(listener);
-        return NULL;
+        return false;
     }
-
     struct stat bound_status;
     bool bound_path_ok = fstatat(endpoint->dir_fd, endpoint->socket_anchor_name, &bound_status,
                                  AT_SYMLINK_NOFOLLOW) == 0 &&
@@ -2745,36 +2743,106 @@ cbm_daemon_ipc_listener_t *cbm_daemon_ipc_listen_reserved(
                 AT_SYMLINK_NOFOLLOW) == 0 &&
         posix_socket_status_secure_links(&anchor_status, POSIX_LINK_COUNT_SINGLE) &&
         anchor_status.st_dev == bound_status.st_dev && anchor_status.st_ino == bound_status.st_ino;
-    posix_socket_identity_t anchor_identity = {0};
-    if (!secured || listen(fd, POSIX_SOCKET_LISTEN_BACKLOG) != 0 ||
+    if (!secured || listen(listener->fd, POSIX_SOCKET_LISTEN_BACKLOG) != 0 ||
         fstatat(endpoint->dir_fd, endpoint->socket_anchor_name, &anchor_status,
                 AT_SYMLINK_NOFOLLOW) != 0 ||
         !posix_socket_status_secure_links(&anchor_status, POSIX_LINK_COUNT_SINGLE) ||
         anchor_status.st_dev != bound_status.st_dev ||
         anchor_status.st_ino != bound_status.st_ino ||
-        !posix_socket_identity_from_stat(&anchor_status, &anchor_identity) ||
+        !posix_socket_identity_from_stat(&anchor_status, identity_out) ||
         !posix_directory_sync(endpoint->dir_fd)) {
         if (bound_path_ok) {
             posix_bound_socket_unlink_if_matches(endpoint->dir_fd, endpoint->socket_anchor_name,
                                                  bound_status.st_dev, bound_status.st_ino);
         }
         cbm_log_error("daemon.ipc.listen_failed", "stage", "socket_security");
+        return false;
+    }
+    return true;
+}
+
+static bool posix_listener_pending_publish(const cbm_daemon_ipc_endpoint_t *endpoint,
+                                           const posix_socket_identity_t *anchor_identity,
+                                           struct stat *pending_status_out) {
+    posix_socket_record_t pending = {
+        .identity = *anchor_identity,
+    };
+    (void)snprintf(pending.anchor_name, sizeof(pending.anchor_name), "%s",
+                   endpoint->socket_anchor_name);
+    return posix_socket_record_publish(endpoint, endpoint->socket_pending_name,
+                                       POSIX_SOCKET_PENDING_MAGIC, &pending,
+                                       &pending_status_out->st_dev, &pending_status_out->st_ino);
+}
+
+static bool posix_listener_stable_publish(const cbm_daemon_ipc_endpoint_t *endpoint,
+                                          const posix_socket_identity_t *anchor_identity,
+                                          posix_socket_identity_t *committed_identity_out) {
+    bool stable_linked = posix_linkat_no_follow(endpoint->dir_fd, endpoint->socket_anchor_name,
+                                                endpoint->dir_fd, endpoint->socket_name) == 0 &&
+                         posix_directory_sync(endpoint->dir_fd);
+    posix_socket_identity_t stable_identity = {0};
+    struct stat stable_status = {0};
+    struct stat committed_anchor_status = {0};
+    return stable_linked &&
+           posix_socket_path_identity_read(endpoint, endpoint->socket_name, &stable_identity,
+                                           &stable_status) == POSIX_PATH_STATUS_PRESENT &&
+           posix_socket_path_identity_read(endpoint, endpoint->socket_anchor_name,
+                                           committed_identity_out,
+                                           &committed_anchor_status) == POSIX_PATH_STATUS_PRESENT &&
+           stable_status.st_nlink == POSIX_LINK_COUNT_PAIRED &&
+           committed_anchor_status.st_nlink == POSIX_LINK_COUNT_PAIRED &&
+           posix_socket_identity_equal(&stable_identity, committed_identity_out) &&
+           posix_socket_inode_equal(anchor_identity, committed_identity_out);
+}
+
+static bool posix_listener_marker_publish(const cbm_daemon_ipc_endpoint_t *endpoint,
+                                          const posix_socket_identity_t *committed_identity,
+                                          struct stat *marker_status_out) {
+    posix_socket_record_t marker = {
+        .identity = *committed_identity,
+    };
+    (void)snprintf(marker.anchor_name, sizeof(marker.anchor_name), "%s",
+                   endpoint->socket_anchor_name);
+    return posix_socket_record_publish(endpoint, endpoint->socket_identity_name,
+                                       POSIX_SOCKET_MARKER_MAGIC, &marker,
+                                       &marker_status_out->st_dev, &marker_status_out->st_ino);
+}
+
+cbm_daemon_ipc_listener_t *cbm_daemon_ipc_listen_reserved(
+    const cbm_daemon_ipc_endpoint_t *endpoint,
+    cbm_daemon_ipc_lifetime_reservation_t **reservation_io) {
+    cbm_daemon_ipc_lifetime_reservation_t *lifetime_reservation =
+        reservation_io ? *reservation_io : NULL;
+    /* A reservation copied through fork belongs to the parent process. Reject
+     * it before touching runtime state or the logger so this path remains
+     * safe for a child that reports and exits immediately. */
+    if (!lifetime_reservation || lifetime_reservation->owner_pid != getpid()) {
+        return NULL;
+    }
+    if (!lifetime_reservation_matches_endpoint(endpoint, lifetime_reservation)) {
+        cbm_log_error("daemon.ipc.listen_failed", "stage", "reservation_validation");
+        return NULL;
+    }
+    /* Stale removal happens only under the startup lock, before a daemon host
+     * transfers this lifetime reservation. The listener path itself never
+     * connects to, classifies, or removes pre-existing artifacts. */
+    posix_socket_identity_t anchor_identity = {0};
+    if (!posix_listener_namespace_is_absent(endpoint)) {
+        return NULL;
+    }
+    cbm_daemon_ipc_listener_t *listener = posix_listener_new(endpoint);
+    if (!listener) {
+        return NULL;
+    }
+    if (!posix_listener_anchor_bind_and_secure(endpoint, listener, &anchor_identity)) {
         cbm_daemon_ipc_listener_close(listener);
         return NULL;
     }
     listener->socket_identity = anchor_identity;
     posix_publication_stage_reached(CBM_DAEMON_IPC_POSIX_PUBLICATION_ANCHOR_DURABLE);
 
-    posix_socket_record_t pending = {
-        .identity = anchor_identity,
-    };
-    (void)snprintf(pending.anchor_name, sizeof(pending.anchor_name), "%s",
-                   endpoint->socket_anchor_name);
     struct stat pending_status = {0};
-    bool pending_published = posix_socket_record_publish(
-        endpoint, endpoint->socket_pending_name, POSIX_SOCKET_PENDING_MAGIC, &pending,
-        &pending_status.st_dev, &pending_status.st_ino);
-    if (!pending_published) {
+    if (!posix_listener_pending_publish(endpoint, &anchor_identity, &pending_status)) {
         cbm_log_error("daemon.ipc.listen_failed", "stage", "pending_publication");
         posix_publication_abort(endpoint, &anchor_identity, false, NULL, false, NULL);
         cbm_daemon_ipc_listener_close(listener);
@@ -2782,46 +2850,20 @@ cbm_daemon_ipc_listener_t *cbm_daemon_ipc_listen_reserved(
     }
     posix_publication_stage_reached(CBM_DAEMON_IPC_POSIX_PUBLICATION_PENDING_DURABLE);
 
-    bool stable_linked = posix_linkat_no_follow(endpoint->dir_fd, endpoint->socket_anchor_name,
-                                                endpoint->dir_fd, endpoint->socket_name) == 0 &&
-                         posix_directory_sync(endpoint->dir_fd);
-    posix_socket_identity_t stable_identity = {0};
     posix_socket_identity_t committed_identity = {0};
-    struct stat stable_status = {0};
-    struct stat committed_anchor_status = {0};
-    bool stable_valid =
-        stable_linked &&
-        posix_socket_path_identity_read(endpoint, endpoint->socket_name, &stable_identity,
-                                        &stable_status) == POSIX_PATH_STATUS_PRESENT &&
-        posix_socket_path_identity_read(endpoint, endpoint->socket_anchor_name, &committed_identity,
-                                        &committed_anchor_status) == POSIX_PATH_STATUS_PRESENT &&
-        stable_status.st_nlink == POSIX_LINK_COUNT_PAIRED &&
-        committed_anchor_status.st_nlink == POSIX_LINK_COUNT_PAIRED &&
-        posix_socket_identity_equal(&stable_identity, &committed_identity) &&
-        posix_socket_inode_equal(&anchor_identity, &committed_identity);
-    if (!stable_valid) {
+    if (!posix_listener_stable_publish(endpoint, &anchor_identity, &committed_identity)) {
         cbm_log_error("daemon.ipc.listen_failed", "stage", "stable_publication");
-        posix_publication_abort(endpoint, &anchor_identity, pending_published, &pending_status,
-                                false, NULL);
+        posix_publication_abort(endpoint, &anchor_identity, true, &pending_status, false, NULL);
         cbm_daemon_ipc_listener_close(listener);
         return NULL;
     }
     listener->socket_identity = committed_identity;
     posix_publication_stage_reached(CBM_DAEMON_IPC_POSIX_PUBLICATION_STABLE_DURABLE);
 
-    posix_socket_record_t marker = {
-        .identity = committed_identity,
-    };
-    (void)snprintf(marker.anchor_name, sizeof(marker.anchor_name), "%s",
-                   endpoint->socket_anchor_name);
     struct stat marker_status = {0};
-    bool marker_published = posix_socket_record_publish(
-        endpoint, endpoint->socket_identity_name, POSIX_SOCKET_MARKER_MAGIC, &marker,
-        &marker_status.st_dev, &marker_status.st_ino);
-    if (!marker_published) {
+    if (!posix_listener_marker_publish(endpoint, &committed_identity, &marker_status)) {
         cbm_log_error("daemon.ipc.listen_failed", "stage", "marker_publication");
-        posix_publication_abort(endpoint, &committed_identity, pending_published, &pending_status,
-                                false, NULL);
+        posix_publication_abort(endpoint, &committed_identity, true, &pending_status, false, NULL);
         cbm_daemon_ipc_listener_close(listener);
         return NULL;
     }
@@ -2834,8 +2876,8 @@ cbm_daemon_ipc_listener_t *cbm_daemon_ipc_listen_reserved(
                                               POSIX_LINK_COUNT_SINGLE) ||
         !posix_directory_sync(endpoint->dir_fd)) {
         cbm_log_error("daemon.ipc.listen_failed", "stage", "pending_removal");
-        posix_publication_abort(endpoint, &committed_identity, true, &pending_status,
-                                marker_published, &marker_status);
+        posix_publication_abort(endpoint, &committed_identity, true, &pending_status, true,
+                                &marker_status);
         cbm_daemon_ipc_listener_close(listener);
         return NULL;
     }
@@ -2967,7 +3009,7 @@ void cbm_daemon_ipc_listener_close(cbm_daemon_ipc_listener_t *listener) {
     }
     if (listener->fd >= 0) {
         (void)close(listener->fd);
-        listener->fd = -1;
+        listener->fd = POSIX_INVALID_DESCRIPTOR;
     }
     if (listener->dir_fd >= 0) {
         posix_listener_artifacts_remove_if_matches(listener);
@@ -3105,6 +3147,62 @@ int cbm_daemon_ipc_endpoint_probe(const cbm_daemon_ipc_endpoint_t *endpoint, uin
     return CBM_DAEMON_IPC_STATUS_FAILURE;
 }
 
+static posix_connect_result_t posix_socket_namespace_validate(
+    const cbm_daemon_ipc_endpoint_t *endpoint) {
+    struct stat status;
+    if (fstatat(endpoint->dir_fd, endpoint->socket_name, &status, AT_SYMLINK_NOFOLLOW) != 0) {
+        return errno == ENOENT ? POSIX_CONNECT_RETRY : POSIX_CONNECT_FAILURE;
+    }
+    return posix_socket_status_secure_transport(&status) ? POSIX_CONNECT_CONNECTED
+                                                         : POSIX_CONNECT_FAILURE;
+}
+
+static bool posix_socket_error_is_retryable(int socket_error) {
+    return socket_error == ENOENT || socket_error == ECONNREFUSED;
+}
+
+static posix_connect_result_t posix_socket_connect_until_ready(int fd,
+                                                               const struct sockaddr_un *address,
+                                                               socklen_t address_length,
+                                                               uint64_t deadline_ms) {
+    int result = local_socket_connect(fd, address, address_length);
+    if (result == POSIX_STATUS_SUCCESS) {
+        return POSIX_CONNECT_CONNECTED;
+    }
+    int connect_error = errno;
+    if (connect_error != EINPROGRESS && connect_error != EAGAIN && connect_error != EWOULDBLOCK) {
+        return posix_socket_error_is_retryable(connect_error) ? POSIX_CONNECT_RETRY
+                                                              : POSIX_CONNECT_FAILURE;
+    }
+    int ready = poll_until(fd, POLLOUT, deadline_ms);
+    int socket_error = POSIX_STATUS_SUCCESS;
+    socklen_t error_length = sizeof(socket_error);
+    if (ready != POSIX_STATUS_READY || getsockopt(fd, SOL_SOCKET, SO_ERROR, &socket_error,
+                                                  &error_length) != POSIX_STATUS_SUCCESS) {
+        return POSIX_CONNECT_FAILURE;
+    }
+    if (socket_error == POSIX_STATUS_SUCCESS) {
+        return POSIX_CONNECT_CONNECTED;
+    }
+    return posix_socket_error_is_retryable(socket_error) ? POSIX_CONNECT_RETRY
+                                                         : POSIX_CONNECT_FAILURE;
+}
+
+static cbm_daemon_ipc_connection_t *posix_connection_new_from_fd(int fd) {
+    if (!socket_peer_is_current_user(fd)) {
+        (void)close(fd);
+        return NULL;
+    }
+    cbm_daemon_ipc_connection_t *connection = malloc(sizeof(*connection));
+    if (!connection) {
+        (void)close(fd);
+        return NULL;
+    }
+    connection->fd = fd;
+    atomic_init(&connection->poisoned, false);
+    return connection;
+}
+
 cbm_daemon_ipc_connection_t *cbm_daemon_ipc_connect(const cbm_daemon_ipc_endpoint_t *endpoint,
                                                     uint32_t timeout_ms) {
     if (!endpoint_runtime_still_valid(endpoint)) {
@@ -3112,18 +3210,16 @@ cbm_daemon_ipc_connection_t *cbm_daemon_ipc_connect(const cbm_daemon_ipc_endpoin
     }
     uint64_t deadline_ms = ipc_deadline_after(timeout_ms);
     for (;;) {
-        struct stat status;
-        if (fstatat(endpoint->dir_fd, endpoint->socket_name, &status, AT_SYMLINK_NOFOLLOW) != 0) {
-            int path_error = errno;
-            if (path_error == ENOENT && ipc_retry_pause(deadline_ms)) {
+        posix_connect_result_t namespace_state = posix_socket_namespace_validate(endpoint);
+        if (namespace_state == POSIX_CONNECT_FAILURE) {
+            return NULL;
+        }
+        if (namespace_state == POSIX_CONNECT_RETRY) {
+            if (ipc_retry_pause(deadline_ms)) {
                 continue;
             }
             return NULL;
         }
-        if (!posix_socket_status_secure_transport(&status)) {
-            return NULL;
-        }
-
         int fd = local_socket_new();
         if (fd < 0) {
             return NULL;
@@ -3134,49 +3230,16 @@ cbm_daemon_ipc_connection_t *cbm_daemon_ipc_connect(const cbm_daemon_ipc_endpoin
             (void)close(fd);
             return NULL;
         }
-
-        int result = local_socket_connect(fd, &address, address_length);
-        int connect_error = result == 0 ? 0 : errno;
-        if (result != 0 && connect_error != EINPROGRESS && connect_error != EAGAIN &&
-            connect_error != EWOULDBLOCK) {
-            (void)close(fd);
-            if ((connect_error == ENOENT || connect_error == ECONNREFUSED) &&
-                ipc_retry_pause(deadline_ms)) {
-                continue;
-            }
-            return NULL;
+        posix_connect_result_t connection_state =
+            posix_socket_connect_until_ready(fd, &address, address_length, deadline_ms);
+        if (connection_state == POSIX_CONNECT_CONNECTED) {
+            return posix_connection_new_from_fd(fd);
         }
-        if (result != 0) {
-            int ready = poll_until(fd, POLLOUT, deadline_ms);
-            int socket_error = 0;
-            socklen_t error_length = sizeof(socket_error);
-            if (ready != 1 ||
-                getsockopt(fd, SOL_SOCKET, SO_ERROR, &socket_error, &error_length) != 0) {
-                (void)close(fd);
-                return NULL;
-            }
-            if (socket_error != 0) {
-                (void)close(fd);
-                if ((socket_error == ENOENT || socket_error == ECONNREFUSED) &&
-                    ipc_retry_pause(deadline_ms)) {
-                    continue;
-                }
-                return NULL;
-            }
+        (void)close(fd);
+        if (connection_state == POSIX_CONNECT_RETRY && ipc_retry_pause(deadline_ms)) {
+            continue;
         }
-        if (!socket_peer_is_current_user(fd)) {
-            (void)close(fd);
-            return NULL;
-        }
-
-        cbm_daemon_ipc_connection_t *connection = malloc(sizeof(*connection));
-        if (!connection) {
-            (void)close(fd);
-            return NULL;
-        }
-        connection->fd = fd;
-        atomic_init(&connection->poisoned, false);
-        return connection;
+        return NULL;
     }
 }
 
@@ -3236,22 +3299,22 @@ int cbm_daemon_ipc_startup_lock_try_acquire(const cbm_daemon_ipc_endpoint_t *end
     if (!lock_out || !endpoint) {
         return CBM_DAEMON_IPC_STATUS_FAILURE;
     }
-    int startup_v2_fd = -1;
+    int startup_v2_fd = POSIX_INVALID_DESCRIPTOR;
     process_lock_entry_t *startup_v2_process_entry = NULL;
     int startup_v2_result = posix_named_lock_try_acquire(endpoint, endpoint->startup_v2_lock_name,
                                                          &startup_v2_fd, &startup_v2_process_entry);
-    if (startup_v2_result != 1) {
+    if (startup_v2_result != POSIX_LOCK_STATUS_ACQUIRED) {
         return startup_v2_result;
     }
-    int legacy_fd = -1;
+    int legacy_fd = POSIX_INVALID_DESCRIPTOR;
     process_lock_entry_t *legacy_process_entry = NULL;
     int legacy_result = posix_named_shared_lock_try_acquire(endpoint, endpoint->lock_name,
                                                             &legacy_fd, &legacy_process_entry);
-    if (legacy_result != 1) {
+    if (legacy_result != POSIX_LOCK_STATUS_ACQUIRED) {
         posix_named_lock_release(startup_v2_fd, startup_v2_process_entry);
         return legacy_result;
     }
-    cbm_daemon_ipc_startup_lock_t *lock = calloc(1, sizeof(*lock));
+    cbm_daemon_ipc_startup_lock_t *lock = calloc(POSIX_SINGLE_ALLOCATION, sizeof(*lock));
     if (lock) {
         lock->endpoint_snapshot = endpoint_snapshot_new(endpoint);
     }
@@ -3270,7 +3333,7 @@ int cbm_daemon_ipc_startup_lock_try_acquire(const cbm_daemon_ipc_endpoint_t *end
     lock->legacy_process_entry = legacy_process_entry;
     lock->owner_pid = getpid();
     *lock_out = lock;
-    return 1;
+    return POSIX_LOCK_STATUS_ACQUIRED;
 }
 
 int cbm_daemon_ipc_generation_probe_under_startup_lock(
@@ -3292,7 +3355,8 @@ bool cbm_daemon_ipc_startup_lock_prepare_handoff(cbm_daemon_ipc_startup_lock_t *
     if (lock->prepared) {
         return true;
     }
-    lock->prepared = cbm_daemon_ipc_stale_generation_cleanup(lock->endpoint_snapshot, lock) == 1;
+    lock->prepared = cbm_daemon_ipc_stale_generation_cleanup(lock->endpoint_snapshot, lock) ==
+                     POSIX_PATH_STATUS_PRESENT;
     return lock->prepared;
 }
 
@@ -3323,14 +3387,14 @@ int cbm_daemon_ipc_participant_guard_try_join(const cbm_daemon_ipc_endpoint_t *e
     if (!endpoint || !guard_out) {
         return CBM_DAEMON_IPC_STATUS_FAILURE;
     }
-    int legacy_fd = -1;
+    int legacy_fd = POSIX_INVALID_DESCRIPTOR;
     process_lock_entry_t *legacy_process_entry = NULL;
     int result = posix_named_shared_lock_try_acquire(endpoint, endpoint->lock_name, &legacy_fd,
                                                      &legacy_process_entry);
-    if (result != 1) {
+    if (result != POSIX_LOCK_STATUS_ACQUIRED) {
         return result;
     }
-    cbm_daemon_ipc_participant_guard_t *guard = calloc(1, sizeof(*guard));
+    cbm_daemon_ipc_participant_guard_t *guard = calloc(POSIX_SINGLE_ALLOCATION, sizeof(*guard));
     if (!guard) {
         posix_named_lock_release(legacy_fd, legacy_process_entry);
         return CBM_DAEMON_IPC_STATUS_FAILURE;
@@ -3339,7 +3403,7 @@ int cbm_daemon_ipc_participant_guard_try_join(const cbm_daemon_ipc_endpoint_t *e
     guard->legacy_process_entry = legacy_process_entry;
     guard->owner_pid = getpid();
     *guard_out = guard;
-    return 1;
+    return POSIX_LOCK_STATUS_ACQUIRED;
 }
 
 bool cbm_daemon_ipc_participant_guard_release(cbm_daemon_ipc_participant_guard_t **guard_io) {
@@ -3367,22 +3431,23 @@ int cbm_daemon_ipc_local_transition_try_acquire(
     if (!endpoint || !transition_out) {
         return CBM_DAEMON_IPC_STATUS_FAILURE;
     }
-    int startup_v2_fd = -1;
+    int startup_v2_fd = POSIX_INVALID_DESCRIPTOR;
     process_lock_entry_t *startup_v2_process_entry = NULL;
     int startup_v2_result = posix_named_lock_try_acquire(endpoint, endpoint->startup_v2_lock_name,
                                                          &startup_v2_fd, &startup_v2_process_entry);
-    if (startup_v2_result != 1) {
+    if (startup_v2_result != POSIX_LOCK_STATUS_ACQUIRED) {
         return startup_v2_result;
     }
-    int legacy_fd = -1;
+    int legacy_fd = POSIX_INVALID_DESCRIPTOR;
     process_lock_entry_t *legacy_process_entry = NULL;
     int legacy_result = posix_named_shared_lock_try_acquire(endpoint, endpoint->lock_name,
                                                             &legacy_fd, &legacy_process_entry);
-    if (legacy_result != 1) {
+    if (legacy_result != POSIX_LOCK_STATUS_ACQUIRED) {
         posix_named_lock_release(startup_v2_fd, startup_v2_process_entry);
         return legacy_result;
     }
-    cbm_daemon_ipc_local_transition_t *transition = calloc(1, sizeof(*transition));
+    cbm_daemon_ipc_local_transition_t *transition =
+        calloc(POSIX_SINGLE_ALLOCATION, sizeof(*transition));
     if (!transition) {
         posix_named_lock_release(legacy_fd, legacy_process_entry);
         posix_named_lock_release(startup_v2_fd, startup_v2_process_entry);
@@ -3395,7 +3460,7 @@ int cbm_daemon_ipc_local_transition_try_acquire(
     transition->endpoint = endpoint;
     transition->owner_pid = getpid();
     *transition_out = transition;
-    return 1;
+    return POSIX_LOCK_STATUS_ACQUIRED;
 }
 
 int cbm_daemon_ipc_local_transition_seal_legacy(cbm_daemon_ipc_local_transition_t *transition) {
@@ -3411,16 +3476,16 @@ int cbm_daemon_ipc_local_transition_seal_legacy(cbm_daemon_ipc_local_transition_
         return CBM_DAEMON_IPC_STATUS_FAILURE;
     }
     if (transition->sealed) {
-        return 1;
+        return POSIX_LOCK_STATUS_ACQUIRED;
     }
     int lifetime = cbm_daemon_ipc_lifetime_reservation_probe(transition->endpoint);
-    int result = -1;
-    if (lifetime == 1) {
-        result = 1;
+    int result = CBM_DAEMON_IPC_STATUS_FAILURE;
+    if (lifetime == POSIX_LOCK_STATUS_ACQUIRED) {
+        result = POSIX_LOCK_STATUS_ACQUIRED;
     } else if (lifetime == 0) {
         result = posix_stale_generation_cleanup_locked(transition->endpoint);
     }
-    if (result == 1) {
+    if (result == POSIX_LOCK_STATUS_ACQUIRED) {
         transition->sealed = true;
     }
     return result;
@@ -3453,7 +3518,7 @@ bool cbm_daemon_ipc_local_transition_begin_work(cbm_daemon_ipc_local_transition_
         return false;
     }
     posix_named_lock_release(transition->startup_v2_fd, transition->startup_v2_process_entry);
-    transition->startup_v2_fd = -1;
+    transition->startup_v2_fd = POSIX_INVALID_DESCRIPTOR;
     transition->startup_v2_process_entry = NULL;
     transition->work_begun = true;
     return true;
@@ -6251,10 +6316,12 @@ bool cbm_daemon_ipc_send_frame(cbm_daemon_ipc_connection_t *connection,
         return false;
     }
     uint64_t deadline_ms = ipc_deadline_after(CBM_DAEMON_IPC_SEND_TIMEOUT_MS);
-    if (connection_write_full(connection, header, sizeof(header), deadline_ms) != 1) {
+    if (connection_write_full(connection, header, sizeof(header), deadline_ms) !=
+        CBM_DAEMON_IPC_STATUS_COMPLETED) {
         return false;
     }
-    if (length > 0 && connection_write_full(connection, payload, length, deadline_ms) != 1) {
+    if (length > 0 && connection_write_full(connection, payload, length, deadline_ms) !=
+                          CBM_DAEMON_IPC_STATUS_COMPLETED) {
         /* The peer has already received a complete header and will interpret
          * subsequent bytes as this payload, so this stream cannot be reused. */
         atomic_store_explicit(&connection->poisoned, true, memory_order_release);
@@ -6277,7 +6344,7 @@ int cbm_daemon_ipc_receive_frame_bounded(cbm_daemon_ipc_connection_t *connection
     uint64_t deadline_ms = ipc_deadline_after(timeout_ms);
     uint8_t header[CBM_DAEMON_FRAME_HEADER_SIZE];
     int result = connection_read_full(connection, header, sizeof(header), deadline_ms);
-    if (result != 1) {
+    if (result != CBM_DAEMON_IPC_STATUS_COMPLETED) {
         return result;
     }
     cbm_daemon_frame_t frame;
@@ -6300,7 +6367,7 @@ int cbm_daemon_ipc_receive_frame_bounded(cbm_daemon_ipc_connection_t *connection
             return CBM_DAEMON_IPC_STATUS_FAILURE;
         }
         result = connection_read_full(connection, payload, frame.length, deadline_ms);
-        if (result != 1) {
+        if (result != CBM_DAEMON_IPC_STATUS_COMPLETED) {
             atomic_store_explicit(&connection->poisoned, true, memory_order_release);
             free(payload);
             return result;
@@ -6308,7 +6375,7 @@ int cbm_daemon_ipc_receive_frame_bounded(cbm_daemon_ipc_connection_t *connection
     }
     *frame_out = frame;
     *payload_out = payload;
-    return 1;
+    return CBM_DAEMON_IPC_STATUS_COMPLETED;
 }
 
 int cbm_daemon_ipc_receive_frame(cbm_daemon_ipc_connection_t *connection, uint32_t timeout_ms,

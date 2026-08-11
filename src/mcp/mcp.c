@@ -36,6 +36,33 @@ enum {
     MCP_TOOLS_PAGE_SIZE = 8,
     MCP_HELP_TOOLS_WRAP_COL = 74, /* --help tool list stays readable on 80-col terminals */
     MCP_MAX_CROSS_REPO_TARGETS = 4096,
+    MCP_TOOL_PROFILE_PARSE_FAILURE = -1,
+    MCP_FIRST_OPTION_ARGUMENT = 1,
+    MCP_NEXT_ARGUMENT = 1,
+    MCP_CURSOR_TEXT_CAP = 32,
+    MCP_STRING_TERMINATOR_BYTES = 1,
+    MCP_HELP_TRAILER_BYTES = 2,
+    MCP_HELP_CONTINUATION_INDENT = 1,
+    MCP_DECIMAL_RADIX = 10,
+    MCP_PROJECT_NAME_SEGMENT_DELIMITER_BYTES = 1,
+    MCP_PROJECT_NAME_UNIQUE_MATCHES = 1,
+    MCP_CANCEL_REQUESTED = 1,
+    MCP_CORRUPT_PENDING_MAX_ATTEMPTS = 128,
+    MCP_TOKEN_PID_SHIFT = 32,
+    MCP_TOKEN_SEQUENCE_INCREMENT = 1,
+    MCP_PRIVATE_FILE_MODE = 0600,
+    MCP_ROOT_PATH_SLASH_INDEX = 1,
+    MCP_QUOTED_NAME_DELIMITERS = 2,
+    MCP_JSON_LIST_SEPARATOR_BYTES = 1,
+    MCP_PRIMARY_PROJECT_INDEX_ABSENT = CBM_NOT_FOUND,
+    MCP_SINGLE_PRIMARY_PROJECT = 1,
+    MCP_TRACE_DIRECTION_COUNT = 2,
+    MCP_JOINED_NAME_TRAILER_BYTES = 2,
+    MCP_BM25_RESULT_COLUMN_COUNT = 5,
+    MCP_IDENTIFIER_RESULT_COLUMN_COUNT = 1,
+    MCP_SEARCH_CORE_COLUMN_COUNT = 6,
+    MCP_SEMANTIC_RESULT_COLUMN_COUNT = 4,
+    MCP_QUALIFIED_NAME_SEPARATOR_BYTES = 1,
 };
 #define MCP_MS_TO_US 1000LL
 #define MCP_S_TO_US 1000000LL
@@ -799,13 +826,13 @@ static const char *mcp_tool_profile_name(cbm_mcp_tool_profile_t profile) {
 int cbm_mcp_parse_tool_profile_args(int argc, const char *const argv[const],
                                     cbm_mcp_tool_profile_t *profile_out) {
     if (argc < 0 || !argv || !profile_out) {
-        return -1;
+        return MCP_TOOL_PROFILE_PARSE_FAILURE;
     }
     *profile_out = CBM_MCP_TOOL_PROFILE_ALL;
-    for (int i = 1; i < argc; i++) {
+    for (int i = MCP_FIRST_OPTION_ARGUMENT; i < argc; i++) {
         const char *arg = argv[i];
         if (!arg) {
-            return -1;
+            return MCP_TOOL_PROFILE_PARSE_FAILURE;
         }
         if (strcmp(arg, "--tool-profile=analysis") == 0) {
             *profile_out = CBM_MCP_TOOL_PROFILE_ANALYSIS;
@@ -816,21 +843,21 @@ int cbm_mcp_parse_tool_profile_args(int argc, const char *const argv[const],
             continue;
         }
         if (strcmp(arg, "--tool-profile") == 0) {
-            if (i + 1 >= argc || !argv[i + 1]) {
-                return -1;
+            if (i + MCP_NEXT_ARGUMENT >= argc || !argv[i + MCP_NEXT_ARGUMENT]) {
+                return MCP_TOOL_PROFILE_PARSE_FAILURE;
             }
-            if (strcmp(argv[i + 1], "analysis") == 0) {
+            if (strcmp(argv[i + MCP_NEXT_ARGUMENT], "analysis") == 0) {
                 *profile_out = CBM_MCP_TOOL_PROFILE_ANALYSIS;
-            } else if (strcmp(argv[i + 1], "scout") == 0) {
+            } else if (strcmp(argv[i + MCP_NEXT_ARGUMENT], "scout") == 0) {
                 *profile_out = CBM_MCP_TOOL_PROFILE_SCOUT;
             } else {
-                return -1;
+                return MCP_TOOL_PROFILE_PARSE_FAILURE;
             }
             i++;
             continue;
         }
         if (strncmp(arg, "--tool-profile=", strlen("--tool-profile=")) == 0) {
-            return -1;
+            return MCP_TOOL_PROFILE_PARSE_FAILURE;
         }
     }
     return 0;
@@ -887,7 +914,7 @@ static char *cbm_mcp_tools_list_range(cbm_mcp_tool_profile_t profile, int offset
 
     yyjson_mut_obj_add_val(doc, root, "tools", tools);
     if (include_next_cursor && end < allowed_count) {
-        char cursor[32];
+        char cursor[MCP_CURSOR_TEXT_CAP];
         snprintf(cursor, sizeof(cursor), "%d", end);
         yyjson_mut_obj_add_strcpy(doc, root, "nextCursor", cursor);
     }
@@ -943,7 +970,7 @@ const char *cbm_mcp_tool_name(int index) {
  * changing the wrap rule would turn it into an overflow with nothing to notice.
  * Clamping makes `len <= cap - 1` a local invariant no later edit can void. */
 static size_t help_append(char *out, size_t cap, size_t len, const char *fmt, ...) {
-    if (len + 1 >= cap) {
+    if (len + MCP_STRING_TERMINATOR_BYTES >= cap) {
         return 0;
     }
     va_list args;
@@ -953,12 +980,12 @@ static size_t help_append(char *out, size_t cap, size_t len, const char *fmt, ..
     if (written <= 0) {
         return 0;
     }
-    size_t room = cap - len - 1;
+    size_t room = cap - len - MCP_STRING_TERMINATOR_BYTES;
     return (size_t)written > room ? room : (size_t)written;
 }
 
 char *cbm_mcp_tools_help_list(void) {
-    size_t cap = SLEN("Tools:") + 2; /* trailing newline + NUL */
+    size_t cap = SLEN("Tools:") + MCP_HELP_TRAILER_BYTES; /* trailing newline + NUL */
     for (int i = 0; i < TOOL_COUNT; i++) {
         cap += strlen(TOOLS[i].name) + SLEN(" ,\n "); /* per-tool worst case incl. a wrap */
     }
@@ -969,11 +996,11 @@ char *cbm_mcp_tools_help_list(void) {
     size_t len = help_append(out, cap, 0, "Tools:");
     size_t col = len;
     for (int i = 0; i < TOOL_COUNT; i++) {
-        const char *sep = (i + 1 < TOOL_COUNT) ? "," : "";
+        const char *sep = (i + MCP_NEXT_ARGUMENT < TOOL_COUNT) ? "," : "";
         size_t item = SLEN(" ") + strlen(TOOLS[i].name) + strlen(sep);
         if (i > 0 && col + item > MCP_HELP_TOOLS_WRAP_COL) {
             len += help_append(out, cap, len, "\n ");
-            col = 1;
+            col = MCP_HELP_CONTINUATION_INDENT;
         }
         size_t wrote = help_append(out, cap, len, " %s%s", TOOLS[i].name, sep);
         len += wrote;
@@ -1010,7 +1037,7 @@ static int mcp_tools_cursor_offset(const char *params_json, bool *has_cursor_out
             if (cursor_str && *cursor_str != '\0') {
                 char *endptr = NULL;
                 errno = 0;
-                long parsed = strtol(cursor_str, &endptr, 10);
+                long parsed = strtol(cursor_str, &endptr, MCP_DECIMAL_RADIX);
                 if (endptr && *endptr == '\0' && errno == 0 && parsed >= 0) {
                     offset = parsed > TOOL_COUNT ? TOOL_COUNT : (int)parsed;
                 }
@@ -1128,6 +1155,31 @@ static char *mcp_prompt_error_json(int code, const char *message) {
     return out;
 }
 
+static char *mcp_prompt_fail(yyjson_doc *params_doc, char **error_json, int code,
+                             const char *message) {
+    *error_json = mcp_prompt_error_json(code, message);
+    if (params_doc) {
+        yyjson_doc_free(params_doc);
+    }
+    return NULL;
+}
+
+static const char *mcp_prompt_base_branch(yyjson_val *arguments, bool is_review, bool *valid_out) {
+    *valid_out = true;
+    if (!is_review || !arguments || !yyjson_is_obj(arguments)) {
+        return "main";
+    }
+    yyjson_val *value = yyjson_obj_get(arguments, "base_branch");
+    if (!value) {
+        return "main";
+    }
+    if (!yyjson_is_str(value) || !yyjson_get_str(value)[0]) {
+        *valid_out = false;
+        return NULL;
+    }
+    return yyjson_get_str(value);
+}
+
 static char *cbm_mcp_prompt_get(const char *params_json, char **error_json) {
     *error_json = NULL;
     yyjson_doc *params_doc = params_json ? yyjson_read(params_json, strlen(params_json), 0) : NULL;
@@ -1135,43 +1187,31 @@ static char *cbm_mcp_prompt_get(const char *params_json, char **error_json) {
     yyjson_val *name_value =
         params && yyjson_is_obj(params) ? yyjson_obj_get(params, "name") : NULL;
     if (!name_value || !yyjson_is_str(name_value)) {
-        *error_json = mcp_prompt_error_json(JSONRPC_INVALID_PARAMS, "Invalid prompt name");
-        if (params_doc) {
-            yyjson_doc_free(params_doc);
-        }
-        return NULL;
+        return mcp_prompt_fail(params_doc, error_json, JSONRPC_INVALID_PARAMS,
+                               "Invalid prompt name");
     }
 
     const char *name = yyjson_get_str(name_value);
     bool is_explore = strcmp(name, "explore_codebase") == 0;
     bool is_review = strcmp(name, "review_change_impact") == 0;
     if (!is_explore && !is_review) {
-        *error_json = mcp_prompt_error_json(JSONRPC_INVALID_PARAMS, "Invalid prompt name");
-        yyjson_doc_free(params_doc);
-        return NULL;
+        return mcp_prompt_fail(params_doc, error_json, JSONRPC_INVALID_PARAMS,
+                               "Invalid prompt name");
     }
 
     yyjson_val *arguments = yyjson_obj_get(params, "arguments");
     const char *project = mcp_prompt_string_argument(arguments, "project");
     const char *request = mcp_prompt_string_argument(arguments, is_explore ? "question" : "change");
     if (!project || !request) {
-        *error_json =
-            mcp_prompt_error_json(JSONRPC_INVALID_PARAMS, "Missing required prompt arguments");
-        yyjson_doc_free(params_doc);
-        return NULL;
+        return mcp_prompt_fail(params_doc, error_json, JSONRPC_INVALID_PARAMS,
+                               "Missing required prompt arguments");
     }
 
-    const char *base_branch = "main";
-    yyjson_val *base_branch_value = is_review && arguments && yyjson_is_obj(arguments)
-                                        ? yyjson_obj_get(arguments, "base_branch")
-                                        : NULL;
-    if (base_branch_value) {
-        if (!yyjson_is_str(base_branch_value) || !yyjson_get_str(base_branch_value)[0]) {
-            *error_json = mcp_prompt_error_json(JSONRPC_INVALID_PARAMS, "Invalid prompt arguments");
-            yyjson_doc_free(params_doc);
-            return NULL;
-        }
-        base_branch = yyjson_get_str(base_branch_value);
+    bool base_branch_valid = false;
+    const char *base_branch = mcp_prompt_base_branch(arguments, is_review, &base_branch_valid);
+    if (!base_branch_valid) {
+        return mcp_prompt_fail(params_doc, error_json, JSONRPC_INVALID_PARAMS,
+                               "Invalid prompt arguments");
     }
 
     static const char EXPLORE_TEMPLATE[] =
@@ -1192,9 +1232,7 @@ static char *cbm_mcp_prompt_get(const char *params_json, char **error_json) {
                        (is_explore ? sizeof(EXPLORE_TEMPLATE) : sizeof(REVIEW_TEMPLATE));
     char *text = malloc(text_size);
     if (!text) {
-        *error_json = mcp_prompt_error_json(JSONRPC_INTERNAL_ERROR, "Internal error");
-        yyjson_doc_free(params_doc);
-        return NULL;
+        return mcp_prompt_fail(params_doc, error_json, JSONRPC_INTERNAL_ERROR, "Internal error");
     }
     if (is_explore) {
         snprintf(text, text_size, EXPLORE_TEMPLATE, project, request);
@@ -1453,21 +1491,23 @@ static char *resolve_project_tail(char *project) {
             continue;
         }
         size_t stem_len = len - MCP_DB_EXT; /* strip ".db" */
-        if (stem_len <= plen + 1 || stem_len >= sizeof(match)) {
+        if (stem_len <= plen + MCP_PROJECT_NAME_SEGMENT_DELIMITER_BYTES ||
+            stem_len >= sizeof(match)) {
             continue;
         }
-        if (n[stem_len - plen - 1] != '-' || strncmp(n + stem_len - plen, project, plen) != 0) {
+        if (n[stem_len - plen - MCP_PROJECT_NAME_SEGMENT_DELIMITER_BYTES] != '-' ||
+            strncmp(n + stem_len - plen, project, plen) != 0) {
             continue;
         }
         matches++;
-        if (matches > 1) {
+        if (matches > MCP_PROJECT_NAME_UNIQUE_MATCHES) {
             break; /* ambiguous — keep the original name */
         }
         memcpy(match, n, stem_len);
         match[stem_len] = '\0';
     }
     cbm_closedir(d);
-    if (matches == 1) {
+    if (matches == MCP_PROJECT_NAME_UNIQUE_MATCHES) {
         cbm_log_info("mcp.project_tail_resolved", "passed", project, "resolved", match);
         free(project);
         return heap_strdup(match);
@@ -1713,16 +1753,17 @@ void cbm_mcp_server_set_project_mutation_try_guard(
 }
 
 static bool mcp_project_mutation_begin(cbm_mcp_server_t *srv, const char *project) {
-    return !srv->mutation_begin || srv->mutation_begin(srv->mutation_context, project);
+    return srv && (!srv->mutation_begin || srv->mutation_begin(srv->mutation_context, project));
 }
 
 static bool mcp_project_mutation_try_begin(cbm_mcp_server_t *srv, const char *project) {
-    return !srv->mutation_begin ||
-           (srv->mutation_try_begin && srv->mutation_try_begin(srv->mutation_context, project));
+    return srv &&
+           (!srv->mutation_begin ||
+            (srv->mutation_try_begin && srv->mutation_try_begin(srv->mutation_context, project)));
 }
 
 static void mcp_project_mutation_end(cbm_mcp_server_t *srv, const char *project) {
-    if (srv->mutation_end) {
+    if (srv && srv->mutation_end) {
         srv->mutation_end(srv->mutation_context, project);
     }
 }
@@ -1796,7 +1837,8 @@ bool cbm_mcp_server_cancel_active(cbm_mcp_server_t *srv) {
     cbm_mutex_lock(&srv->request_scope_mutex);
     bool active = srv->request_scope_depth != 0;
     if (active) {
-        atomic_store_explicit(&srv->pipeline_cancel_requested, 1, memory_order_release);
+        atomic_store_explicit(&srv->pipeline_cancel_requested, MCP_CANCEL_REQUESTED,
+                              memory_order_release);
     }
     cbm_mutex_unlock(&srv->request_scope_mutex);
     return active;
@@ -1899,9 +1941,10 @@ static cbm_store_t *resolve_store_fallback_scan(const char *project);
 static bool reserve_unique_corrupt_pending(const char *path, char *pending, size_t pending_size,
                                            char *backup, size_t backup_size) {
     static atomic_uint_fast64_t sequence = 0;
-    for (unsigned int attempt = 0; attempt < 128; attempt++) {
-        uint64_t token = cbm_now_ns() ^ ((uint64_t)(unsigned int)getpid() << 32) ^
-                         atomic_fetch_add_explicit(&sequence, 1, memory_order_relaxed);
+    for (unsigned int attempt = 0; attempt < MCP_CORRUPT_PENDING_MAX_ATTEMPTS; attempt++) {
+        uint64_t token = cbm_now_ns() ^ ((uint64_t)(unsigned int)getpid() << MCP_TOKEN_PID_SHIFT) ^
+                         atomic_fetch_add_explicit(&sequence, MCP_TOKEN_SEQUENCE_INCREMENT,
+                                                   memory_order_relaxed);
         int backup_written =
             snprintf(backup, backup_size, "%s.corrupt.%016llx", path, (unsigned long long)token);
         int pending_written = snprintf(pending, pending_size, "%s.corrupt.pending.%016llx", path,
@@ -1928,7 +1971,7 @@ static bool reserve_unique_corrupt_pending(const char *path, char *pending, size
             return false;
         }
 #else
-        int fd = open(pending, O_WRONLY | O_CREAT | O_EXCL, 0600);
+        int fd = open(pending, O_WRONLY | O_CREAT | O_EXCL, MCP_PRIVATE_FILE_MODE);
         if (fd >= 0) {
             (void)close(fd);
             return true;
@@ -1960,7 +2003,7 @@ static bool sync_parent_directory(const char *path) {
     if (!slash) {
         snprintf(directory, sizeof(directory), ".");
     } else if (slash == directory) {
-        slash[1] = '\0';
+        slash[MCP_ROOT_PATH_SLASH_INDEX] = '\0';
     } else {
         *slash = '\0';
     }
@@ -2096,7 +2139,7 @@ static cbm_store_t *resolve_store_internal(cbm_mcp_server_t *srv, const char *pr
     if (recovery_status) {
         *recovery_status = STORE_RECOVERY_NONE;
     }
-    if (!project) {
+    if (!srv || !project) {
         return NULL; /* project is required — no implicit fallback */
     }
 
@@ -2243,8 +2286,9 @@ static int collect_db_project_names(const char *dir_path, char *out, size_t out_
          * (issue #235). Stop cleanly at the last name that fits: the array then
          * always holds complete names and `count` == its length. */
         size_t off = (size_t)offset;
-        size_t need = strlen(iname) + 2 /* quotes */ + (count > 0 ? 1U : 0U) /* comma */;
-        if (off + need + 1 > out_sz) {
+        size_t need = strlen(iname) + MCP_QUOTED_NAME_DELIMITERS /* quotes */ +
+                      (count > 0 ? MCP_JSON_LIST_SEPARATOR_BYTES : 0U) /* comma */;
+        if (off + need + MCP_STRING_TERMINATOR_BYTES > out_sz) {
             break; /* would not fit entirely — stop at this element boundary */
         }
         if (count > 0) {
@@ -2405,7 +2449,7 @@ static bool db_internal_project_name(const char *full_path, char *name_out, size
          * they share the db with the primary project and must not make it
          * unresolvable — requiring n == 1 over ALL rows made every project
          * with a miss graph vanish from list_projects and the UI (#1044). */
-        int primary = -1;
+        int primary = MCP_PRIMARY_PROJECT_INDEX_ABSENT;
         int primary_count = 0;
         for (int i = 0; i < n; i++) {
             if (projs[i].name && projs[i].name[0] && !strstr(projs[i].name, "::")) {
@@ -2413,7 +2457,7 @@ static bool db_internal_project_name(const char *full_path, char *name_out, size
                 primary_count++;
             }
         }
-        if (primary_count == 1) {
+        if (primary_count == MCP_SINGLE_PRIMARY_PROJECT) {
             snprintf(name_out, name_sz, "%s", projs[primary].name);
             ok = true;
         }
@@ -2737,11 +2781,11 @@ static void enrich_connected_joined(cbm_store_t *store, int64_t node_id, const c
     buf[0] = '\0';
     const char *et[] = {relationship ? relationship : "CALLS"};
     size_t off = 0;
-    const char *dirs[2] = {"inbound", "outbound"};
-    for (int d = 0; d < 2; d++) {
+    const char *dirs[MCP_TRACE_DIRECTION_COUNT] = {"inbound", "outbound"};
+    for (int d = 0; d < MCP_TRACE_DIRECTION_COUNT; d++) {
         cbm_traverse_result_t tr = {0};
         cbm_store_bfs(store, node_id, dirs[d], et, SKIP_ONE, SKIP_ONE, MCP_DEFAULT_LIMIT, &tr);
-        for (int j = 0; j < tr.visited_count && off + 2 < bufsz; j++) {
+        for (int j = 0; j < tr.visited_count && off + MCP_JOINED_NAME_TRAILER_BYTES < bufsz; j++) {
             if (!tr.visited[j].node.name) {
                 continue;
             }
@@ -2981,7 +3025,7 @@ static char *bm25_search(cbm_store_t *store, const char *project, const char *qu
         cbm_tree_scalar_int(&sb, "total", total);
         cbm_tree_scalar_str(&sb, "search_mode", "bm25");
         static const char *const cols[] = {"qn", "label", "file", "lines", "rank"};
-        cbm_tree_table_header(&sb, "results", emitted, cols, 5);
+        cbm_tree_table_header(&sb, "results", emitted, cols, MCP_BM25_RESULT_COLUMN_COUNT);
         char *rows_text = cbm_sb_finish(&rows);
         cbm_sb_append(&sb, rows_text ? rows_text : "");
         free(rows_text);
@@ -3247,7 +3291,8 @@ static void emit_search_results_toon(cbm_sb_t *sb, const cbm_search_output_t *ou
         /* ids tier: bare qn enumeration — for "list everything matching X"
          * sweeps where per-row metadata is noise (LocAgent's fold tier). */
         static const char *const id_cols[] = {"qn"};
-        cbm_tree_table_header(sb, "results", out->count, id_cols, 1);
+        cbm_tree_table_header(sb, "results", out->count, id_cols,
+                              MCP_IDENTIFIER_RESULT_COLUMN_COUNT);
         for (int i = 0; i < out->count; i++) {
             cbm_tree_row_begin(sb);
             cbm_tree_cell_str(sb, out->results[i].node.qualified_name, true);
@@ -3256,8 +3301,9 @@ static void emit_search_results_toon(cbm_sb_t *sb, const cbm_search_output_t *ou
         cbm_tree_scalar_bool(sb, "has_more", out->total > offset + out->count);
         return;
     }
-    const char *cols[6 + SG_MAX_EXTRA_FIELDS] = {"qn", "label", "file", "lines", "in", "out"};
-    int ncols = 6;
+    const char *cols[MCP_SEARCH_CORE_COLUMN_COUNT + SG_MAX_EXTRA_FIELDS] = {
+        "qn", "label", "file", "lines", "in", "out"};
+    int ncols = MCP_SEARCH_CORE_COLUMN_COUNT;
     for (int f = 0; f < nfields; f++) {
         cols[ncols++] = fields[f];
     }
@@ -3320,7 +3366,7 @@ static void emit_search_results_tree(cbm_sb_t *sb, cbm_search_output_t *out, int
              out->total, out->count, extra_cols);
     cbm_sb_append(sb, buf);
     /* Sort by qn so same-prefix rows are adjacent (module clustering). */
-    if (out->count > 1) {
+    if (out->count > MCP_SINGLE_PRIMARY_PROJECT) {
         qsort(out->results, (size_t)out->count, sizeof(cbm_search_result_t), sg_cmp_by_qn);
     }
     char cur_group[CBM_SZ_1K] = "";
@@ -3336,7 +3382,7 @@ static void emit_search_results_tree(cbm_sb_t *sb, cbm_search_output_t *out, int
             cbm_sb_append(sb, group);
             cbm_sb_append(sb, ":\n");
         }
-        const char *shortname = plen ? qn + plen + 1 : qn;
+        const char *shortname = plen ? qn + plen + MCP_QUALIFIED_NAME_SEPARATOR_BYTES : qn;
         char lines[CBM_SZ_32];
         sg_lines_str(lines, sizeof(lines), sr->node.start_line, sr->node.end_line);
         char row[CBM_SZ_1K];
@@ -3406,7 +3452,7 @@ static void emit_search_results_tree_json(yyjson_mut_doc *doc, yyjson_mut_val *r
         yyjson_mut_arr_add_str(doc, cols, "connected");
     }
     yyjson_mut_obj_add_val(doc, root, "cols", cols);
-    if (out->count > 1) {
+    if (out->count > MCP_SINGLE_PRIMARY_PROJECT) {
         qsort(out->results, (size_t)out->count, sizeof(cbm_search_result_t), sg_cmp_by_qn);
     }
     yyjson_mut_val *groups = yyjson_mut_arr(doc);
@@ -3434,7 +3480,8 @@ static void emit_search_results_tree_json(yyjson_mut_doc *doc, yyjson_mut_val *r
         char lines[CBM_SZ_32];
         sg_lines_str(lines, sizeof(lines), sr->node.start_line, sr->node.end_line);
         yyjson_mut_val *row = yyjson_mut_arr(doc);
-        yyjson_mut_arr_add_strcpy(doc, row, plen ? qn + plen + 1 : qn);
+        yyjson_mut_arr_add_strcpy(doc, row,
+                                  plen ? qn + plen + MCP_QUALIFIED_NAME_SEPARATOR_BYTES : qn);
         yyjson_mut_arr_add_strcpy(doc, row, sr->node.label);
         yyjson_mut_arr_add_strcpy(doc, row, lines);
         yyjson_mut_arr_add_int(doc, row, sr->in_degree);
@@ -3476,7 +3523,7 @@ static void emit_search_results_tree_json(yyjson_mut_doc *doc, yyjson_mut_val *r
 static void emit_semantic_results_toon(cbm_sb_t *sb, const cbm_vector_result_t *vresults,
                                        int vcount) {
     static const char *const cols[] = {"qn", "label", "file", "score"};
-    cbm_tree_table_header(sb, "semantic", vcount, cols, 4);
+    cbm_tree_table_header(sb, "semantic", vcount, cols, MCP_SEMANTIC_RESULT_COLUMN_COUNT);
     for (int v = 0; v < vcount; v++) {
         cbm_tree_row_begin(sb);
         cbm_tree_cell_str(sb, vresults[v].qualified_name, true);
@@ -3634,7 +3681,8 @@ static char *handle_search_graph(cbm_mcp_server_t *srv, const char *args) {
                 emit_semantic_results_toon(&sb, vresults, vcount);
             } else if (semantic_only) {
                 static const char *const sem_cols[] = {"qn", "label", "file", "score"};
-                cbm_tree_table_header(&sb, "semantic", 0, sem_cols, 4);
+                cbm_tree_table_header(&sb, "semantic", 0, sem_cols,
+                                      MCP_SEMANTIC_RESULT_COLUMN_COUNT);
                 cbm_tree_scalar_str(&sb, "hint",
                                     "No semantic matches. semantic_query needs a moderate/full "
                                     "index; try broader or fewer keywords.");
@@ -3985,7 +4033,16 @@ enum {
     COVERAGE_SCOPE_MAX = 32,
     COVERAGE_SCOPE_DEFAULT_LIMIT = 200,
     COVERAGE_SCOPE_MAX_LIMIT = 1000,
+    COVERAGE_SCOPE_MIN_LIMIT = 1,
     COVERAGE_RANGE_MAX = 128,
+    COVERAGE_NOT_INDEXED_PREFIX_LEN = sizeof("not_indexed") - SKIP_ONE,
+    COVERAGE_WINDOWS_DRIVE_PREFIX_LEN = 2U,
+    COVERAGE_WINDOWS_DRIVE_SEPARATOR_INDEX = 1U,
+    COVERAGE_ASCII_CONTROL_FIRST = 0x20U,
+    COVERAGE_DOT_COMPONENT_LEN = 1U,
+    COVERAGE_PARENT_COMPONENT_LEN = 2U,
+    COVERAGE_PARENT_COMPONENT_SECOND_INDEX = 1U,
+    COVERAGE_PATH_SEPARATOR_BYTES = 1U,
 };
 
 typedef enum {
@@ -3993,6 +4050,60 @@ typedef enum {
     COVERAGE_PATH_OUTSIDE,
     COVERAGE_PATH_INVALID,
 } coverage_path_result_t;
+
+typedef enum {
+    COVERAGE_ISSUE_PARTIAL,
+    COVERAGE_ISSUE_EXCLUDED,
+    COVERAGE_ISSUE_SKIPPED,
+    COVERAGE_ISSUE_NONE,
+} coverage_issue_t;
+
+typedef enum {
+    COVERAGE_COMPONENT_APPEND,
+    COVERAGE_COMPONENT_SKIP,
+    COVERAGE_COMPONENT_OUTSIDE,
+    COVERAGE_COMPONENT_INVALID,
+} coverage_component_result_t;
+
+static bool coverage_path_is_absolute_or_drive(const char *input, size_t len) {
+    return input[0] == '/' || input[0] == '\\' ||
+           (len >= COVERAGE_WINDOWS_DRIVE_PREFIX_LEN && isalpha((unsigned char)input[0]) &&
+            input[COVERAGE_WINDOWS_DRIVE_SEPARATOR_INDEX] == ':');
+}
+
+static coverage_component_result_t coverage_component_validate(const char *input, size_t start,
+                                                               size_t length) {
+    for (size_t index = start; index < start + length; index++) {
+        if ((unsigned char)input[index] < COVERAGE_ASCII_CONTROL_FIRST) {
+            return COVERAGE_COMPONENT_INVALID;
+        }
+    }
+    if (length == COVERAGE_DOT_COMPONENT_LEN && input[start] == '.') {
+        return COVERAGE_COMPONENT_SKIP;
+    }
+    if (length == COVERAGE_PARENT_COMPONENT_LEN && input[start] == '.' &&
+        input[start + COVERAGE_PARENT_COMPONENT_SECOND_INDEX] == '.') {
+        return COVERAGE_COMPONENT_OUTSIDE;
+    }
+    return COVERAGE_COMPONENT_APPEND;
+}
+
+static bool coverage_component_append(char *out, size_t out_size, size_t *written_io,
+                                      const char *input, size_t start, size_t length) {
+    size_t written = *written_io;
+    if (written > 0U) {
+        if (written + COVERAGE_PATH_SEPARATOR_BYTES >= out_size) {
+            return false;
+        }
+        out[written++] = '/';
+    }
+    if (written + length >= out_size) {
+        return false;
+    }
+    memcpy(out + written, input + start, length);
+    *written_io = written + length;
+    return true;
+}
 
 /* Normalize an untrusted repository-relative path without touching the
  * filesystem. Absolute paths, drive/UNC paths, control bytes, and any `..`
@@ -4004,8 +4115,7 @@ static coverage_path_result_t coverage_normalize_rel(const char *input, bool all
     }
     out[0] = '\0';
     size_t len = strlen(input);
-    if (len == 0U || len >= out_size || input[0] == '/' || input[0] == '\\' ||
-        (len >= 2U && isalpha((unsigned char)input[0]) && input[1] == ':')) {
+    if (len == 0U || len >= out_size || coverage_path_is_absolute_or_drive(input, len)) {
         return COVERAGE_PATH_OUTSIDE;
     }
 
@@ -4020,30 +4130,20 @@ static coverage_path_result_t coverage_normalize_rel(const char *input, bool all
         }
         size_t start = in;
         while (in < len && input[in] != '/' && input[in] != '\\') {
-            unsigned char c = (unsigned char)input[in];
-            if (c < 0x20U) {
-                return COVERAGE_PATH_INVALID;
-            }
             in++;
         }
         size_t part_len = in - start;
-        if (part_len == 1U && input[start] == '.') {
+        coverage_component_result_t component = coverage_component_validate(input, start, part_len);
+        if (component == COVERAGE_COMPONENT_SKIP) {
             continue;
         }
-        if (part_len == 2U && input[start] == '.' && input[start + 1U] == '.') {
+        if (component == COVERAGE_COMPONENT_OUTSIDE) {
             return COVERAGE_PATH_OUTSIDE;
         }
-        if (written > 0U) {
-            if (written + 1U >= out_size) {
-                return COVERAGE_PATH_INVALID;
-            }
-            out[written++] = '/';
-        }
-        if (written + part_len >= out_size) {
+        if (component == COVERAGE_COMPONENT_INVALID ||
+            !coverage_component_append(out, out_size, &written, input, start, part_len)) {
             return COVERAGE_PATH_INVALID;
         }
-        memcpy(out + written, input + start, part_len);
-        written += part_len;
     }
     out[written] = '\0';
     return written > 0U || allow_root ? COVERAGE_PATH_OK : COVERAGE_PATH_INVALID;
@@ -4110,7 +4210,7 @@ static void coverage_add_ranges(yyjson_mut_doc *doc, yyjson_mut_val *row, const 
             break;
         }
         char *endptr = NULL;
-        long start = strtol(p, &endptr, 10);
+        long start = strtol(p, &endptr, MCP_DECIMAL_RADIX);
         if (endptr == p || start <= 0 || start > INT32_MAX) {
             break;
         }
@@ -4118,7 +4218,7 @@ static void coverage_add_ranges(yyjson_mut_doc *doc, yyjson_mut_val *row, const 
         long end = start;
         if (*p == '-') {
             p++;
-            long parsed = strtol(p, &endptr, 10);
+            long parsed = strtol(p, &endptr, MCP_DECIMAL_RADIX);
             if (endptr == p || parsed < start || parsed > INT32_MAX) {
                 break;
             }
@@ -4159,35 +4259,60 @@ static void coverage_add_row_json(yyjson_mut_doc *doc, yyjson_mut_val *array,
     yyjson_mut_arr_add_val(array, item);
 }
 
+static bool coverage_has_exact_row(const cbm_coverage_row_t *rows, int count,
+                                   const char *requested_path) {
+    for (int i = 0; i < count; i++) {
+        if (rows[i].rel_path && strcmp(rows[i].rel_path, requested_path) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static coverage_issue_t coverage_issue_from_kind(const char *kind) {
+    if (!kind || !kind[0]) {
+        return COVERAGE_ISSUE_NONE;
+    }
+    if (strcmp(kind, "parse_partial") == 0) {
+        return COVERAGE_ISSUE_PARTIAL;
+    }
+    if (strncmp(kind, "not_indexed", COVERAGE_NOT_INDEXED_PREFIX_LEN) == 0) {
+        return COVERAGE_ISSUE_EXCLUDED;
+    }
+    return COVERAGE_ISSUE_SKIPPED;
+}
+
+static coverage_issue_t coverage_strongest_issue(const cbm_coverage_row_t *rows, int count,
+                                                 const char *requested_path, bool exact) {
+    coverage_issue_t strongest = COVERAGE_ISSUE_NONE;
+    for (int i = 0; i < count; i++) {
+        if (exact && (!rows[i].rel_path || strcmp(rows[i].rel_path, requested_path) != 0)) {
+            continue;
+        }
+        coverage_issue_t issue = coverage_issue_from_kind(rows[i].kind);
+        if (issue < strongest) {
+            strongest = issue;
+        }
+    }
+    return strongest;
+}
+
 static const char *coverage_status(const cbm_coverage_row_t *rows, int count,
                                    const char *requested_path, const char *recording_status,
                                    bool generation_matches, bool lookup_ok) {
     if (!lookup_ok) {
         return "coverage_unavailable";
     }
-    bool exact = false;
-    for (int i = 0; i < count; i++) {
-        if (rows[i].rel_path && strcmp(rows[i].rel_path, requested_path) == 0) {
-            exact = true;
-            break;
-        }
+    coverage_issue_t issue = coverage_strongest_issue(
+        rows, count, requested_path, coverage_has_exact_row(rows, count, requested_path));
+    if (issue == COVERAGE_ISSUE_PARTIAL) {
+        return "partial";
     }
-    for (int pass = 0; pass < 3; pass++) {
-        for (int i = 0; i < count; i++) {
-            if (exact && (!rows[i].rel_path || strcmp(rows[i].rel_path, requested_path) != 0)) {
-                continue;
-            }
-            const char *kind = rows[i].kind ? rows[i].kind : "";
-            if (pass == 0 && strcmp(kind, "parse_partial") == 0) {
-                return "partial";
-            }
-            if (pass == 1 && strncmp(kind, "not_indexed", 11) == 0) {
-                return "excluded";
-            }
-            if (pass == 2 && kind[0]) {
-                return "skipped";
-            }
-        }
+    if (issue == COVERAGE_ISSUE_EXCLUDED) {
+        return "excluded";
+    }
+    if (issue == COVERAGE_ISSUE_SKIPPED) {
+        return "skipped";
     }
     if (!generation_matches || !recording_status || strcmp(recording_status, "complete") != 0) {
         return "coverage_unavailable";
@@ -4253,24 +4378,24 @@ static char *handle_check_index_coverage(cbm_mcp_server_t *srv, const char *args
     yyjson_mut_obj_add_strcpy(doc, root, "indexed_at",
                               have_project && proj.indexed_at ? proj.indexed_at : "");
 
-    yyjson_mut_val *meta_obj = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_strcpy(doc, meta_obj, "generation",
+    yyjson_mut_val *metadata_value = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_strcpy(doc, metadata_value, "generation",
                               have_meta && meta.generation ? meta.generation : "");
-    yyjson_mut_obj_add_strcpy(doc, meta_obj, "index_mode",
+    yyjson_mut_obj_add_strcpy(doc, metadata_value, "index_mode",
                               have_meta && meta.index_mode ? meta.index_mode : "unknown");
-    yyjson_mut_obj_add_strcpy(doc, meta_obj, "recorded_at",
+    yyjson_mut_obj_add_strcpy(doc, metadata_value, "recorded_at",
                               have_meta && meta.recorded_at ? meta.recorded_at : "");
-    yyjson_mut_obj_add_strcpy(doc, meta_obj, "recording_status", recording_status);
-    yyjson_mut_obj_add_int(doc, meta_obj, "ignored_files_stored",
+    yyjson_mut_obj_add_strcpy(doc, metadata_value, "recording_status", recording_status);
+    yyjson_mut_obj_add_int(doc, metadata_value, "ignored_files_stored",
                            have_meta ? meta.ignored_files_stored : 0);
-    yyjson_mut_obj_add_int(doc, meta_obj, "ignored_files_total",
+    yyjson_mut_obj_add_int(doc, metadata_value, "ignored_files_total",
                            have_meta ? meta.ignored_files_total : 0);
-    yyjson_mut_obj_add_bool(doc, meta_obj, "hash_records_complete",
+    yyjson_mut_obj_add_bool(doc, metadata_value, "hash_records_complete",
                             have_meta && meta.hash_records_complete);
-    yyjson_mut_obj_add_int(doc, meta_obj, "coverage_version",
+    yyjson_mut_obj_add_int(doc, metadata_value, "coverage_version",
                            have_meta ? meta.coverage_version : 0);
-    yyjson_mut_obj_add_bool(doc, meta_obj, "generation_matches", generation_matches);
-    yyjson_mut_obj_add_val(doc, root, "metadata", meta_obj);
+    yyjson_mut_obj_add_bool(doc, metadata_value, "generation_matches", generation_matches);
+    yyjson_mut_obj_add_val(doc, root, "metadata", metadata_value);
 
     yyjson_mut_val *path_results = yyjson_mut_arr(doc);
     size_t idx;
@@ -4326,8 +4451,8 @@ static char *handle_check_index_coverage(cbm_mcp_server_t *srv, const char *args
 
     int scope_limit = cbm_mcp_get_int_arg(args, "scope_limit", COVERAGE_SCOPE_DEFAULT_LIMIT);
     int scope_offset = cbm_mcp_get_int_arg(args, "scope_offset", 0);
-    if (scope_limit < 1) {
-        scope_limit = 1;
+    if (scope_limit < COVERAGE_SCOPE_MIN_LIMIT) {
+        scope_limit = COVERAGE_SCOPE_MIN_LIMIT;
     } else if (scope_limit > COVERAGE_SCOPE_MAX_LIMIT) {
         scope_limit = COVERAGE_SCOPE_MAX_LIMIT;
     }
