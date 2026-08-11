@@ -406,8 +406,8 @@ static void resolve_decorator(cbm_pipeline_ctx_t *ctx, const cbm_gbuf_node_t *no
      * may fall back from `tokio::main` to same-module `main`.  That is not a
      * local decorator target (and the self-edge is discarded below), so keep
      * the full external spelling by materialising the synthetic decorator. */
-    if (dec && cbm_node_id_eq(dec->id, node->id) && decorator[0] == '#' && decorator[1] == '[' &&
-        strstr(func_name, "::")) {
+    if (dec && cbm_node_id_eq(dec->id, node->id) && decorator[0] == '#' &&
+        decorator[SKIP_ONE] == '[' && strstr(func_name, "::")) {
         dec = NULL;
     }
     if (!dec) {

@@ -17,6 +17,12 @@ static sqlite3 *as_db(cbm_sql_t *db) {
     return (sqlite3 *)(void *)db;
 }
 
+enum {
+    SQL_NUL_TERMINATED = -1,
+    SQL_ALIGN = 8,
+    SQL_ALIGN_OFFSET = SQL_ALIGN - 1,
+};
+
 static sqlite3_stmt *as_stmt(cbm_sql_stmt_t *st) {
     return (sqlite3_stmt *)(void *)st;
 }
@@ -56,7 +62,7 @@ bool cbm_sql_prepare(cbm_sql_t *db, const char *sql, cbm_sql_stmt_t **out) {
         return false;
     }
     sqlite3_stmt *st = NULL;
-    if (sqlite3_prepare_v2(as_db(db), sql, -1, &st, NULL) != SQLITE_OK || !st) {
+    if (sqlite3_prepare_v2(as_db(db), sql, SQL_NUL_TERMINATED, &st, NULL) != SQLITE_OK || !st) {
         /* sqlite may hand back a statement alongside a failure; releasing it
          * here is what lets the caller treat false as "nothing to clean up". */
         sqlite3_finalize(st);
@@ -75,7 +81,8 @@ bool cbm_sql_bind_text(cbm_sql_stmt_t *st, int index, const char *value) {
     }
     /* SQLITE_TRANSIENT: sqlite copies the bytes, so the caller's buffer does
      * not have to outlive the statement. */
-    return sqlite3_bind_text(as_stmt(st), index, value, -1, SQLITE_TRANSIENT) == SQLITE_OK;
+    return sqlite3_bind_text(as_stmt(st), index, value, SQL_NUL_TERMINATED, SQLITE_TRANSIENT) ==
+           SQLITE_OK;
 }
 
 bool cbm_sql_bind_int(cbm_sql_stmt_t *st, int index, int value) {
@@ -209,8 +216,7 @@ static int sql_size(void *block) {
 }
 
 static int sql_roundup(int size) {
-    enum { SQL_ALIGN = 8 }; /* sqlite requires an 8-byte-aligned roundup */
-    return (size + (SQL_ALIGN - 1)) & ~(SQL_ALIGN - 1);
+    return (size + SQL_ALIGN_OFFSET) & ~SQL_ALIGN_OFFSET;
 }
 
 /* sqlite calls xInit and xShutdown unconditionally — it does not check them

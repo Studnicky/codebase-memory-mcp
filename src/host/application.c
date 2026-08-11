@@ -2938,10 +2938,11 @@ bool cbm_daemon_application_shutdown(cbm_daemon_application_t *application, uint
         if (all_done) {
             application_jobs_reap_completed(application);
             uint64_t now = cbm_now_ms();
-            uint32_t remaining =
-                now >= deadline
-                    ? 0
-                    : (uint32_t)((deadline - now) > UINT32_MAX ? UINT32_MAX : deadline - now);
+            uint32_t remaining = 0;
+            if (now < deadline) {
+                uint64_t time_left = deadline - now;
+                remaining = time_left > UINT32_MAX ? UINT32_MAX : (uint32_t)time_left;
+            }
             return application_update_reap(application, true, remaining);
         }
         if (cbm_now_ms() >= deadline) {
@@ -3367,7 +3368,13 @@ static int application_background_index(cbm_daemon_application_t *application,
         cbm_usleep(APPLICATION_JOB_POLL_US);
     }
     application_jobs_reap_completed(application);
-    return successful ? 0 : (cancelled ? 1 : -1);
+    if (successful) {
+        return 0;
+    }
+    if (cancelled) {
+        return 1;
+    }
+    return -1;
 }
 
 int cbm_daemon_application_index(cbm_daemon_application_t *application, const char *project_name,

@@ -54,6 +54,8 @@ enum {
     PSE_MIN_FUNCS_FOR_PAIR = 2,
     /* Serialized decimal precision for a SEMANTICALLY_RELATED edge's "score" prop. */
     PSE_SCORE_DECIMALS = 3,
+    PSE_SORT_LESS = -1,
+    PSE_SORT_GREATER = 1,
 };
 
 /* Scalar weight constants used in score_worker and related helpers. */
@@ -938,7 +940,8 @@ static int cmp_node_ptr_by_qn(const void *pa, const void *pb) {
         return r;
     }
     if (!cbm_node_id_eq(a->id, b->id)) {
-        return cbm_node_id_value(a->id) < cbm_node_id_value(b->id) ? -1 : 1;
+        return cbm_node_id_value(a->id) < cbm_node_id_value(b->id) ? PSE_SORT_LESS
+                                                                   : PSE_SORT_GREATER;
     }
     return 0;
 }
@@ -1040,10 +1043,10 @@ static int cmp_deferred_edge_canonical(const void *pa, const void *pb) {
     const deferred_edge_t *a = pa;
     const deferred_edge_t *b = pb;
     if (a->i != b->i) {
-        return a->i < b->i ? -1 : 1;
+        return a->i < b->i ? PSE_SORT_LESS : PSE_SORT_GREATER;
     }
     if (a->c != b->c) {
-        return a->c < b->c ? -1 : 1;
+        return a->c < b->c ? PSE_SORT_LESS : PSE_SORT_GREATER;
     }
     return 0;
 }

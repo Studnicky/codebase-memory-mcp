@@ -818,9 +818,12 @@ static cbm_version_cohort_daemon_presence_t version_cohort_active_daemon_presenc
              * shutdown may have released lifetime after our first observation
              * but before the marker became available. */
             int lifetime = cbm_daemon_ipc_local_transition_lifetime_probe(endpoint, transition);
-            presence = lifetime == 0   ? CBM_VERSION_COHORT_DAEMON_ABSENT
-                       : lifetime == 1 ? CBM_VERSION_COHORT_DAEMON_UNCOORDINATED
-                                       : CBM_VERSION_COHORT_DAEMON_UNSAFE;
+            presence = CBM_VERSION_COHORT_DAEMON_UNSAFE;
+            if (lifetime == 0) {
+                presence = CBM_VERSION_COHORT_DAEMON_ABSENT;
+            } else if (lifetime == 1) {
+                presence = CBM_VERSION_COHORT_DAEMON_UNCOORDINATED;
+            }
         }
     } else if (marker_status == CBM_PRIVATE_FILE_LOCK_UNSAFE) {
         presence = CBM_VERSION_COHORT_DAEMON_UNSAFE;

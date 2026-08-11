@@ -424,7 +424,7 @@ static bool envscan_within_root(const char *candidate, const char *canonical_roo
     }
     /* Demand a real component boundary, so root "/repo" does not admit
      * "/repo-elsewhere". */
-    return canonical_root[root_len - 1] == '/' || resolved[root_len] == '\0' ||
+    return canonical_root[root_len - SKIP_ONE] == '/' || resolved[root_len] == '\0' ||
            resolved[root_len] == '/';
 }
 

@@ -19,6 +19,7 @@
 #define CBM_DAEMON_INTERNAL_ARG "--cbm-daemon-internal"
 #define CBM_DAEMON_PERMANENT_ARG "--cbm-daemon-permanent"
 #define CBM_DAEMON_BOOTSTRAP_LAUNCH_ARGC 3U
+#define CBM_DAEMON_BOOTSTRAP_ARGV_CAP 4U
 
 typedef enum {
     CBM_DAEMON_PROCESS_INVALID = 0,
@@ -51,7 +52,7 @@ cbm_daemon_ipc_endpoint_t *cbm_daemon_bootstrap_endpoint_new(const char *runtime
  * inherits no standard handles; logical client leases govern its lifetime. */
 typedef struct {
     const char *executable_path;
-    const char *argv[CBM_DAEMON_BOOTSTRAP_LAUNCH_ARGC + 1U];
+    const char *argv[CBM_DAEMON_BOOTSTRAP_ARGV_CAP];
     size_t argc;
     bool detached;
     bool inherit_standard_handles;

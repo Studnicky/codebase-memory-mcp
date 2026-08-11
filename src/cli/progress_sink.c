@@ -55,7 +55,7 @@ bool cbm_cli_progress_enabled(bool explicitly_requested, bool stderr_is_tty) {
 static void progress_tool_name(const char *tool_name, char out[CBM_SZ_64]) {
     size_t offset = 0;
     if (tool_name) {
-        for (; tool_name[offset] && offset + 1 < CBM_SZ_64; offset++) {
+        for (; tool_name[offset] && offset + SKIP_ONE < CBM_SZ_64; offset++) {
             unsigned char ch = (unsigned char)tool_name[offset];
             bool safe = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
                         (ch >= '0' && ch <= '9') || ch == '_' || ch == '-';
@@ -102,10 +102,10 @@ static const char *extract_json_field(const char *line, const char *key, char *b
     const char *candidate = line;
     while ((candidate = strstr(candidate, needle)) != NULL) {
         const char *before = candidate;
-        while (before > line && (before[-1] == ' ' || before[-1] == '\t')) {
+        while (before > line && (before[-SKIP_ONE] == ' ' || before[-SKIP_ONE] == '\t')) {
             before--;
         }
-        if (before == line || (before[-1] != '{' && before[-1] != ',')) {
+        if (before == line || (before[-SKIP_ONE] != '{' && before[-SKIP_ONE] != ',')) {
             candidate += needle_len;
             continue;
         }
@@ -118,7 +118,7 @@ static const char *extract_json_field(const char *line, const char *key, char *b
         }
         int offset = 0;
         bool escaped = false;
-        while (*value && offset < buf_len - 1) {
+        while (*value && offset < buf_len - SKIP_ONE) {
             if (!escaped && *value == '\"') {
                 buf[offset] = '\0';
                 return buf;

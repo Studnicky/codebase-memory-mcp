@@ -3222,9 +3222,12 @@ int cbm_daemon_ipc_local_transition_seal_legacy(cbm_daemon_ipc_local_transition_
         return 1;
     }
     int lifetime = cbm_daemon_ipc_lifetime_reservation_probe(transition->endpoint);
-    int result = lifetime == 1   ? 1
-                 : lifetime == 0 ? posix_stale_generation_cleanup_locked(transition->endpoint)
-                                 : -1;
+    int result = -1;
+    if (lifetime == 1) {
+        result = 1;
+    } else if (lifetime == 0) {
+        result = posix_stale_generation_cleanup_locked(transition->endpoint);
+    }
     if (result == 1) {
         transition->sealed = true;
     }

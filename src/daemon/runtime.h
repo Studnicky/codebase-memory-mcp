@@ -56,6 +56,7 @@
 #define CBM_DAEMON_STOP_RESPONSE_SIZE 40U
 #define CBM_DAEMON_RUNTIME_PROJECT_KEY_MAX 4096U
 #define CBM_DAEMON_RUNTIME_APPLICATION_PAYLOAD_MAX (CBM_DAEMON_MAX_FRAME_SIZE - 16U)
+#define CBM_DAEMON_SEMANTIC_VERSION_TEXT_CAP 12U
 
 /* Frame flags are operation codes. Every operation has one exact payload
  * length (or an explicitly length-prefixed payload); trailing bytes are a
@@ -262,7 +263,7 @@ typedef struct {
     uint8_t client_count; /* entries in client_pids, capped at the wire limit */
     uint32_t client_pids[CBM_DAEMON_CONTROL_CLIENT_CAP];
     char build_fingerprint[CBM_DAEMON_BUILD_FINGERPRINT_SIZE];
-    char semantic_version[12];
+    char semantic_version[CBM_DAEMON_SEMANTIC_VERSION_TEXT_CAP];
 } cbm_daemon_runtime_status_t;
 
 typedef struct {

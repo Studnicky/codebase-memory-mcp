@@ -124,14 +124,18 @@ const char *cbm_workspace_cache_dir(void);
 
 #define CBM_WS_MANIFEST_NAME ".cbmpathwhitelist"
 
-enum { CBM_WS_MANIFEST_MAX_ENTRIES = 64 };
+enum {
+    CBM_WS_MANIFEST_MAX_ENTRIES = 64,
+    CBM_WS_MANIFEST_ENTRY_CAP = 1024,
+    CBM_WS_MANIFEST_DIGEST_CAP = 65,
+};
 
 typedef struct {
     /* Requested roots, verbatim from the file (already control-char screened). */
-    char entries[CBM_WS_MANIFEST_MAX_ENTRIES][1024];
+    char entries[CBM_WS_MANIFEST_MAX_ENTRIES][CBM_WS_MANIFEST_ENTRY_CAP];
     int count;
     /* SHA-256 hex of the raw file bytes; empty when there is no manifest. */
-    char digest[65];
+    char digest[CBM_WS_MANIFEST_DIGEST_CAP];
     bool present;
 } cbm_ws_manifest_t;
 

@@ -31,8 +31,8 @@ typedef struct {
     cbm_userext_t *entries; /* heap-allocated array */
     int count;              /* number of entries */
     /* Digests of the exact bytes/state consumed by cbm_userconfig_load(). */
-    char global_source_sha256[CBM_SHA256_HEX_LEN + 1];
-    char project_source_sha256[CBM_SHA256_HEX_LEN + 1];
+    char global_source_sha256[CBM_SHA256_HEX_CSTR_LEN];
+    char project_source_sha256[CBM_SHA256_HEX_CSTR_LEN];
 } cbm_userconfig_t;
 
 /* ── API ────────────────────────────────────────────────────────── */

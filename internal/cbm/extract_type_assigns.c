@@ -8,6 +8,13 @@
 #include "extract_node_stack.h"
 #include <stdint.h> // uint32_t
 #include <string.h>
+
+enum {
+    TYPE_ASSIGN_FACTORY_PREFIX_LEN = 3,
+    TYPE_ASSIGN_CLIENT_SUFFIX_LEN = 6,
+    TYPE_ASSIGN_STUB_SUFFIX_LEN = 4,
+    TYPE_ASSIGN_STACK_INITIAL_CAPACITY = 4096,
+};
 #include <ctype.h>
 
 // Extract type from new_expression / object_creation_expression.
@@ -62,12 +69,16 @@ static const char *extract_constructor_type(CBMArena *a, TSNode rhs, const char 
              * Downstream passes can use this to infer the constructed type. */
             if (fname && fname[0]) {
                 const char *last = strrchr(fname, '.');
-                last = last ? last + 1 : fname;
+                last = last ? last + SKIP_ONE : fname;
                 bool is_factory = false;
-                if ((strncmp(last, "New", 3) == 0 || strncmp(last, "new", 3) == 0) && last[3]) {
+                if ((strncmp(last, "New", TYPE_ASSIGN_FACTORY_PREFIX_LEN) == 0 ||
+                     strncmp(last, "new", TYPE_ASSIGN_FACTORY_PREFIX_LEN) == 0) &&
+                    last[TYPE_ASSIGN_FACTORY_PREFIX_LEN]) {
                     size_t llen = strlen(last);
-                    if ((llen > 6 && strcmp(last + llen - 6, "Client") == 0) ||
-                        (llen > 4 && strcmp(last + llen - 4, "Stub") == 0)) {
+                    if ((llen > TYPE_ASSIGN_CLIENT_SUFFIX_LEN &&
+                         strcmp(last + llen - TYPE_ASSIGN_CLIENT_SUFFIX_LEN, "Client") == 0) ||
+                        (llen > TYPE_ASSIGN_STUB_SUFFIX_LEN &&
+                         strcmp(last + llen - TYPE_ASSIGN_STUB_SUFFIX_LEN, "Stub") == 0)) {
                         is_factory = true;
                     }
                 }
@@ -186,7 +197,7 @@ static void process_type_assign_node(CBMExtractCtx *ctx, TSNode node, const CBML
 // Walk AST for assignment patterns where RHS is a constructor call.
 static void walk_type_assigns(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec *spec) {
     TSNodeStack stack;
-    ts_nstack_init(&stack, ctx->arena, 4096);
+    ts_nstack_init(&stack, ctx->arena, TYPE_ASSIGN_STACK_INITIAL_CAPACITY);
     ts_nstack_push(&stack, ctx->arena, root);
     while (stack.count > 0) {
         TSNode node = ts_nstack_pop(&stack);

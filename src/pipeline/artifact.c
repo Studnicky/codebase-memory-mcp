@@ -11,6 +11,7 @@ enum {
     ART_ZSTD_FAST = 3,
     ART_ZSTD_BEST = 9,
     ART_NUL = 1, /* NUL terminator byte */
+    ART_GITATTRIBUTES_MODE = 0644,
 };
 
 /*
@@ -377,7 +378,7 @@ static void ensure_gitattributes(const char *repo_path) {
     /* Atomic create-only-if-absent: O_EXCL closes the TOCTOU window
      * between checking existence and writing. If the file exists, open
      * fails with EEXIST and we leave it untouched. */
-    int fd = open(ga_path, O_WRONLY | O_CREAT | O_EXCL, 0644);
+    int fd = open(ga_path, O_WRONLY | O_CREAT | O_EXCL, ART_GITATTRIBUTES_MODE);
     if (fd < 0) {
         if (errno != EEXIST) {
             cbm_log_warn("artifact.gitattributes.open path=%s err=%s", ga_path, strerror(errno));

@@ -12,7 +12,14 @@
  */
 #include "foundation/constants.h"
 
-enum { GH_RING = 4, GH_RING_MASK = 3, GH_INIT_CAP = 16, GH_MIN_COMMITS = 3, GH_MAX_FILES = 20 };
+enum {
+    GH_RING = 4,
+    GH_RING_MASK = 3,
+    GH_INIT_CAP = 16,
+    GH_MIN_COMMITS = 3,
+    GH_MAX_FILES = 20,
+    GITHISTORY_DECIMAL_BASE = 10,
+};
 /* Serialized decimal precision for a FILE_CHANGES_WITH edge's "coupling_score" prop. */
 enum { GH_COUPLING_SCORE_DECIMALS = 2 };
 
@@ -165,7 +172,7 @@ static int parse_git_log(const char *repo_path, commit_t **out, int *out_count) 
              * Older callers / stripped-down git output without %ct land on 0. */
             const char *hash_end = strchr(line + SLEN("COMMIT:"), ':');
             if (hash_end) {
-                current.timestamp = strtoll(hash_end + 1, NULL, 10);
+                current.timestamp = strtoll(hash_end + SKIP_ONE, NULL, GITHISTORY_DECIMAL_BASE);
             }
             continue;
         }
@@ -428,7 +435,7 @@ int cbm_pipeline_githistory_compute(const char *repo_path, cbm_githistory_result
                     int new_idx = ft_count++;
                     snprintf(ft_arr[new_idx].file_path, sizeof(ft_arr[new_idx].file_path), "%s",
                              fp);
-                    ft_arr[new_idx].change_count = 1;
+                    ft_arr[new_idx].change_count = SKIP_ONE;
                     ft_arr[new_idx].last_modified = cf[c].timestamp;
                     *nidx = new_idx;
                     cbm_ht_set(file_idx, key, nidx);

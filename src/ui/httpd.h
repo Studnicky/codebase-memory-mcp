@@ -37,6 +37,13 @@
 #define CBM_HTTP_MAX_BODY (1024 * 1024)
 /* Default per-connection receive deadline. */
 #define CBM_HTTP_RECV_DEADLINE_MS 5000
+#define CBM_HTTP_METHOD_CAP 16
+#define CBM_HTTP_PATH_CAP 2048
+#define CBM_HTTP_QUERY_CAP 2048
+#define CBM_HTTP_ORIGIN_CAP 256
+#define CBM_HTTP_HOST_CAP 256
+#define CBM_HTTP_CONTENT_TYPE_CAP 128
+#define CBM_HTTP_ACCEPT_LANGUAGE_CAP 256
 typedef struct cbm_httpd cbm_httpd_t;         /* listener */
 typedef struct cbm_http_conn cbm_http_conn_t; /* accepted connection */
 
@@ -51,14 +58,14 @@ typedef enum {
  * Selected headers are copied for the routing/security layer ("" when
  * absent). `body` is heap-allocated and NUL-terminated. */
 typedef struct {
-    char method[16];
-    char path[2048];
-    char query[2048];
+    char method[CBM_HTTP_METHOD_CAP];
+    char path[CBM_HTTP_PATH_CAP];
+    char query[CBM_HTTP_QUERY_CAP];
     unsigned char http_minor; /* 0 for HTTP/1.0, 1 for HTTP/1.1 */
-    char origin[256];
-    char host[256];
-    char content_type[128];
-    char accept_language[256];
+    char origin[CBM_HTTP_ORIGIN_CAP];
+    char host[CBM_HTTP_HOST_CAP];
+    char content_type[CBM_HTTP_CONTENT_TYPE_CAP];
+    char accept_language[CBM_HTTP_ACCEPT_LANGUAGE_CAP];
     char *body;
     size_t body_len;
 } cbm_http_req_t;

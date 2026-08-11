@@ -32,7 +32,12 @@ enum {
 #include <stdlib.h>
 #include <string.h>
 
-enum { FP_KEY_PREFIX_LEN = 6, MIN_FP_ENTRIES = 2 }; /* strlen("\"fp\":\"") */
+enum {
+    FP_KEY_PREFIX_LEN = 6,
+    MIN_FP_ENTRIES = 2,
+    SIMILARITY_ORDER_LESS = -1,
+    SIMILARITY_ORDER_GREATER = 1,
+}; /* strlen("\"fp\":\"") */
 
 /* ── Helpers ─────────────────────────────────────────────────────── */
 
@@ -108,7 +113,9 @@ static int cmp_fp_entry_by_qn(const void *pa, const void *pb) {
         return r;
     }
     if (!cbm_node_id_eq(a->node_id, b->node_id)) {
-        return cbm_node_id_value(a->node_id) < cbm_node_id_value(b->node_id) ? -1 : 1;
+        return cbm_node_id_value(a->node_id) < cbm_node_id_value(b->node_id)
+                   ? SIMILARITY_ORDER_LESS
+                   : SIMILARITY_ORDER_GREATER;
     }
     return 0;
 }
@@ -153,7 +160,7 @@ static int collect_fp_entries(cbm_gbuf_t *gbuf, fp_entry_t **out_entries) {
     /* Canonicalize (determinism) — see cmp_fp_entry_by_qn. Avoid passing the
      * NULL empty-set buffer to qsort: libc treats zero elements as a no-op,
      * but the standard function contract still requires a valid base pointer. */
-    if (count > 1) {
+    if (count > SKIP_ONE) {
         qsort(entries, (size_t)count, sizeof(fp_entry_t), cmp_fp_entry_by_qn);
     }
     *out_entries = entries;

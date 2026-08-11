@@ -7,6 +7,12 @@
 #include <limits.h>
 #include <stdlib.h>
 
+enum {
+    LIMITS_DECIMAL_BASE = 10,
+    CBM_CYPHER_DEFAULT_MAX_DEPTH = 10,
+    CBM_MCP_DEFAULT_MAX_DEPTH = 15,
+};
+
 long cbm_max_file_bytes(void) {
     /* 512 MiB — generous: real source files never approach it, but a
      * pathological / vendored blob degrades to a reported "oversized" skip
@@ -17,7 +23,7 @@ long cbm_max_file_bytes(void) {
     if (raw && raw[0]) {
         errno = 0;
         char *end = NULL;
-        long v = strtol(raw, &end, 10);
+        long v = strtol(raw, &end, LIMITS_DECIMAL_BASE);
         if (errno == 0 && end != raw && *end == '\0' && v > 0) {
             return v;
         }
@@ -34,7 +40,7 @@ static int env_positive_int(const char *name, int fallback) {
     if (raw && raw[0]) {
         errno = 0;
         char *end = NULL;
-        long v = strtol(raw, &end, 10);
+        long v = strtol(raw, &end, LIMITS_DECIMAL_BASE);
         if (errno == 0 && end != raw && *end == '\0' && v > 0 && v <= INT_MAX) {
             return (int)v;
         }
@@ -46,11 +52,11 @@ static int env_positive_int(const char *name, int fallback) {
 int cbm_cypher_max_depth(void) {
     /* 10 — generous for a code call/def graph; an explicit `*1..N` above this is
      * WARN-capped, never an unbounded (cyclic-graph DoS) traversal. */
-    return env_positive_int("CBM_CYPHER_MAX_DEPTH", 10);
+    return env_positive_int("CBM_CYPHER_MAX_DEPTH", CBM_CYPHER_DEFAULT_MAX_DEPTH);
 }
 
 int cbm_mcp_max_depth(void) {
     /* 15 — ceiling for client-driven MCP graph traversals (trace_call_path,
      * detect_changes); the caller's `depth` is WARN-clamped to this. */
-    return env_positive_int("CBM_MCP_MAX_DEPTH", 15);
+    return env_positive_int("CBM_MCP_MAX_DEPTH", CBM_MCP_DEFAULT_MAX_DEPTH);
 }

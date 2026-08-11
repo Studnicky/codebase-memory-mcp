@@ -7,7 +7,7 @@
 #include "foundation/constants.h"
 #include "extract_node_stack.h"
 
-enum { MAX_EXCEPTION_NAME_LEN = 100, LAST_IDX = 1 };
+enum { MAX_EXCEPTION_NAME_LEN = 100, LAST_IDX = 1, SINGLE_NAMED_CHILD = 1 };
 #include <stdint.h> // uint32_t
 #include <string.h>
 #include <ctype.h>
@@ -149,7 +149,7 @@ static void walk_throws(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec *spec
 static char *resolve_lhs_write_name(CBMExtractCtx *ctx, TSNode left) {
     // Unwrap a single-element expression_list (Go).
     if (strcmp(ts_node_type(left), "expression_list") == 0) {
-        if (ts_node_named_child_count(left) != 1) {
+        if (ts_node_named_child_count(left) != SINGLE_NAMED_CHILD) {
             return NULL; // multi-assign: ambiguous, skip
         }
         left = ts_node_named_child(left, 0);

@@ -131,6 +131,17 @@ static const char *incr_mode_name(int mode) {
     }
 }
 
+static const char *incr_coverage_recording_status(bool rows_available, int ignored_total,
+                                                  int ignored_stored) {
+    if (!rows_available) {
+        return "unavailable";
+    }
+    if (ignored_total > ignored_stored) {
+        return "truncated";
+    }
+    return "complete";
+}
+
 /* Free a const-qualified pointer this function owns. Captures the pointer's
  * bytes via memcpy into a local unqualified void* instead of casting away
  * const, matching safe_str_free's pattern (foundation/platform.h). */
@@ -2372,10 +2383,8 @@ static int run_closure_delta(cbm_pipeline_t *p, const char *db_path, const char 
             .coverage_meta =
                 {
                     .index_mode = incr_mode_name(index_mode),
-                    .recording_status =
-                        !coverage_rows_available
-                            ? "unavailable"
-                            : (run_ignored_total > run_ignored_count ? "truncated" : "complete"),
+                    .recording_status = incr_coverage_recording_status(
+                        coverage_rows_available, run_ignored_total, run_ignored_count),
                     .ignored_files_stored = run_ignored_count,
                     .ignored_files_total = run_ignored_total,
                     .coverage_version = CBM_SEMANTIC_INDEX_VERSION,
@@ -2919,10 +2928,8 @@ int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_fil
     int index_mode = cbm_pipeline_get_mode(p);
     cbm_coverage_meta_t coverage_meta = {
         .index_mode = incr_mode_name(index_mode),
-        .recording_status =
-            !coverage_rows_available
-                ? "unavailable"
-                : (run_ignored_total > run_ignored_count ? "truncated" : "complete"),
+        .recording_status = incr_coverage_recording_status(coverage_rows_available,
+                                                           run_ignored_total, run_ignored_count),
         .ignored_files_stored = run_ignored_count,
         .ignored_files_total = run_ignored_total,
         .coverage_version = CBM_SEMANTIC_INDEX_VERSION,

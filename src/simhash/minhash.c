@@ -31,7 +31,12 @@ enum { TRIGRAM_BUF_LEN = 160 };
 enum { AST_WALK_CAP = 2048 };
 
 /* Hex encoding constants */
-enum { HEX_CHARS_PER_U32 = 8, HEX_BASE = 16 };
+enum {
+    HEX_CHARS_PER_U32 = 8,
+    HEX_BASE = 16,
+    HEX_ALPHA_OFFSET = 10,
+    HEX_NIBBLE_BITS = 4,
+};
 
 /* Trigram constants */
 enum { TRIGRAM_WINDOW = 2 };
@@ -311,13 +316,13 @@ bool cbm_minhash_from_hex(const char *hex, cbm_minhash_t *out) {
             if (ch >= '0' && ch <= '9') {
                 nibble = (uint32_t)(ch - '0');
             } else if (ch >= 'a' && ch <= 'f') {
-                nibble = (uint32_t)(ch - 'a') + 10U;
+                nibble = (uint32_t)(ch - 'a') + HEX_ALPHA_OFFSET;
             } else if (ch >= 'A' && ch <= 'F') {
-                nibble = (uint32_t)(ch - 'A') + 10U;
+                nibble = (uint32_t)(ch - 'A') + HEX_ALPHA_OFFSET;
             } else {
                 return false;
             }
-            value = (value << 4) | nibble;
+            value = (value << HEX_NIBBLE_BITS) | nibble;
         }
         decoded.values[i] = value;
     }

@@ -27,7 +27,7 @@ static bool project_lock_key(const char *project, char out[PROJECT_LOCK_KEY_CAP]
         return false;
     }
     static const char prefix[] = "cbm-project-v1:";
-    size_t prefix_length = sizeof(prefix) - 1U;
+    size_t prefix_length = sizeof(prefix) - SKIP_ONE;
     size_t project_length = strnlen(project, PROJECT_LOCK_KEY_CAP);
     if (project_length == 0 || project_length >= PROJECT_LOCK_KEY_CAP ||
         prefix_length + project_length >= PROJECT_LOCK_KEY_CAP) {
@@ -53,7 +53,7 @@ cbm_project_lock_manager_t *cbm_project_lock_manager_new(
         }
         return NULL;
     }
-    cbm_project_lock_manager_t *manager = calloc(1, sizeof(*manager));
+    cbm_project_lock_manager_t *manager = calloc(SKIP_ONE, sizeof(*manager));
     if (manager) {
         manager->directory = directory;
         manager->registry = cbm_lock_registry_new(directory);
@@ -123,7 +123,7 @@ static cbm_private_file_lock_status_t project_lock_acquire_internal(
     if (!wildcard && !project_lock_key(project, project_key)) {
         return CBM_PRIVATE_FILE_LOCK_UNSAFE;
     }
-    cbm_project_lock_lease_t *lease = calloc(1, sizeof(*lease));
+    cbm_project_lock_lease_t *lease = calloc(SKIP_ONE, sizeof(*lease));
     if (!lease) {
         return CBM_PRIVATE_FILE_LOCK_IO;
     }

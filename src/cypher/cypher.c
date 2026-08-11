@@ -1110,9 +1110,12 @@ static cbm_expr_t *parse_exists_predicate(parser_t *p, bool negated) {
     c.op = heap_strdup("EXISTS");
     c.variable = heap_strdup(anchor.variable ? anchor.variable : "");
     c.value = (rel.type_count > 0 && rel.types[0]) ? heap_strdup(rel.types[0]) : NULL;
-    c.exists_dir = (rel.direction && strcmp(rel.direction, "inbound") == 0) ? 1
-                   : (rel.direction && strcmp(rel.direction, "any") == 0)   ? 2
-                                                                            : 0;
+    c.exists_dir = 0;
+    if (rel.direction && strcmp(rel.direction, "inbound") == 0) {
+        c.exists_dir = 1;
+    } else if (rel.direction && strcmp(rel.direction, "any") == 0) {
+        c.exists_dir = 2;
+    }
     free_one_node_pattern(&anchor);
     free_one_rel_pattern(&rel);
     free_one_node_pattern(&far_node);
@@ -4615,7 +4618,12 @@ static void execute_default_projection(cbm_pattern_t *pat0, binding_t *bindings,
  * *out_n on success, CBM_NOT_FOUND on overflow. Non-static so the arithmetic
  * boundary can be unit-tested directly. */
 int cbm_cypher_cross_join_alloc(int bind_count, int extra_count, bool opt, size_t *out_n) {
-    size_t per_binding = extra_count > 0 ? (size_t)extra_count : (opt ? (size_t)SKIP_ONE : 0U);
+    size_t per_binding = 0U;
+    if (extra_count > 0) {
+        per_binding = (size_t)extra_count;
+    } else if (opt) {
+        per_binding = (size_t)SKIP_ONE;
+    }
     size_t rows = (size_t)bind_count * per_binding;
     if (rows > (size_t)INT_MAX) {
         return CBM_NOT_FOUND; /* new_count would not fit the int binding counter */
@@ -4888,7 +4896,13 @@ static int execute_single(cbm_store_t *store, cbm_query_t *q, const char *projec
     /* Build initial bindings with early WHERE */
     /* scan_count is a non-negative store result count (see scan_pattern_nodes);
      * max_rows is a caller-supplied row limit, never negative. */
-    int bind_cap = scan_count > max_rows ? scan_count : (max_rows > 0 ? max_rows : SKIP_ONE);
+    int bind_cap = SKIP_ONE;
+    if (max_rows > 0) {
+        bind_cap = max_rows;
+    }
+    if (scan_count > max_rows) {
+        bind_cap = scan_count;
+    }
     binding_t *bindings = malloc((size_t)(bind_cap + SKIP_ONE) * sizeof(binding_t));
     int bind_count = 0;
     const char *var_name = pat0->nodes[0].variable ? pat0->nodes[0].variable : "_n0";

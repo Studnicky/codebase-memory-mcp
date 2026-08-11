@@ -6,6 +6,8 @@
 #ifdef __APPLE__
 
 #include <errno.h>
+
+enum { ACL_ENTRY_LIST_END = -1 };
 #include <sys/types.h>
 #include <sys/acl.h>
 
@@ -31,7 +33,7 @@ bool cbm_macos_extended_acl_fd_is_empty(int fd) {
     /* Darwin returns 0 for an entry and -1/EINVAL when an empty ACL (or the
      * end of an ACL) is reached.  Looking only at the first entry makes every
      * nonempty ACL unsafe, independent of its allow/deny permissions. */
-    return entry_result == -1 && entry_error == EINVAL && free_result == 0;
+    return entry_result == ACL_ENTRY_LIST_END && entry_error == EINVAL && free_result == 0;
 }
 
 bool cbm_macos_extended_acl_fd_is_deny_only(int fd) {
@@ -54,7 +56,7 @@ bool cbm_macos_extended_acl_fd_is_deny_only(int fd) {
         errno = 0;
         int entry_result = acl_get_entry(acl, entry_id, &entry);
         int entry_error = errno;
-        if (entry_result == -1) {
+        if (entry_result == ACL_ENTRY_LIST_END) {
             safe = entry_error == EINVAL;
             break;
         }

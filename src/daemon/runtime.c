@@ -2846,9 +2846,13 @@ cbm_daemon_runtime_cancel_result_t cbm_daemon_runtime_client_application_cancel(
         /* The request path may have observed pending_cancel_token and emitted
          * the control while this caller waited for send_mutex. That is still
          * an accepted cancellation, not a stale target. */
-        return already_sent ? CBM_DAEMON_RUNTIME_CANCEL_ACCEPTED
-                            : (unavailable ? CBM_DAEMON_RUNTIME_CANCEL_ERROR
-                                           : CBM_DAEMON_RUNTIME_CANCEL_STALE);
+        if (already_sent) {
+            return CBM_DAEMON_RUNTIME_CANCEL_ACCEPTED;
+        }
+        if (unavailable) {
+            return CBM_DAEMON_RUNTIME_CANCEL_ERROR;
+        }
+        return CBM_DAEMON_RUNTIME_CANCEL_STALE;
     }
     if (!sent) {
         cbm_mutex_lock(&client->state_mutex);

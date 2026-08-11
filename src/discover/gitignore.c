@@ -14,7 +14,14 @@
 #include "foundation/constants.h"
 #include "foundation/compat_fs.h"
 
-enum { GI_INIT_CAP = 16, GI_CHAR_IDX1 = 1, GI_CHAR_IDX2 = 2, GI_SKIP3 = 3 };
+enum {
+    GI_INIT_CAP = 16,
+    GI_CHAR_IDX1 = 1,
+    GI_CHAR_IDX2 = 2,
+    GI_SKIP3 = 3,
+    GITIGNORE_MATCH_INCLUDE = -1,
+    GITIGNORE_MATCH_EXCLUDE = 1,
+};
 #include "discover/discover.h"
 
 #include <ctype.h>
@@ -392,7 +399,7 @@ int cbm_gitignore_match_result(const cbm_gitignore_t *gi, const char *rel_path, 
                                     : match_unrooted(p->pattern, rel_path, basename);
 
         if (this_match) {
-            matched = p->negated ? -1 : 1;
+            matched = p->negated ? GITIGNORE_MATCH_INCLUDE : GITIGNORE_MATCH_EXCLUDE;
         }
     }
 

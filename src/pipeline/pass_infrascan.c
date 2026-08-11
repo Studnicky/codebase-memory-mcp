@@ -26,6 +26,8 @@ enum {
     IS_AS_SKIP = 3,         /* strlen("AS ") */
     IS_SOURCE_DOT = 2,      /* strlen(". ") */
     IS_QUOTE_TRIM = 2,      /* strip surrounding quotes */
+    HELM_PARSE_OK = 0,
+    HELM_PARSE_INVALID = -1,
 };
 #define IS_NOT_FOUND (-1)
 
@@ -1254,7 +1256,7 @@ static void helm_copy_scalar(const char *s, const char *eol, char *out, size_t c
     }
     size_t n = (size_t)(e - s);
     if (n >= cap) {
-        n = cap - 1;
+        n = cap - SKIP_ONE;
     }
     memcpy(out, s, n);
     out[n] = '\0';
@@ -1263,18 +1265,18 @@ static void helm_copy_scalar(const char *s, const char *eol, char *out, size_t c
 /* Match "key:" at the start of a content pointer; return value start or NULL. */
 static const char *helm_match_key(const char *content, const char *eol, const char *key) {
     size_t kl = strlen(key);
-    if ((size_t)(eol - content) < kl + 1) {
+    if ((size_t)(eol - content) < kl + SKIP_ONE) {
         return NULL;
     }
     if (strncmp(content, key, kl) != 0 || content[kl] != ':') {
         return NULL;
     }
-    return content + kl + 1;
+    return content + kl + SKIP_ONE;
 }
 
 int cbm_parse_helm_chart(const char *source, cbm_helm_chart_t *out) {
     if (!source || !out) {
-        return -1;
+        return HELM_PARSE_INVALID;
     }
     out->chart_name[0] = '\0';
     out->dep_count = 0;
@@ -1323,7 +1325,7 @@ int cbm_parse_helm_chart(const char *source, cbm_helm_chart_t *out) {
         if (*eol == '\0') {
             break;
         }
-        p = eol + 1;
+        p = eol + SKIP_ONE;
     }
-    return (out->chart_name[0] || out->dep_count > 0) ? 0 : -1;
+    return (out->chart_name[0] || out->dep_count > 0) ? HELM_PARSE_OK : HELM_PARSE_INVALID;
 }

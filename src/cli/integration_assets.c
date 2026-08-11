@@ -30,6 +30,7 @@
 
 enum {
     ASSETS_DIR_PERM = 0755,
+    ASSETS_FORMAT_VERSION = 1,
     /* The shipped file is ~8 KB; the cap only bounds a corrupted candidate. */
     ASSETS_MAX_BYTES = CBM_SZ_64K * CBM_SZ_16,
 };
@@ -125,7 +126,7 @@ static bool assets_read_file(const char *path, char **out_bytes, size_t *out_len
         (void)fclose(file);
         return false;
     }
-    size_t got = fread(bytes, 1U, (size_t)size, file);
+    size_t got = fread(bytes, sizeof(*bytes), (size_t)size, file);
     (void)fclose(file);
     if (got != (size_t)size) {
         free(bytes);
@@ -162,8 +163,8 @@ static bool assets_adopt_bytes(char *bytes, size_t length) {
     yyjson_val *root = doc ? yyjson_doc_get_root(doc) : NULL;
     yyjson_val *format = root && yyjson_is_obj(root) ? yyjson_obj_get(root, "format") : NULL;
     yyjson_val *templates = root && yyjson_is_obj(root) ? yyjson_obj_get(root, "templates") : NULL;
-    if (!format || !yyjson_is_int(format) || yyjson_get_int(format) != 1 || !templates ||
-        !yyjson_is_obj(templates)) {
+    if (!format || !yyjson_is_int(format) || yyjson_get_int(format) != ASSETS_FORMAT_VERSION ||
+        !templates || !yyjson_is_obj(templates)) {
         if (doc) {
             yyjson_doc_free(doc);
         }
@@ -175,7 +176,7 @@ static bool assets_adopt_bytes(char *bytes, size_t length) {
     static const char platform_variant[] = "posix";
 #endif
     size_t template_count = yyjson_obj_size(templates);
-    asset_entry_t *entries = calloc(template_count ? template_count : 1U, sizeof(*entries));
+    asset_entry_t *entries = calloc(template_count ? template_count : SKIP_ONE, sizeof(*entries));
     if (!entries) {
         yyjson_doc_free(doc);
         return false;
@@ -365,7 +366,8 @@ bool cbm_integration_assets_install(const char *home, bool dry_run, char *err, s
         return false;
     }
     FILE *file = cbm_fopen(temp_path, "wb");
-    bool wrote = file && fwrite(g_assets.bytes, 1U, g_assets.length, file) == g_assets.length;
+    bool wrote = file && fwrite(g_assets.bytes, sizeof(*g_assets.bytes), g_assets.length, file) ==
+                             g_assets.length;
     if (file && fclose(file) != 0) {
         wrote = false;
     }

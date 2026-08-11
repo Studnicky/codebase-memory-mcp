@@ -86,10 +86,15 @@ static bool cr_cancel_requested(cr_run_context_t *ctx) {
 }
 
 static cr_match_result_t cr_match_finish(cr_run_context_t *ctx, int count, bool failed) {
+    cr_run_status_t status = CR_RUN_OK;
+    if (failed) {
+        status = CR_RUN_FAILED;
+    } else if (cr_cancel_requested(ctx)) {
+        status = CR_RUN_CANCELLED;
+    }
     cr_match_result_t result = {
         .count = count,
-        .status =
-            failed ? CR_RUN_FAILED : (cr_cancel_requested(ctx) ? CR_RUN_CANCELLED : CR_RUN_OK),
+        .status = status,
     };
     return result;
 }
@@ -825,10 +830,14 @@ static int try_match_channel_listener(cbm_store_t *src_store, const char *src_pr
     char rev[CR_PROPS_BUF];
     build_cross_props(rev, sizeof(rev), src_project, caller_name, caller_file, channel_name,
                       "channel_name", transport);
-    return insert_cross_edge(tgt_store, tgt_project, listener_id, tgt_channel_id, "CROSS_CHANNEL",
-                             rev, ctx)
-               ? 1
-               : (cr_cancel_requested(ctx) ? CBM_STORE_NOT_FOUND : CBM_STORE_ERR);
+    if (insert_cross_edge(tgt_store, tgt_project, listener_id, tgt_channel_id, "CROSS_CHANNEL", rev,
+                          ctx)) {
+        return 1;
+    }
+    if (cr_cancel_requested(ctx)) {
+        return CBM_STORE_NOT_FOUND;
+    }
+    return CBM_STORE_ERR;
 }
 
 static cr_match_result_t match_channels(cbm_store_t *src_store, const char *src_project,

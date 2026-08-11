@@ -1108,19 +1108,28 @@ static bool pb_ensure_leaf_cap(PageBuilder *pb) {
 #define INDEX_OVERFLOW_MAX_LOCAL 16422
 #define INDEX_OVERFLOW_MIN_LOCAL 8199
 
+enum {
+    SQLITE_VARINT_SHORT_BYTES = 8,
+    SQLITE_VARINT_DATA_BITS = 7,
+    SQLITE_VARINT_DATA_MASK = 0x7f,
+    SQLITE_VARINT_CONTINUATION_MASK = 0x80,
+    SQLITE_VARINT_FINAL_BYTE_INDEX = 8,
+    SQLITE_VARINT_MAX_BYTES = 9,
+};
+
 // Read a SQLite varint (1-9 bytes). Returns bytes consumed.
 static int get_varint(const uint8_t *buf, uint64_t *out) {
     uint64_t v = 0;
-    for (int i = 0; i < 8; i++) {
-        v = (v << 7) | (uint64_t)(buf[i] & 0x7f);
-        if ((buf[i] & 0x80) == 0) {
+    for (int i = 0; i < SQLITE_VARINT_SHORT_BYTES; i++) {
+        v = (v << SQLITE_VARINT_DATA_BITS) | (uint64_t)(buf[i] & SQLITE_VARINT_DATA_MASK);
+        if ((buf[i] & SQLITE_VARINT_CONTINUATION_MASK) == 0) {
             *out = v;
-            return i + 1;
+            return i + SKIP_ONE;
         }
     }
-    v = (v << 8) | (uint64_t)buf[8];
+    v = (v << SQLITE_VARINT_SHORT_BYTES) | (uint64_t)buf[SQLITE_VARINT_FINAL_BYTE_INDEX];
     *out = v;
-    return 9;
+    return SQLITE_VARINT_MAX_BYTES;
 }
 
 // If an index cell's payload exceeds X, rewrite it to spill the tail to

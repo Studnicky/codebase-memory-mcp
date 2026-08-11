@@ -26,6 +26,9 @@ enum {
     GB_JSON_GROW = 2,          /* growable-buffer doubling factor */
     GB_NUM_BUF = 64,           /* fixed-decimal number rendering buffer */
     GB_ASCII_PRINTABLE = 0x20, /* control characters below this need \u escaping */
+    GB_NAME_ORDER_LESS = -1,
+    GB_NAME_ORDER_GREATER = 1,
+    GB_ID_INDEX_GROWTH_FACTOR = 2,
 };
 #include "graph_buffer/graph_buffer.h"
 #include <yyjson/yyjson.h> // url_path extraction must match json_extract semantics
@@ -44,6 +47,9 @@ enum {
 #include <stdlib.h>
 #include <string.h> // strdup
 #include <time.h>
+
+static const uint64_t GB_FNV1A_OFFSET_BASIS = UINT64_C(14695981039346656037);
+static const uint64_t GB_FNV1A_PRIME = UINT64_C(1099511628211);
 
 static inline void *intptr_to_ptr(intptr_t v) {
     void *p;
@@ -205,9 +211,9 @@ static const char *gb_intern(cbm_gbuf_t *gb, const char *s) {
 /* Compare nullable names without normalizing absence into a source string. */
 static int gb_name_compare(const char *left, const char *right) {
     if (!left) {
-        return right ? -1 : 0;
+        return right ? GB_NAME_ORDER_LESS : 0;
     }
-    return right ? strcmp(left, right) : 1;
+    return right ? strcmp(left, right) : GB_NAME_ORDER_GREATER;
 }
 
 static void make_id_key(char *buf, size_t bufsz, cbm_node_id_t id) {
@@ -216,10 +222,10 @@ static void make_id_key(char *buf, size_t bufsz, cbm_node_id_t id) {
 
 /* FNV-1a 64-bit over a byte slice — for re-keying oversized local_names. */
 static uint64_t fnv1a64(const char *s, size_t len) {
-    uint64_t h = 14695981039346656037ULL;
+    uint64_t h = GB_FNV1A_OFFSET_BASIS;
     for (size_t i = 0; i < len; i++) {
         h ^= (uint8_t)s[i];
-        h *= 1099511628211ULL;
+        h *= GB_FNV1A_PRIME;
     }
     return h;
 }
@@ -439,7 +445,7 @@ static void register_node_in_indexes(cbm_gbuf_t *gb, cbm_gbuf_node_t *node) {
     if (node_id_v >= gb->by_id_cap) {
         int64_t nc = gb->by_id_cap > 0 ? gb->by_id_cap : CBM_SZ_1K;
         while (nc <= node_id_v) {
-            nc *= 2;
+            nc *= GB_ID_INDEX_GROWTH_FACTOR;
         }
         cbm_gbuf_node_t **grown = realloc(gb->by_id, (size_t)nc * sizeof(*grown));
         if (grown) {
@@ -1222,7 +1228,7 @@ static void gb_json_escape_byte(unsigned char ch, char esc[GB_JSON_ESC_BUF]) {
         return;
     }
     esc[0] = (char)ch;
-    esc[1] = '\0';
+    esc[SKIP_ONE] = '\0';
 }
 
 static bool gb_json_escape_append(char **out, size_t *len, size_t *cap, const char *s) {

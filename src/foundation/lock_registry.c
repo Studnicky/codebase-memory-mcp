@@ -993,15 +993,24 @@ size_t cbm_lock_registry_condition_waiter_count_for_test(const cbm_lock_registry
                : 0;
 }
 
+static cbm_private_file_lock_t *lock_lease_release_lock(cbm_lock_lease_t *lease,
+                                                        cbm_lock_registry_release_handle_t handle) {
+    if (handle == CBM_LOCK_REGISTRY_RELEASE_RW) {
+        return lease->rw;
+    }
+    if (handle == CBM_LOCK_REGISTRY_RELEASE_TURN) {
+        return lease->turn;
+    }
+    return NULL;
+}
+
 bool cbm_lock_lease_fail_next_release_step_for_test(cbm_lock_lease_t *lease,
                                                     cbm_lock_registry_release_handle_t handle,
                                                     cbm_private_file_lock_release_step_t step) {
     if (!lease) {
         return false;
     }
-    cbm_private_file_lock_t *lock = handle == CBM_LOCK_REGISTRY_RELEASE_RW     ? lease->rw
-                                    : handle == CBM_LOCK_REGISTRY_RELEASE_TURN ? lease->turn
-                                                                               : NULL;
+    cbm_private_file_lock_t *lock = lock_lease_release_lock(lease, handle);
     return cbm_private_file_lock_fail_next_release_step_for_test(lock, step);
 }
 
@@ -1029,9 +1038,7 @@ bool cbm_lock_lease_fail_close_after_consuming_for_test(cbm_lock_lease_t *lease,
     if (!lease) {
         return false;
     }
-    cbm_private_file_lock_t *lock = handle == CBM_LOCK_REGISTRY_RELEASE_RW     ? lease->rw
-                                    : handle == CBM_LOCK_REGISTRY_RELEASE_TURN ? lease->turn
-                                                                               : NULL;
+    cbm_private_file_lock_t *lock = lock_lease_release_lock(lease, handle);
     return cbm_private_file_lock_fail_close_after_consuming_for_test(lock);
 }
 #endif

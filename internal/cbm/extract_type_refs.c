@@ -13,6 +13,8 @@ enum { MIN_TYPE_LEN = 1 };
 #include <string.h>
 #include <ctype.h>
 
+enum { TYPE_REF_STACK_INITIAL_CAPACITY = 4096 };
+
 // Builtin types that should not generate USES_TYPE edges.
 static bool is_builtin_type(const char *name) {
     if (!name || !name[0]) {
@@ -245,7 +247,7 @@ static void process_body_type_ref(CBMExtractCtx *ctx, TSNode node, const char *f
 // Walk function body for type references (casts, type assertions, local var types, generics).
 static void walk_body_type_refs(CBMExtractCtx *ctx, TSNode root, const char *func_qn) {
     TSNodeStack stack;
-    ts_nstack_init(&stack, ctx->arena, 4096);
+    ts_nstack_init(&stack, ctx->arena, TYPE_REF_STACK_INITIAL_CAPACITY);
     ts_nstack_push(&stack, ctx->arena, root);
     while (stack.count > 0) {
         TSNode node = ts_nstack_pop(&stack);
@@ -289,7 +291,7 @@ static void walk_type_refs(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec *s
     }
 
     TSNodeStack stack;
-    ts_nstack_init(&stack, ctx->arena, 4096);
+    ts_nstack_init(&stack, ctx->arena, TYPE_REF_STACK_INITIAL_CAPACITY);
     ts_nstack_push(&stack, ctx->arena, root);
 
     while (stack.count > 0) {

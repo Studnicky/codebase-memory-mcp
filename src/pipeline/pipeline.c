@@ -1453,6 +1453,17 @@ static const char *pipeline_mode_name(cbm_index_mode_t mode) {
     }
 }
 
+static const char *pipeline_coverage_recording_status(bool rows_available, int ignored_total,
+                                                      int ignored_stored) {
+    if (!rows_available) {
+        return "unavailable";
+    }
+    if (ignored_total > ignored_stored) {
+        return "truncated";
+    }
+    return "complete";
+}
+
 static int pipeline_mode_coverage_rank(cbm_index_mode_t mode) {
     switch (mode) {
     case CBM_MODE_FULL:
@@ -1979,10 +1990,8 @@ static int dump_and_persist_hashes(cbm_pipeline_t *p, const cbm_file_hash_t *bas
         .coverage_meta =
             {
                 .index_mode = pipeline_mode_name(p->mode),
-                .recording_status =
-                    !coverage_rows_available
-                        ? "unavailable"
-                        : (p->ignored_total > p->ignored_count ? "truncated" : "complete"),
+                .recording_status = pipeline_coverage_recording_status(
+                    coverage_rows_available, p->ignored_total, p->ignored_count),
                 .ignored_files_stored = p->ignored_count,
                 .ignored_files_total = p->ignored_total,
                 .coverage_version = CBM_SEMANTIC_INDEX_VERSION,

@@ -13,6 +13,8 @@
 #include <string.h>
 #include <stdint.h>
 
+enum { CBM_EXECUTABLE_PATH_DIR_MAX = 900 };
+
 #ifdef _WIN32
 
 /* ── Windows implementation ────────────────────────────────── */
@@ -937,7 +939,7 @@ bool cbm_mkdir_p(const char *path, int mode) {
             break;
         }
         *separator = '/';
-        cursor = separator + 1;
+        cursor = separator + SKIP_ONE;
         while (*cursor == '/') {
             cursor++;
         }
@@ -1010,8 +1012,8 @@ static bool resolve_from_path_env(const char *name, char *out, size_t outsz) {
     while (*cur) {
         const char *colon = strchr(cur, ':');
         size_t dir_len = colon ? (size_t)(colon - cur) : strlen(cur);
-        if (dir_len > 0 && dir_len < 900) {
-            char candidate[1024];
+        if (dir_len > 0 && dir_len < CBM_EXECUTABLE_PATH_DIR_MAX) {
+            char candidate[CBM_SZ_1K];
             int n = snprintf(candidate, sizeof(candidate), "%.*s/%s", (int)dir_len, cur, name);
             if (n > 0 && (size_t)n < sizeof(candidate) && is_executable_file(candidate)) {
                 return copy_resolved_path(out, outsz, candidate);
@@ -1020,14 +1022,14 @@ static bool resolve_from_path_env(const char *name, char *out, size_t outsz) {
         if (!colon) {
             break;
         }
-        cur = colon + 1;
+        cur = colon + SKIP_ONE;
     }
     return false;
 }
 
 static bool resolve_self_executable(char *out, size_t outsz) {
 #ifdef __APPLE__
-    char buf[1024];
+    char buf[CBM_SZ_1K];
     uint32_t sz = sizeof(buf);
     if (_NSGetExecutablePath(buf, &sz) == 0 && buf[0]) {
         return copy_resolved_path(out, outsz, buf);
@@ -1269,8 +1271,8 @@ static int stream_copy_file(const char *src, const char *dst) {
     char buf[CBM_SZ_64K];
     size_t n;
     int rc = 0;
-    while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
-        if (fwrite(buf, 1, n, out) != n) {
+    while ((n = fread(buf, sizeof(*buf), sizeof(buf), in)) > 0) {
+        if (fwrite(buf, sizeof(*buf), n, out) != n) {
             rc = CBM_NOT_FOUND;
             break;
         }

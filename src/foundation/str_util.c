@@ -9,9 +9,10 @@
 #include <stdio.h>
 
 enum {
-    JSON_ESC_LEN = 2,       /* escaped char takes 2 bytes (backslash + char) */
-    JSON_NUL_RESERVE = 1,   /* reserve 1 byte for NUL terminator */
-    JSON_CTRL_LIMIT = 0x20, /* ASCII control character upper bound */
+    JSON_ESC_LEN = 2,         /* escaped char takes 2 bytes (backslash + char) */
+    JSON_NUL_RESERVE = 1,     /* reserve 1 byte for NUL terminator */
+    JSON_UNICODE_ESC_LEN = 6, /* \\u00XX takes 6 bytes */
+    JSON_CTRL_LIMIT = 0x20,   /* ASCII control character upper bound */
 };
 
 char *cbm_path_join(CBMArena *a, const char *base, const char *name) {
@@ -351,10 +352,10 @@ int cbm_json_escape(char *buf, int bufsize, const char *src) {
             buf[pos++] = 't';
         } else if (c < JSON_CTRL_LIMIT) {
             /* Other control chars: escape as \u00XX */
-            if (pos + 6 > bufsize - JSON_NUL_RESERVE) {
+            if (pos + JSON_UNICODE_ESC_LEN > bufsize - JSON_NUL_RESERVE) {
                 break;
             }
-            pos += snprintf(buf + pos, 7, "\\u%04x", c);
+            pos += snprintf(buf + pos, JSON_UNICODE_ESC_LEN + JSON_NUL_RESERVE, "\\u%04x", c);
         } else {
             buf[pos++] = (char)c;
         }

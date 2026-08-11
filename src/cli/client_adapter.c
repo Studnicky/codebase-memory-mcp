@@ -29,9 +29,9 @@ static void sb_append_len(adapter_sb_t *sb, const char *s, size_t add) {
     if (sb->failed || !s) {
         return;
     }
-    if (sb->len + add + 1 > sb->cap) {
+    if (sb->len + add + SKIP_ONE > sb->cap) {
         size_t want = sb->cap ? sb->cap : CBM_SZ_2K;
-        while (want < sb->len + add + 1) {
+        while (want < sb->len + add + SKIP_ONE) {
             if (want > SIZE_MAX / PAIR_LEN) {
                 sb->failed = true;
                 return;
@@ -118,8 +118,8 @@ bool cbm_client_adapter_escape_js(const char *in, char *out, size_t out_sz) {
         default:
             break;
         }
-        size_t need = esc ? strlen(esc) : 1U;
-        if (o + need + 1 > out_sz) {
+        size_t need = esc ? strlen(esc) : SKIP_ONE;
+        if (o + need + SKIP_ONE > out_sz) {
             out[0] = '\0';
             return false; /* never emit a truncated literal */
         }
@@ -169,7 +169,7 @@ char *cbm_client_adapter_pi(const char *binary_path) {
         }
         const char *const tool_names[] = {"TOOL"};
         const char *const tool_values[] = {name};
-        sb_append_template(&tools, tpl->tool_line, tool_names, tool_values, 1U);
+        sb_append_template(&tools, tpl->tool_line, tool_names, tool_values, SKIP_ONE);
     }
     if (tools.failed) {
         free(tools.buf);
@@ -203,7 +203,7 @@ char *cbm_client_adapter_opencode(const char *binary_path) {
     adapter_sb_t sb = {0};
     const char *const names[] = {"BIN"};
     const char *const values[] = {bin};
-    sb_append_template(&sb, tpl->current.text, names, values, 1U);
+    sb_append_template(&sb, tpl->current.text, names, values, SKIP_ONE);
     if (sb.failed) {
         free(sb.buf);
         return NULL;

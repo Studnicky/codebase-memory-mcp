@@ -1739,7 +1739,13 @@ static bool extract_route_from_annotations(CBMArena *a, TSNode func_node, const 
         return false;
     }
     *out_method = method;
-    *out_path = map_path ? map_path : (jax_path ? jax_path : "/");
+    *out_path = "/";
+    if (jax_path) {
+        *out_path = jax_path;
+    }
+    if (map_path) {
+        *out_path = map_path;
+    }
     return true;
 }
 

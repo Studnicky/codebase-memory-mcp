@@ -13,6 +13,8 @@
 /* Minimum length for an env var name (e.g., "DB"). */
 enum { MIN_ENV_NAME_LEN = 2 };
 
+enum { ENV_ACCESS_STACK_INITIAL_CAPACITY = 4096 };
+
 // Unquote a string literal: "foo" -> foo, 'foo' -> foo
 static const char *unquote(CBMArena *a, const char *s) {
     if (!s || !s[0]) {
@@ -140,7 +142,7 @@ static bool is_env_var_name(const char *s) {
 // Iterative env access walker — explicit stack
 static void walk_env_accesses(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec *spec) {
     TSNodeStack stack;
-    ts_nstack_init(&stack, ctx->arena, 4096);
+    ts_nstack_init(&stack, ctx->arena, ENV_ACCESS_STACK_INITIAL_CAPACITY);
     ts_nstack_push(&stack, ctx->arena, root);
 
     while (stack.count > 0) {

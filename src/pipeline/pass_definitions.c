@@ -13,7 +13,15 @@
 #include "discover/discover.h"
 #include "foundation/constants.h"
 
-enum { PD_RING = 4, PD_RING_MASK = 3, PD_JSON_MARGIN = 10, PD_ESC_MARGIN = 3, PD_ESC_SPACE = 2 };
+enum {
+    PD_RING = 4,
+    PD_RING_MASK = 3,
+    PD_JSON_MARGIN = 10,
+    PD_ESC_MARGIN = 3,
+    PD_ESC_SPACE = 2,
+    PD_JSON_CONTROL_LIMIT = 0x20,
+    PD_OVERSIZED_REASON_CAP = 96,
+};
 /* Fixed bytes around a serialized JSON field: ,"key":"value" / ,"key":[...]
  * -> comma + 2 key quotes + colon + 2 value quotes (resp. brackets). */
 enum { PD_JSON_FIELD_OVERHEAD = 6 };
@@ -138,7 +146,7 @@ static int def_json_escape_char(char *buf, size_t avail, char ch) {
         if (avail >= SKIP_ONE) {
             /* Any other raw control byte (e.g. form feed) is invalid inside a
              * JSON string — degrade to a space. */
-            buf[0] = ((unsigned char)ch < 0x20) ? ' ' : ch;
+            buf[0] = ((unsigned char)ch < PD_JSON_CONTROL_LIMIT) ? ' ' : ch;
         }
         return SKIP_ONE;
     }
@@ -512,8 +520,8 @@ static bool objectscript_export_append_strings(CBMArena *arena, const char ***ds
     while (src[add_count]) {
         add_count++;
     }
-    const char **items = (const char **)cbm_arena_alloc(arena, (size_t)(old_count + add_count + 1) *
-                                                                   sizeof(const char *));
+    const char **items = (const char **)cbm_arena_alloc(
+        arena, (size_t)(old_count + add_count + SKIP_ONE) * sizeof(const char *));
     if (!items) {
         return false;
     }
@@ -604,7 +612,7 @@ CBMFileResult *cbm_pipeline_extract_objectscript_export(
         return NULL;
     }
 
-    CBMFileResult *aggregate = (CBMFileResult *)calloc(1, sizeof(CBMFileResult));
+    CBMFileResult *aggregate = (CBMFileResult *)calloc(SKIP_ONE, sizeof(CBMFileResult));
     if (!aggregate) {
         cbm_arena_destroy(&export_arena);
         return NULL;
@@ -764,7 +772,7 @@ int cbm_pipeline_pass_definitions(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t
                  * file surfaces in the response/logfile with its sizes. */
                 long cap = cbm_max_file_bytes();
                 const long bytes_per_mb = (long)CBM_SZ_1K * CBM_SZ_1K;
-                char reason[96];
+                char reason[PD_OVERSIZED_REASON_CAP];
                 snprintf(reason, sizeof(reason), "oversized (%lld MB > %lld MB)",
                          (long long)(file_size / bytes_per_mb), (long long)(cap / bytes_per_mb));
                 cbm_pipeline_add_file_error(ctx->pipeline, rel, reason, "oversized");

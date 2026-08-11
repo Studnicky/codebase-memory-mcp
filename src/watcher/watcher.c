@@ -655,7 +655,13 @@ static watcher_git_status_t git_dirty_signature(cbm_watcher_t *w, project_state_
     }
 #endif
 
-    *signature_out = any ? (h ? h : 1) : 0; /* reserve 0 for "clean" */
+    *signature_out = 0; /* reserve 0 for "clean" */
+    if (any) {
+        *signature_out = h;
+        if (*signature_out == 0) {
+            *signature_out = 1;
+        }
+    }
     return WATCHER_GIT_OK;
 }
 
