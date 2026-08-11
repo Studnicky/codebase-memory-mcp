@@ -39,7 +39,7 @@
 
 #define JL_MAX_DEPTH 64U
 #define JL_MAX_KEY_BYTES 4096U
-#define JL_MAX_FILE_BYTES (16U * 1024U * 1024U)
+#define JL_MAX_FILE_BYTES ((size_t)16U * 1024U * 1024U)
 
 static atomic_uint jl_temp_sequence = ATOMIC_VAR_INIT(0);
 #ifdef CBM_JSON_LIKE_ENABLE_TEST_API

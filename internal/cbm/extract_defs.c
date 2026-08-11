@@ -590,7 +590,6 @@ static TSNode find_first_descendant_by_kind(TSNode node,
 
 // Forward declaration for mutual recursion. Exported (see helpers.h) so the
 // unified/calls extractor shares this one resolver — see cbm_resolve_func_name.
-TSNode cbm_resolve_func_name(TSNode node, CBMLanguage lang);
 
 static bool is_cpp_template_inner_kind(const char *kind) {
     return strcmp(kind, "function_definition") == 0 || strcmp(kind, "declaration") == 0 ||
@@ -1218,8 +1217,9 @@ static char *extract_comment_text(CBMArena *a, TSNode node, const char *source) 
     char *text = cbm_node_text(a, node, source);
     if (text && strlen(text) > MAX_COMMENT_LEN) {
         size_t cut = MAX_COMMENT_LEN;
-        while (cut > 0 && ((unsigned char)text[cut] & 0xC0) == 0x80)
+        while (cut > 0 && ((unsigned char)text[cut] & 0xC0) == 0x80) {
             cut--;
+        }
         text[cut] = '\0';
     }
     return text;
@@ -1436,11 +1436,13 @@ static TSNode find_drf_kwarg_in_args(CBMArena *a, TSNode args, const char *kwarg
     uint32_t nc = ts_node_named_child_count(args);
     for (uint32_t ai = 0; ai < nc; ai++) {
         TSNode child = ts_node_named_child(args, ai);
-        if (strcmp(ts_node_type(child), "keyword_argument") != 0)
+        if (strcmp(ts_node_type(child), "keyword_argument") != 0) {
             continue;
+        }
         TSNode name_node = ts_node_child_by_field_name(child, TS_FIELD("name"));
-        if (ts_node_is_null(name_node))
+        if (ts_node_is_null(name_node)) {
             continue;
+        }
         char *name = cbm_node_text(a, name_node, source);
         if (name && strcmp(name, kwarg_name) == 0) {
             return ts_node_child_by_field_name(child, TS_FIELD("value"));
@@ -1486,23 +1488,28 @@ static bool try_drf_action_decorator(CBMArena *a, TSNode dchild, const char *sou
         uint32_t mc = ts_node_named_child_count(methods_val);
         for (uint32_t mi = 0; mi < mc && !method; mi++) {
             TSNode item = ts_node_named_child(methods_val, mi);
-            if (strcmp(ts_node_type(item), "string") != 0)
+            if (strcmp(ts_node_type(item), "string") != 0) {
                 continue;
+            }
             char *text = cbm_node_text(a, item, source);
-            if (!text)
+            if (!text) {
                 continue;
+            }
             int tlen = (int)strlen(text);
-            if (tlen < PAIR_CHARS || (text[0] != '"' && text[0] != '\''))
+            if (tlen < PAIR_CHARS || (text[0] != '"' && text[0] != '\'')) {
                 continue;
+            }
             char inner[CBM_SZ_16];
             int ilen = tlen - PAIR_CHARS;
-            if (ilen <= 0 || ilen >= (int)sizeof(inner))
+            if (ilen <= 0 || ilen >= (int)sizeof(inner)) {
                 continue;
+            }
             memcpy(inner, text + SKIP_CHAR, (size_t)ilen);
             inner[ilen] = '\0';
             for (int ci = 0; inner[ci]; ci++) {
-                if (inner[ci] >= 'a' && inner[ci] <= 'z')
+                if (inner[ci] >= 'a' && inner[ci] <= 'z') {
                     inner[ci] -= 32;
+                }
             }
             method = cbm_arena_strdup(a, inner);
         }
@@ -6395,7 +6402,9 @@ static void extract_class_fields(CBMExtractCtx *ctx, TSNode class_node, const ch
                                               {NULL, NULL}};
                                     bool first = true;
                                     for (int ki = 0; kv[ki].tag; ki++) {
-                                        char open[64], close[64], buf[256];
+                                        char open[64];
+                                        char close[64];
+                                        char buf[256];
                                         snprintf(open, sizeof(open), "<%s>", kv[ki].tag);
                                         snprintf(close, sizeof(close), "</%s>", kv[ki].tag);
                                         const char *s = strstr(xml, open);

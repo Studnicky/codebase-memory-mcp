@@ -7,10 +7,6 @@
 #include "foundation/constants.h"
 #include "foundation/compat_thread.h"
 
-#include "foundation/platform.h"
-
-#include <mimalloc.h> /* mi_thread_done at thread exit */
-
 #include <pthread.h>
 #include <stdlib.h>
 

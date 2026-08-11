@@ -26,7 +26,6 @@
 #include "foundation/compat_fs.h"
 #include "foundation/constants.h"
 #include "foundation/log.h"
-#include "foundation/platform.h"
 
 #include <stdbool.h>
 #include <stddef.h>

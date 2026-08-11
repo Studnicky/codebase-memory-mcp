@@ -14,12 +14,13 @@
 #include "foundation/platform.h"
 
 #include <ctype.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define AGENT_ENTRY_KEY "codebase-memory-mcp"
-#define AGENT_MAX_CONFIG_BYTES (8U * 1024U * 1024U)
+#define AGENT_MAX_CONFIG_BYTES ((size_t)8U * 1024U * 1024U)
 #define AGENT_JSON_MAX_DEPTH 64U
 
 static int agent_install_callback(cbm_agent_client_id_t id, const char *config_path,
@@ -466,10 +467,11 @@ int cbm_agent_client_resolve_path(cbm_agent_client_id_t id,
                             ".rovodev/mcp_config.json") != 0) {
             return -1;
         }
-        const char *selected =
-            agent_path_exists(options, dedicated_path)
-                ? dedicated_path
-                : (agent_path_exists(options, reference_path) ? reference_path : dedicated_path);
+        const char *selected = dedicated_path;
+        if (!agent_path_exists(options, dedicated_path) &&
+            agent_path_exists(options, reference_path)) {
+            selected = reference_path;
+        }
         int written = snprintf(path_out, path_out_size, "%s", selected);
         return written >= 0 && (size_t)written < path_out_size ? 0 : -1;
     }
@@ -544,13 +546,14 @@ int cbm_agent_client_resolve_path(cbm_agent_client_id_t id,
                             ".aws/amazonq/mcp.json") != 0) {
             return -1;
         }
-        const char *selected =
-            agent_path_exists(options, recommended_path)
-                ? recommended_path
-                : (agent_path_exists(options, overview_path)
-                       ? overview_path
-                       : (agent_path_exists(options, legacy_mcp_path) ? legacy_mcp_path
-                                                                      : recommended_path));
+        const char *selected = recommended_path;
+        if (!agent_path_exists(options, recommended_path)) {
+            if (agent_path_exists(options, overview_path)) {
+                selected = overview_path;
+            } else if (agent_path_exists(options, legacy_mcp_path)) {
+                selected = legacy_mcp_path;
+            }
+        }
         int written = snprintf(path_out, path_out_size, "%s", selected);
         return written >= 0 && (size_t)written < path_out_size ? 0 : -1;
     }
@@ -565,12 +568,14 @@ int cbm_agent_client_resolve_path(cbm_agent_client_id_t id,
             agent_join_path(legacy, sizeof(legacy), options->home_dir, ".codebuddy.json") != 0) {
             return -1;
         }
-        const char *selected =
-            agent_path_exists(options, recommended)
-                ? recommended
-                : (agent_path_exists(options, deprecated)
-                       ? deprecated
-                       : (agent_path_exists(options, legacy) ? legacy : recommended));
+        const char *selected = recommended;
+        if (!agent_path_exists(options, recommended)) {
+            if (agent_path_exists(options, deprecated)) {
+                selected = deprecated;
+            } else if (agent_path_exists(options, legacy)) {
+                selected = legacy;
+            }
+        }
         int written = snprintf(path_out, path_out_size, "%s", selected);
         return written >= 0 && (size_t)written < path_out_size ? 0 : -1;
     }
@@ -889,11 +894,11 @@ static bool agent_json_key_equals(const char *data, size_t start, size_t end, co
                 for (size_t i = 0U; i < digits; i++) {
                     unsigned char digit = (unsigned char)data[cursor++];
                     if (digit >= '0' && digit <= '9') {
-                        value = value * 16U + (unsigned)(digit - '0');
+                        value = (value * 16U) + (unsigned)(digit - '0');
                     } else if (digit >= 'a' && digit <= 'f') {
-                        value = value * 16U + (unsigned)(digit - 'a' + 10U);
+                        value = (value * 16U) + (unsigned)(digit - 'a' + 10U);
                     } else if (digit >= 'A' && digit <= 'F') {
-                        value = value * 16U + (unsigned)(digit - 'A' + 10U);
+                        value = (value * 16U) + (unsigned)(digit - 'A' + 10U);
                     } else {
                         return false;
                     }
@@ -1018,7 +1023,7 @@ static char *agent_json_escape(const char *value) {
     if (length > (SIZE_MAX - 1U) / 6U) {
         return NULL;
     }
-    char *escaped = (char *)malloc(length * 6U + 1U);
+    char *escaped = (char *)malloc((length * 6U) + 1U);
     if (!escaped) {
         return NULL;
     }
@@ -1296,7 +1301,7 @@ static int agent_continue_edit(const char *config_path, const char *binary_path,
         return CBM_AGENT_EDIT_ERROR;
     }
     const char *eol = strstr(document, "\r\n") ? "\r\n" : "\n";
-    size_t canonical_size = strlen(quoted) + strlen(eol) * 3U + 96U;
+    size_t canonical_size = strlen(quoted) + (strlen(eol) * 3U) + 96U;
     char *canonical = (char *)malloc(canonical_size);
     if (!canonical) {
         free(quoted);

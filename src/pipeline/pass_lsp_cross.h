@@ -133,8 +133,9 @@ typedef struct {
  * if none was built (or language has no cross-LSP entrypoint). */
 static inline CBMTypeRegistry *cbm_pxc_registry_for_lang(const CBMCrossLspRegistries *r,
                                                          CBMLanguage lang) {
-    if (!r)
+    if (!r) {
         return NULL;
+    }
     switch (lang) {
     case CBM_LANG_GO:
         return r->go;

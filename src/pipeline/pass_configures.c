@@ -4,7 +4,7 @@
  * Pure helper functions for detecting environment variable names,
  * normalizing config keys, and identifying config file extensions.
  */
-#include "pipeline/pipeline.h"
+#include "foundation/constants.h"
 #include "pipeline/pipeline_internal.h"
 
 #include <ctype.h>

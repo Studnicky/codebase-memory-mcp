@@ -9,6 +9,7 @@
  *
  * Depends on: pass_definitions having populated the registry and graph buffer
  */
+#include "discover/discover.h"
 #include "foundation/constants.h"
 
 enum { PC_RING = 4, PC_RING_MASK = 3, PC_SIG_SCAN = 15, PC_REGEX_GRP = 2 };

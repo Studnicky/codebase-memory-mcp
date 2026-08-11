@@ -22,6 +22,7 @@
 
 #include <mimalloc.h>
 #include <stdatomic.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -50,7 +51,7 @@ enum {
     DIAG_STOP_TIMEOUT_MS = 500,
 };
 
-#define DIAG_NDJSON_CAP_BYTES (8u * 1024u * 1024u)
+#define DIAG_NDJSON_CAP_BYTES ((size_t)8U * 1024U * 1024U)
 #define DIAG_SNAPSHOT_NAME "snapshot.json"
 #define DIAG_SNAPSHOT_TMP_NAME "snapshot.json.tmp"
 #define DIAG_TRAJECTORY_NAME "trajectory.ndjson"

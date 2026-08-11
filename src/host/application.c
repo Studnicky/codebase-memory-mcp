@@ -2,6 +2,9 @@
  * application.c — Daemon-owned CBM application sessions and thin-client wire.
  */
 #include "host/application.h"
+#include "daemon/daemon.h"
+#include "daemon/runtime.h"
+#include "foundation/constants.h"
 #include "host/application_internal.h"
 
 #include "cli/cli.h"
@@ -17,6 +20,7 @@
 #include "mcp/mcp.h"
 #include "mcp/mcp_internal.h"
 #include "pipeline/pipeline.h"
+#include "store/store.h"
 #include "ui/config.h"
 #include "watcher/watcher.h"
 

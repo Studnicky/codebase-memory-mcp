@@ -2166,45 +2166,59 @@ static const char *kotlin_binary_operator_method(TSNode node) {
     if (kotlin_direct_unnamed_token(node, "==") || kotlin_direct_unnamed_token(node, "!=")) {
         return "equals";
     }
-    if (kotlin_direct_unnamed_token(node, "..<"))
+    if (kotlin_direct_unnamed_token(node, "..<")) {
         return "rangeUntil";
-    if (kotlin_direct_unnamed_token(node, ".."))
+    }
+    if (kotlin_direct_unnamed_token(node, "..")) {
         return "rangeTo";
+    }
     if (kotlin_direct_unnamed_token(node, "<=") || kotlin_direct_unnamed_token(node, ">=") ||
         kotlin_direct_unnamed_token(node, "<") || kotlin_direct_unnamed_token(node, ">")) {
         return "compareTo";
     }
-    if (kotlin_direct_unnamed_token(node, "+"))
+    if (kotlin_direct_unnamed_token(node, "+")) {
         return "plus";
-    if (kotlin_direct_unnamed_token(node, "-"))
+    }
+    if (kotlin_direct_unnamed_token(node, "-")) {
         return "minus";
-    if (kotlin_direct_unnamed_token(node, "*"))
+    }
+    if (kotlin_direct_unnamed_token(node, "*")) {
         return "times";
-    if (kotlin_direct_unnamed_token(node, "/"))
+    }
+    if (kotlin_direct_unnamed_token(node, "/")) {
         return "div";
-    if (kotlin_direct_unnamed_token(node, "%"))
+    }
+    if (kotlin_direct_unnamed_token(node, "%")) {
         return "rem";
+    }
     return NULL;
 }
 
 static const char *kotlin_unary_operator_method(TSNode node, const char *kind) {
     if (strcmp(kind, "postfix_expression") == 0) {
-        if (kotlin_direct_unnamed_token(node, "++"))
+        if (kotlin_direct_unnamed_token(node, "++")) {
             return "inc";
-        if (kotlin_direct_unnamed_token(node, "--"))
+        }
+        if (kotlin_direct_unnamed_token(node, "--")) {
             return "dec";
+        }
         return NULL; /* `!!` and call/navigation suffixes are not operator calls */
     }
-    if (kotlin_direct_unnamed_token(node, "++"))
+    if (kotlin_direct_unnamed_token(node, "++")) {
         return "inc";
-    if (kotlin_direct_unnamed_token(node, "--"))
+    }
+    if (kotlin_direct_unnamed_token(node, "--")) {
         return "dec";
-    if (kotlin_direct_unnamed_token(node, "!"))
+    }
+    if (kotlin_direct_unnamed_token(node, "!")) {
         return "not";
-    if (kotlin_direct_unnamed_token(node, "-"))
+    }
+    if (kotlin_direct_unnamed_token(node, "-")) {
         return "unaryMinus";
-    if (kotlin_direct_unnamed_token(node, "+"))
+    }
+    if (kotlin_direct_unnamed_token(node, "+")) {
         return "unaryPlus";
+    }
     return NULL;
 }
 
@@ -2273,8 +2287,9 @@ static bool kotlin_operator_call_matches(const CBMCall *existing, const char *ca
 
 static void push_kotlin_operator_call(CBMExtractCtx *ctx, TSNode node, const char *callee_name,
                                       const char *enclosing_func_qn) {
-    if (!callee_name || !callee_name[0])
+    if (!callee_name || !callee_name[0]) {
         return;
+    }
     uint32_t start = ts_node_start_byte(node);
     uint32_t end = ts_node_end_byte(node);
     /* Equal-span Kotlin grammar wrappers are visited consecutively by the
@@ -2310,13 +2325,15 @@ static void extract_kotlin_operator_call(CBMExtractCtx *ctx, TSNode node, const 
         strcmp(kind, "multiplicative_expression") == 0 ||
         strcmp(kind, "comparison_expression") == 0 || strcmp(kind, "equality_expression") == 0 ||
         strcmp(kind, "range_expression") == 0) {
-        if (ts_node_named_child_count(node) < 2)
+        if (ts_node_named_child_count(node) < 2) {
             return;
+        }
         op_method = kotlin_binary_operator_method(node);
     } else if (strcmp(kind, "unary_expression") == 0 || strcmp(kind, "prefix_expression") == 0 ||
                strcmp(kind, "postfix_expression") == 0) {
-        if (ts_node_named_child_count(node) < 1)
+        if (ts_node_named_child_count(node) < 1) {
             return;
+        }
         op_method = kotlin_unary_operator_method(node, kind);
     } else if (strcmp(kind, "in_expression") == 0 || strcmp(kind, "check_expression") == 0) {
         if (ts_node_named_child_count(node) < 2 ||
@@ -2327,8 +2344,9 @@ static void extract_kotlin_operator_call(CBMExtractCtx *ctx, TSNode node, const 
         }
         op_method = "contains";
     } else if (strcmp(kind, "index_expression") == 0 || strcmp(kind, "indexing_expression") == 0) {
-        if (ts_node_named_child_count(node) < 1 || kotlin_index_is_write_lhs(node))
+        if (ts_node_named_child_count(node) < 1 || kotlin_index_is_write_lhs(node)) {
             return;
+        }
         op_method = "get";
     } else {
         return;

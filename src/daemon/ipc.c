@@ -2,6 +2,7 @@
  * ipc.c — Authenticated, owner-scoped local transport for the CBM daemon.
  */
 #include "daemon/ipc.h"
+#include "daemon/daemon.h"
 #include "daemon/ipc_internal.h"
 
 #include "foundation/compat.h"
@@ -16,6 +17,7 @@
 #include <limits.h>
 #include <stdarg.h>
 #include <stdatomic.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -170,7 +172,7 @@ static bool windows_sid_valid(const uint8_t *sid, size_t sid_length) {
     };
     return sid && sid_length >= WINDOWS_SID_HEADER_SIZE && sid[0] == 1 &&
            sid[1] <= WINDOWS_SID_SUBAUTHORITY_MAX &&
-           sid_length == WINDOWS_SID_HEADER_SIZE + (size_t)sid[1] * WINDOWS_SID_SUBAUTHORITY_SIZE;
+           sid_length == WINDOWS_SID_HEADER_SIZE + ((size_t)sid[1] * WINDOWS_SID_SUBAUTHORITY_SIZE);
 }
 
 static bool windows_pipe_address_valid(const char *address) {
@@ -210,7 +212,7 @@ bool cbm_daemon_ipc_windows_generation_address(
     static const char hex[] = "0123456789abcdef";
     for (size_t index = 0; index < sizeof(digest); index++) {
         digest_hex[index * 2U] = hex[digest[index] >> 4U];
-        digest_hex[index * 2U + 1U] = hex[digest[index] & 0x0fU];
+        digest_hex[(index * 2U) + 1U] = hex[digest[index] & 0x0fU];
     }
     digest_hex[CBM_SHA256_HEX_LEN] = '\0';
     int written = snprintf(address_out, CBM_DAEMON_IPC_WINDOWS_NAME_CAP,
@@ -538,7 +540,7 @@ static uint64_t ipc_now_ms(void) {
     if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
         return 0;
     }
-    return (uint64_t)now.tv_sec * 1000U + (uint64_t)now.tv_nsec / 1000000U;
+    return ((uint64_t)now.tv_sec * 1000U) + ((uint64_t)now.tv_nsec / 1000000U);
 }
 
 static uint64_t ipc_deadline_after(uint32_t timeout_ms) {
@@ -3013,7 +3015,7 @@ uint64_t cbm_daemon_ipc_connection_peer_pid(const cbm_daemon_ipc_connection_t *c
     if (!connection || connection->fd < 0 || !socket_peer_is_current_user(connection->fd)) {
         return 0;
     }
-#if defined(__linux__)
+#ifdef __linux__
     struct ucred credentials;
     socklen_t length = sizeof(credentials);
     if (getsockopt(connection->fd, SOL_SOCKET, SO_PEERCRED, &credentials, &length) != 0 ||

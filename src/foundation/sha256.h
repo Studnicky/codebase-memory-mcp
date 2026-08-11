@@ -11,11 +11,14 @@
 
 #define CBM_SHA256_DIGEST_LEN 32 /* raw digest bytes */
 #define CBM_SHA256_HEX_LEN 64    /* lowercase hex chars (no NUL) */
+#define CBM_SHA256_STATE_WORDS 8
+#define CBM_SHA256_BLOCK_BYTES 64
+#define CBM_SHA256_HEX_CSTR_LEN (CBM_SHA256_HEX_LEN + 1)
 
 typedef struct {
-    uint32_t state[8];
+    uint32_t state[CBM_SHA256_STATE_WORDS];
     uint64_t bitlen;
-    uint8_t buf[64];
+    uint8_t buf[CBM_SHA256_BLOCK_BYTES];
     size_t buflen;
 } cbm_sha256_ctx;
 
@@ -25,6 +28,6 @@ void cbm_sha256_final(cbm_sha256_ctx *c, uint8_t out[CBM_SHA256_DIGEST_LEN]);
 
 /* One-shot hash of a buffer to lowercase hex. `out` must hold
  * CBM_SHA256_HEX_LEN + 1 bytes (hex chars + NUL). */
-void cbm_sha256_hex(const void *data, size_t len, char out[CBM_SHA256_HEX_LEN + 1]);
+void cbm_sha256_hex(const void *data, size_t len, char out[CBM_SHA256_HEX_CSTR_LEN]);
 
 #endif /* CBM_SHA256_H */

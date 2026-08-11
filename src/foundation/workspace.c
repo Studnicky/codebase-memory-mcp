@@ -4,7 +4,6 @@
  */
 #include "foundation/workspace.h"
 
-#include "foundation/compat.h"
 #include "foundation/constants.h"
 #include "foundation/compat_fs.h"
 #include "foundation/platform.h"

@@ -28,6 +28,7 @@
 #include "pipeline/pipeline_internal.h"
 
 #include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -95,7 +96,7 @@ int cbm_delta_snapshot_inbound(cbm_store_t *store, const char *project, const ch
         if (chunk > DELTA_IN_CHUNK) {
             chunk = DELTA_IN_CHUNK;
         }
-        char ph[2 * DELTA_IN_CHUNK + 1];
+        char ph[(2 * DELTA_IN_CHUNK) + 1];
         delta_placeholders(ph, chunk);
         char sql[CBM_SZ_4K];
         int n = snprintf(sql, sizeof(sql),
@@ -210,7 +211,7 @@ int cbm_delta_purge(cbm_store_t *store, const char *project, const char *const *
         if (chunk > DELTA_IN_CHUNK) {
             chunk = DELTA_IN_CHUNK;
         }
-        char ph[2 * DELTA_IN_CHUNK + 1];
+        char ph[(2 * DELTA_IN_CHUNK) + 1];
         delta_placeholders(ph, chunk);
         char sql[CBM_SZ_1K];
         int n = snprintf(sql, sizeof(sql),
@@ -375,7 +376,7 @@ static int64_t delta_remap_get(const delta_patch_ctx_t *ctx, int64_t id) {
     int lo = 0;
     int hi = ctx->remap_count - 1;
     while (lo <= hi) {
-        int mid = lo + (hi - lo) / 2;
+        int mid = lo + ((hi - lo) / 2);
         if (ctx->remap[mid].from == id) {
             return ctx->remap[mid].to;
         }

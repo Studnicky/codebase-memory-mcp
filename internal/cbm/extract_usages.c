@@ -1,3 +1,4 @@
+#include "arena.h"
 #include "cbm.h"
 #include "helpers.h"
 #include "lang_specs.h"
@@ -10,7 +11,6 @@ enum { LAST_IDX = 1 };
 #include <stdint.h> // uint32_t
 #include <stdlib.h> // qsort
 #include <string.h>
-#include <strings.h>
 #include <ctype.h>
 
 #if defined(CBM_CALL_REFERENCE_LOOKUP_TEST_API) && CBM_CALL_REFERENCE_LOOKUP_TEST_API
@@ -1274,21 +1274,24 @@ static bool is_call_argument_label(TSNode node) {
 
 static bool is_call_argument_label_walk(TSNode node, WalkState *state) {
     TSTreeCursor *cursor = reset_occurrence_cursor(state, node);
-    if (!cursor)
+    if (!cursor) {
         return is_call_argument_label(node);
+    }
     TSNode current = node;
     while (!ts_node_is_null(current)) {
         TSNode parent;
         const char *field;
-        if (!occurrence_parent(cursor, current, &parent, &field))
+        if (!occurrence_parent(cursor, current, &parent, &field)) {
             return false;
+        }
         const char *parent_kind = ts_node_type(parent);
         if (is_labeled_argument_kind(parent_kind)) {
             return field && (strcmp(field, "name") == 0 || strcmp(field, "label") == 0 ||
                              strcmp(field, "key") == 0);
         }
-        if (is_argument_container_kind(parent_kind))
+        if (is_argument_container_kind(parent_kind)) {
             return false;
+        }
         current = parent;
     }
     return false;
@@ -1335,19 +1338,23 @@ static bool is_direct_argument_value_cursor(TSNode node, TSTreeCursor *cursor) {
     while (!ts_node_is_null(current)) {
         TSNode parent;
         const char *field;
-        if (!occurrence_parent(cursor, current, &parent, &field))
+        if (!occurrence_parent(cursor, current, &parent, &field)) {
             return false;
+        }
         const char *parent_kind = ts_node_type(parent);
         if (is_labeled_argument_kind(parent_kind)) {
-            if (!field || strcmp(field, "value") != 0)
+            if (!field || strcmp(field, "value") != 0) {
                 return false;
+            }
             current = parent;
             continue;
         }
-        if (field && strcmp(field, "arguments") == 0)
+        if (field && strcmp(field, "arguments") == 0) {
             return true;
-        if (is_argument_container_kind(parent_kind))
+        }
+        if (is_argument_container_kind(parent_kind)) {
             return true;
+        }
         if (strcmp(parent_kind, "list_expression") == 0) {
             TSNode call;
             const char *list_field;
@@ -2282,7 +2289,7 @@ static int lexical_binding_lower_bound(const WalkState *state, uint32_t scope_id
     int low = 0;
     int high = state->lexical_binding_count;
     while (low < high) {
-        int middle = low + (high - low) / PAIR_LEN;
+        int middle = low + ((high - low) / PAIR_LEN);
         if (compare_binding_key(&state->lexical_bindings[middle], scope_id, name) < 0) {
             low = middle + 1;
         } else {

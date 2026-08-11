@@ -21,8 +21,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "foundation/log.h"
+#include "cbm.h"
+#include "discover/discover.h"
+#include "arena.h"
 #include "foundation/sha256.h"
+#include "store/store.h"
 #include "yyjson/yyjson.h"
 
 enum { SURFACE_CODEC_VERSION = 1 };

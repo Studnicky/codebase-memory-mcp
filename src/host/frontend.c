@@ -3,6 +3,7 @@
  */
 #include "host/frontend.h"
 
+#include "daemon/runtime.h"
 #include "host/application.h"
 #include "foundation/compat.h"
 #include "foundation/compat_thread.h"

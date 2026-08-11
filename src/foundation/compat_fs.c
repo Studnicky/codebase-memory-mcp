@@ -1026,7 +1026,7 @@ static bool resolve_from_path_env(const char *name, char *out, size_t outsz) {
 }
 
 static bool resolve_self_executable(char *out, size_t outsz) {
-#if defined(__APPLE__)
+#ifdef __APPLE__
     char buf[1024];
     uint32_t sz = sizeof(buf);
     if (_NSGetExecutablePath(buf, &sz) == 0 && buf[0]) {
@@ -1249,13 +1249,12 @@ int cbm_remove_db_sidecars(const char *db_path) {
 
 /* ── Clone-or-copy ───────────────────────────────────────────────── */
 
-#if defined(__APPLE__)
+#ifdef __APPLE__
 #include <sys/clonefile.h>
 #elif defined(__linux__)
 #include <linux/fs.h>
 #include <sys/ioctl.h>
 #endif
-#include <fcntl.h>
 
 static int stream_copy_file(const char *src, const char *dst) {
     FILE *in = cbm_fopen(src, "rb");
@@ -1293,7 +1292,7 @@ int cbm_clone_or_copy_file(const char *src, const char *dst) {
     if (!src || !dst) {
         return CBM_NOT_FOUND;
     }
-#if defined(__APPLE__)
+#ifdef __APPLE__
     /* clonefile refuses to overwrite; the staging name is freshly minted by
      * the caller, but clear any leftover defensively so the fast path is
      * never abandoned for a stale artifact. */

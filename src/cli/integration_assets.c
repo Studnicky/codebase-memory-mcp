@@ -7,7 +7,6 @@
  */
 #include "cli/integration_assets.h"
 
-#include "foundation/compat.h"
 #include "foundation/compat_fs.h"
 #include "foundation/constants.h"
 #include "foundation/platform.h"
@@ -17,12 +16,10 @@
 #include "cbm_integrations_hash.h"
 
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
-#ifndef _WIN32
-#include <unistd.h>
-#endif
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
 #endif

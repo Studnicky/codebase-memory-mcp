@@ -8,11 +8,10 @@
 #include "semantic/semantic.h"
 #include "foundation/constants.h"
 #include "foundation/hash_table.h"
-#include "foundation/log.h"
-#include "foundation/profile.h"
 #include "foundation/platform.h"
 #include "foundation/compat_thread.h"
 #include "foundation/worker_pool.h"
+#include "semantic/rotsq.h"
 #include "simhash/minhash.h"
 #include "nomic/code_vectors.h"
 

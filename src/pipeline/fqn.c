@@ -390,10 +390,10 @@ static char *fqn_bound_name_len(char *name) {
     if (n <= FQN_MAX_NAME_LEN) {
         return name; /* within cap → unchanged, no drift */
     }
-    uint32_t h = 2166136261u; /* FNV-1a offset basis over the FULL name */
+    uint32_t h = 2166136261U; /* FNV-1a offset basis over the FULL name */
     for (size_t i = 0; i < n; i++) {
         h ^= (unsigned char)name[i];
-        h *= 16777619u;
+        h *= 16777619U;
     }
     /* Keep first (CAP-9) bytes + "-" + 8 hex = CAP total. The buffer holds n+1
      * bytes and n > CAP, so writing 9 chars + NUL at offset (CAP-9) fits. */
@@ -454,7 +454,7 @@ char *cbm_project_name_from_path(const char *abs_path) {
      * transliterated to its two lowercase hex digits, which use only [0-9a-f]
      * and therefore stay validator-safe while preserving the segment. */
     static const char hex_digits[] = "0123456789abcdef";
-    char *mapped = malloc(len * 2 + 1); /* worst case: every byte → 2 hex chars */
+    char *mapped = malloc((len * 2) + 1); /* worst case: every byte → 2 hex chars */
     if (!mapped) {
         free(path);
         return strdup("root");

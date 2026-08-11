@@ -38,7 +38,7 @@
 #define TEXT_OK 0
 #define TEXT_ERROR (-1)
 #define TEXT_UNOWNED 1
-#define TEXT_MAX_BYTES (16U * 1024U * 1024U)
+#define TEXT_MAX_BYTES ((size_t)16U * 1024U * 1024U)
 #define TEXT_MAX_PATH_BYTES 32768U
 #define TEXT_MAX_MARKER_BYTES 4096U
 #define TEXT_TEMP_SUFFIX_BYTES 80U
@@ -677,9 +677,12 @@ static int text_write_atomic_mode(const char *path, const char *new_data, size_t
         fchown(cbm_fileno(file), snapshot->owner, snapshot->group) != 0) {
         failed = 1;
     }
-    mode_t mode = override_mode      ? (mode_t)(requested_mode & 0777U)
-                  : snapshot->exists ? snapshot->mode & 0777U
-                                     : 0600U;
+    mode_t mode = 0600U;
+    if (override_mode) {
+        mode = (mode_t)(requested_mode & 0777U);
+    } else if (snapshot->exists) {
+        mode = snapshot->mode & 0777U;
+    }
     if (!failed && fchmod(cbm_fileno(file), mode) != 0) {
         failed = 1;
     }

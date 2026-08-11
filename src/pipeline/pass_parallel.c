@@ -10,6 +10,7 @@
  *
  * Depends on: worker_pool, graph_buffer (shared IDs + merge), extraction (cbm.h)
  */
+#include "discover/discover.h"
 #include "foundation/constants.h"
 
 enum {
@@ -820,16 +821,16 @@ static void extract_worker(int worker_id, void *ctx_ptr) {
                 /* Never a silent drop: record the oversized skip + a throttled
                  * WARN so the file surfaces in the response/logfile. */
                 long cap = cbm_max_file_bytes();
+                const long bytes_per_mb = (long)CBM_SZ_1K * CBM_SZ_1K;
                 char reason[96];
                 snprintf(reason, sizeof(reason), "oversized (%lld MB > %lld MB)",
-                         (long long)(file_size / (CBM_SZ_1K * CBM_SZ_1K)),
-                         (long long)(cap / (CBM_SZ_1K * CBM_SZ_1K)));
+                         (long long)(file_size / bytes_per_mb), (long long)(cap / bytes_per_mb));
                 pp_err_add(errs, fi->rel_path, reason, "oversized");
                 if (atomic_fetch_add_explicit(&ec->oversized_warned, SKIP_ONE,
                                               memory_order_relaxed) < PP_OVERSIZED_WARN_MAX) {
                     cbm_log_warn("index.file_oversized", "path", fi->rel_path, "size_mb",
-                                 itoa_log((int)(file_size / (CBM_SZ_1K * CBM_SZ_1K))), "cap_mb",
-                                 itoa_log((int)(cap / (CBM_SZ_1K * CBM_SZ_1K))));
+                                 itoa_log((int)(file_size / bytes_per_mb)), "cap_mb",
+                                 itoa_log((int)(cap / bytes_per_mb)));
                 }
             } else if (rst == CBM_READ_OPEN_FAIL || rst == CBM_READ_OOM) {
                 pp_err_add(errs, fi->rel_path, "read failed", "read");
@@ -2306,7 +2307,7 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
     bool lsp_legacy_idx_complete = true;
     bool allow_tail = cbm_pipeline_lsp_allow_tail_match(lang);
     if (result->calls.count > 0 && result->resolved_calls.count > 0) {
-        uint32_t capacity = (uint32_t)result->resolved_calls.count * 2u + 16u;
+        uint32_t capacity = ((uint32_t)result->resolved_calls.count * 2U) + 16U;
         lsp_exact_idx = cbm_ht_create(capacity);
         lsp_legacy_idx = cbm_ht_create(capacity);
         if (!lsp_exact_idx) {
@@ -2881,10 +2882,12 @@ static void resolve_file_semantic(resolve_ctx_t *rc, resolve_worker_state_t *ws,
  * Returns NULL if there are no defs (caller falls back to the per-file build). */
 static CBMTypeRegistry *pp_rust_shared_registry(resolve_ctx_t *rc) {
     CBMTypeRegistry *p = atomic_load_explicit(&rc->rust_shared_reg, memory_order_acquire);
-    if (p)
+    if (p) {
         return p;
-    if (!rc->all_defs || rc->def_count <= 0)
+    }
+    if (!rc->all_defs || rc->def_count <= 0) {
         return NULL;
+    }
     cbm_mutex_lock(&rc->rust_shared_mu);
     p = atomic_load_explicit(&rc->rust_shared_reg, memory_order_relaxed);
     if (!p) {
@@ -2908,7 +2911,7 @@ static CBMTypeRegistry *pp_rust_shared_registry_get(void *ctx) {
     return pp_rust_shared_registry((resolve_ctx_t *)ctx);
 }
 
-static int pp_call_reference_site_count(const CBMFileResult *result, CBMLanguage lang) {
+static int pp_call_reference_site_count(const CBMFileResult *result) {
     int count = 0;
     for (int i = 0; i < result->usages.count; i++) {
         if (cbm_pipeline_usage_semantic_reference_candidate(&result->usages.items[i])) {
@@ -3025,7 +3028,7 @@ static void resolve_worker(int worker_id, void *ctx_ptr) {
          * a mixed-source-root Java↔Kotlin site remains unresolved, so JVM
          * callers run whenever either kind of site exists. */
         bool jvm_cross_lsp = (lang == CBM_LANG_JAVA || lang == CBM_LANG_KOTLIN);
-        int call_reference_sites = pp_call_reference_site_count(result, lang);
+        int call_reference_sites = pp_call_reference_site_count(result);
         int semantic_sites = result->calls.count + call_reference_sites;
         int qualified_lsp_sites = pp_qualified_lsp_site_count(result);
         bool pending_lsp_site = pp_has_pending_lsp_site(result);
@@ -3322,7 +3325,8 @@ int cbm_parallel_resolve(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, 
      * Split into multiple log lines because itoa_log uses a 4-slot TLS
      * ring buffer — more than 4 values per log_info call would alias
      * each other (we hit that bug in the first profiling run). */
-    char loop_buf[32], visits_buf[32];
+    char loop_buf[32];
+    char visits_buf[32];
     snprintf(
         loop_buf, sizeof(loop_buf), "%llu",
         (unsigned long long)(atomic_load_explicit(&rc.time_ns_total_loop, memory_order_relaxed) /
@@ -3332,7 +3336,9 @@ int cbm_parallel_resolve(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, 
     cbm_log_info("parallel.resolve.phase_summary", "total_loop_cpu_ms", loop_buf, "files_visited",
                  visits_buf);
 
-    char imp_buf[32], xls_buf[32], cal_buf[32];
+    char imp_buf[32];
+    char xls_buf[32];
+    char cal_buf[32];
     snprintf(
         imp_buf, sizeof(imp_buf), "%llu",
         (unsigned long long)(atomic_load_explicit(&rc.time_ns_import_map, memory_order_relaxed) /
@@ -3347,7 +3353,10 @@ int cbm_parallel_resolve(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, 
     cbm_log_info("parallel.resolve.phase_ms_a", "import_map", imp_buf, "cross_lsp", xls_buf,
                  "resolve_calls", cal_buf);
 
-    char use_buf[32], thr_buf[32], rw_buf[32], sem_buf[32];
+    char use_buf[32];
+    char thr_buf[32];
+    char rw_buf[32];
+    char sem_buf[32];
     snprintf(use_buf, sizeof(use_buf), "%llu",
              (unsigned long long)(atomic_load_explicit(&rc.time_ns_usages, memory_order_relaxed) /
                                   1000000ULL));
@@ -3363,7 +3372,12 @@ int cbm_parallel_resolve(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, 
     cbm_log_info("parallel.resolve.phase_ms_b", "resolve_usages", use_buf, "resolve_throws",
                  thr_buf, "resolve_rw", rw_buf, "resolve_semantic", sem_buf);
 
-    char src_buf[32], lsp_buf[32], rsv_buf[32], hnt_buf[32], tgt_buf[32], emt_buf[32];
+    char src_buf[32];
+    char lsp_buf[32];
+    char rsv_buf[32];
+    char hnt_buf[32];
+    char tgt_buf[32];
+    char emt_buf[32];
     snprintf(
         src_buf, sizeof(src_buf), "%llu",
         (unsigned long long)(atomic_load_explicit(&rc.time_ns_rc_source, memory_order_relaxed) /

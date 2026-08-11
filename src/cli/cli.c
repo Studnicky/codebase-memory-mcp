@@ -15,6 +15,7 @@
 #include "daemon/bootstrap.h"
 #include "daemon/ipc.h"
 #include "daemon/runtime.h"
+#include "daemon/service.h"
 #include "daemon/version_cohort.h"
 #include "foundation/compat.h"
 #include "foundation/platform.h"
@@ -113,7 +114,6 @@ static int cbm_powershell_quote_word(const char *value, char *out, size_t out_si
  * field is non-const and every input pointer needs its qualifier removed
  * to assign it. Must precede <zlib.h>. */
 #define ZLIB_CONST
-#include <zlib.h> // MAX_WBITS
 #ifdef _WIN32
 #include <io.h>
 #include "foundation/win_utf8.h"
@@ -711,15 +711,15 @@ static int cli_activation_guard(cbm_daemon_runtime_activation_action_t action,
                                   "record could not be written.\n");
         }
     } else {
-        (void)cli_activation_log_event(
-            &context, "failed",
-            context.mutation_authorized
-                ? (rc == CLI_ACTIVATION_PARTIAL
-                       ? "published/current binary retained; agent "
-                         "configuration refresh or cleanup incomplete"
-                       : "activation mutation failed; filesystem writes may "
-                         "have completed")
-                : "cohort drain or coordination failed");
+        const char *activation_detail = "cohort drain or coordination failed";
+        if (context.mutation_authorized) {
+            activation_detail = rc == CLI_ACTIVATION_PARTIAL
+                                    ? "published/current binary retained; agent "
+                                      "configuration refresh or cleanup incomplete"
+                                    : "activation mutation failed; filesystem writes may "
+                                      "have completed";
+        }
+        (void)cli_activation_log_event(&context, "failed", activation_detail);
     }
     cli_activation_production_context_close(&context);
     if (!context.cleanup_ok) {
@@ -6446,7 +6446,7 @@ static bool prompt_yn(const char *question) {
 /* SHA-256 hex digest: 64 hex chars + NUL */
 #define SHA256_HEX_LEN CBM_SZ_64
 #define SHA256_BUF_SIZE (SHA256_HEX_LEN + CLI_SKIP_ONE)
-#define CHECKSUM_MANIFEST_MAX_BYTES (64U * CLI_BUF_1K)
+#define CHECKSUM_MANIFEST_MAX_BYTES ((size_t)64U * CLI_BUF_1K)
 
 /* Compute the SHA-256 of a file in-process (no external hashing tool — those
  * differ per OS, may be absent, and mis-quote paths under cmd.exe). Writes a
@@ -6475,9 +6475,9 @@ int cbm_cli_sha256_file(const char *path, char *out, size_t out_size) {
     uint8_t digest[CBM_SHA256_DIGEST_LEN];
     cbm_sha256_final(&ctx, digest);
     static const char hex[] = "0123456789abcdef";
-    for (int i = 0; i < CBM_SHA256_DIGEST_LEN; i++) {
+    for (size_t i = 0; i < CBM_SHA256_DIGEST_LEN; i++) {
         out[i * 2] = hex[digest[i] >> 4];
-        out[i * 2 + 1] = hex[digest[i] & 0x0f];
+        out[(i * 2) + 1] = hex[digest[i] & 0x0f];
     }
     out[SHA256_HEX_LEN] = '\0';
     return 0;
@@ -7262,7 +7262,7 @@ static cbm_graph_access_t cbm_tiered_profile_set_access(cbm_tiered_profile_set_t
 
 static void install_tiered_agent_profiles(cbm_tiered_profile_set_t profiles, bool dry_run) {
     cbm_graph_access_t access = cbm_tiered_profile_set_access(profiles);
-    for (int value = 0; value < (int)CBM_GRAPH_TIER_COUNT; value++) {
+    for (int value = 0; value < CBM_GRAPH_TIER_COUNT; value++) {
         cbm_graph_tier_t tier = (cbm_graph_tier_t)value;
         char path[CLI_BUF_1K];
         if (cbm_tiered_profile_path(profiles.verify_path, tier, path, sizeof(path)) != CLI_OK) {
@@ -7321,7 +7321,7 @@ static void install_tiered_agent_profiles(cbm_tiered_profile_set_t profiles, boo
 
 static void uninstall_tiered_agent_profiles(cbm_tiered_profile_set_t profiles, bool dry_run) {
     cbm_graph_access_t access = cbm_tiered_profile_set_access(profiles);
-    for (int value = 0; value < (int)CBM_GRAPH_TIER_COUNT; value++) {
+    for (int value = 0; value < CBM_GRAPH_TIER_COUNT; value++) {
         cbm_graph_tier_t tier = (cbm_graph_tier_t)value;
         char path[CLI_BUF_1K];
         if (cbm_tiered_profile_path(profiles.verify_path, tier, path, sizeof(path)) != CLI_OK) {
@@ -7375,7 +7375,7 @@ static void install_tiered_profile_prompts(const char *label, const char *verify
                                            cbm_graph_profile_dialect_t dialect,
                                            const char *legacy_verify_content, bool dry_run) {
     cbm_graph_access_t access = cbm_tiered_profile_access(dialect);
-    for (int value = 0; value < (int)CBM_GRAPH_TIER_COUNT; value++) {
+    for (int value = 0; value < CBM_GRAPH_TIER_COUNT; value++) {
         cbm_graph_tier_t tier = (cbm_graph_tier_t)value;
         char path[CLI_BUF_1K];
         if (cbm_tiered_profile_path(verify_path, tier, path, sizeof(path)) != CLI_OK) {
@@ -7416,7 +7416,7 @@ static void uninstall_tiered_profile_prompts(const char *label, const char *veri
                                              cbm_graph_profile_dialect_t dialect,
                                              const char *legacy_verify_content, bool dry_run) {
     cbm_graph_access_t access = cbm_tiered_profile_access(dialect);
-    for (int value = 0; value < (int)CBM_GRAPH_TIER_COUNT; value++) {
+    for (int value = 0; value < CBM_GRAPH_TIER_COUNT; value++) {
         cbm_graph_tier_t tier = (cbm_graph_tier_t)value;
         char path[CLI_BUF_1K];
         if (cbm_tiered_profile_path(verify_path, tier, path, sizeof(path)) != CLI_OK) {
@@ -9707,12 +9707,15 @@ static void uninstall_qoder_durable_context(const char *home, const char *binary
         cleanup_ok = false;
         record_agent_config_error(true, "Qoder CLI", "context_hook_uninstall", settings_path);
     }
-    const char *hook_status = !config_resolved ? "skipped because the settings path was unresolved"
-                              : dry_run        ? "canonical lifecycle/read cleanup planned"
-                              : cleanup_ok
-                                  ? "canonical lifecycle/read cleanup complete; modified or "
-                                    "foreign entries preserved"
-                                  : "canonical lifecycle/read cleanup failed";
+    const char *hook_status = "canonical lifecycle/read cleanup failed";
+    if (!config_resolved) {
+        hook_status = "skipped because the settings path was unresolved";
+    } else if (dry_run) {
+        hook_status = "canonical lifecycle/read cleanup planned";
+    } else if (cleanup_ok) {
+        hook_status = "canonical lifecycle/read cleanup complete; modified or foreign entries "
+                      "preserved";
+    }
     printf("  hook: %s\n", hook_status);
     uninstall_agent_skill("Qoder CLI", skills_dir, dry_run);
     uninstall_tiered_agent_profiles(
@@ -9758,12 +9761,15 @@ static void uninstall_devin_durable_context(const cbm_agent_registry_context_t *
         record_agent_config_error(true, "Devin CLI / Local", "lifecycle_hook_uninstall",
                                   config_path);
     }
-    const char *hook_status = !config_resolved ? "skipped because the config path was unresolved"
-                              : dry_run        ? "canonical lifecycle cleanup planned"
-                              : cleanup_ok
-                                  ? "canonical lifecycle cleanup complete; modified or foreign "
-                                    "entries preserved"
-                                  : "canonical lifecycle cleanup failed";
+    const char *hook_status = "canonical lifecycle cleanup failed";
+    if (!config_resolved) {
+        hook_status = "skipped because the config path was unresolved";
+    } else if (dry_run) {
+        hook_status = "canonical lifecycle cleanup planned";
+    } else if (cleanup_ok) {
+        hook_status = "canonical lifecycle cleanup complete; modified or foreign entries "
+                      "preserved";
+    }
     printf("  hooks: %s\n", hook_status);
     uninstall_managed_agent_instructions("Devin CLI / Local", instructions_path, dry_run);
     uninstall_agent_skill("Devin CLI / Local", skills_dir, dry_run);

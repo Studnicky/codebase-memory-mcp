@@ -289,17 +289,21 @@ bool cbm_validate_shell_path_arg(const char *path) {
 }
 
 bool cbm_validate_project_name(const char *name) {
-    if (!name || !*name)
+    if (!name || !*name) {
         return false;
+    }
     /* Reject directory traversal */
-    if (strcmp(name, "..") == 0 || strstr(name, "..") != NULL)
+    if (strcmp(name, "..") == 0 || strstr(name, "..") != NULL) {
         return false;
+    }
     /* Reject path separators */
-    if (strchr(name, '/') || strchr(name, '\\'))
+    if (strchr(name, '/') || strchr(name, '\\')) {
         return false;
+    }
     /* Reject leading dot (hidden files / relative refs) */
-    if (name[0] == '.')
+    if (name[0] == '.') {
         return false;
+    }
     /* Allow only alphanumeric, dash, underscore, dot */
     for (const char *p = name; *p; p++) {
         if (!(((*p >= 'a') && (*p <= 'z')) || ((*p >= 'A') && (*p <= 'Z')) ||

@@ -19,7 +19,6 @@
 #include "cli/cli.h"
 #include "foundation/compat_fs.h"
 #include "foundation/constants.h"
-#include "foundation/mem.h"
 #include "mcp/mcp.h"
 #include "pipeline/pipeline.h"
 #include "yyjson/yyjson.h"
@@ -40,8 +39,8 @@
 #include <windows.h>
 #endif
 
-#define HA_STDIN_CAP (256 * 1024) /* hook payloads are tiny; cap defensively */
-#define HA_MIN_TOKEN 4            /* skip short/noisy patterns before any work */
+#define HA_STDIN_CAP ((size_t)256U * 1024U) /* hook payloads are tiny; cap defensively */
+#define HA_MIN_TOKEN 4                      /* skip short/noisy patterns before any work */
 #define HA_MAX_TOKEN 96
 #define HA_RESULT_LIMIT 5
 #define HA_METADATA_CAP 192

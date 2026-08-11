@@ -11,6 +11,7 @@
  *
  * Depends on: pass_definitions having populated the registry and graph buffer
  */
+#include "discover/discover.h"
 #include "foundation/constants.h"
 #include "pipeline/pipeline.h"
 #include <stdint.h>

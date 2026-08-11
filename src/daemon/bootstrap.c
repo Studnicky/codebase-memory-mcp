@@ -3,7 +3,9 @@
  */
 #include "daemon/bootstrap.h"
 
+#include "daemon/daemon.h"
 #include "daemon/ipc.h"
+#include "daemon/runtime.h"
 #include "daemon/service.h"
 #include "foundation/compat.h"
 #include "foundation/platform.h"
@@ -13,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -90,7 +93,7 @@ static bool bootstrap_worker_budget_valid(const char *text) {
         if (value > (SIZE_MAX - digit) / 10U) {
             return false;
         }
-        value = value * 10U + digit;
+        value = (value * 10U) + digit;
     }
     return value > 0;
 }

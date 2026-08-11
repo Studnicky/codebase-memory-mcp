@@ -10,6 +10,7 @@
  *   6. Post-passes: tests, communities, HTTP links, git history
  *   7. Dump graph buffer to SQLite
  */
+#include "cbm.h"
 #include "foundation/constants.h"
 
 enum { CBM_DIR_PERMS = 0755, PL_RING = 4, PL_RING_MASK = 3, PL_SEQ_PASSES = 6 };
@@ -1012,8 +1013,9 @@ static void run_predump_passes(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx) {
  * no extracted results to feed cross-file resolution. */
 static int seq_pass_lsp_cross_dispatch(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files,
                                        int file_count) {
-    if (!ctx || !ctx->result_cache)
+    if (!ctx || !ctx->result_cache) {
         return 0;
+    }
     /* Cross-file LSP runs in every mode. */
     return cbm_pipeline_pass_lsp_cross(ctx, files, file_count, ctx->result_cache);
 }
@@ -1222,7 +1224,7 @@ static int run_parallel_pipeline(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
      * memory-pressure threshold and got it SIGKILLed at registry entry. */
     cbm_mem_collect();
     cbm_log_info("mem.collect", "phase", "post_extract", "rss_mb",
-                 itoa_buf((int)(cbm_mem_rss() / (1024 * 1024))));
+                 itoa_buf((int)(cbm_mem_rss() / ((size_t)1024U * 1024U))));
     cbm_clock_gettime(CLOCK_MONOTONIC, t);
     rc = cbm_build_registry_from_cache(ctx, files, file_count, cache);
     cbm_log_info("pass.timing", "pass", "registry_build", "elapsed_ms",

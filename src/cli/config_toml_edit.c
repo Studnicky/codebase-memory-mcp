@@ -34,7 +34,7 @@
 #define TOML_EDIT_OK 0
 #define TOML_EDIT_FOREIGN 1
 #define TOML_EDIT_ERR (-1)
-#define TOML_EDIT_MAX_BYTES (16U * 1024U * 1024U)
+#define TOML_EDIT_MAX_BYTES ((size_t)16U * 1024U * 1024U)
 #define TOML_EDIT_MAX_PATH_BYTES 32768U
 
 #ifdef CBM_TOML_EDIT_ENABLE_TEST_API
@@ -1403,7 +1403,7 @@ static int toml_parse_header(const char *data, const toml_line_t *line, const ch
     }
 
     int array = start + 1 < end && data[start + 1] == '[';
-    size_t inner_start = start + (array ? 2u : 1u);
+    size_t inner_start = start + (array ? 2U : 1U);
     size_t pos = inner_start;
     char quote = '\0';
     int escaped = 0;
@@ -1430,7 +1430,7 @@ static int toml_parse_header(const char *data, const toml_line_t *line, const ch
         }
         if (ch == ']' && (!array || (pos + 1 < end && data[pos + 1] == ']'))) {
             close_start = pos;
-            close_end = pos + (array ? 2u : 1u);
+            close_end = pos + (array ? 2U : 1U);
             break;
         }
         ++pos;
@@ -2166,7 +2166,7 @@ int cbm_toml_upsert_named_array_table(const char *file_path, const char *table_n
             }
             if (edit_result == TOML_EDIT_OK &&
                 (output.len < strlen(newline) * 2U ||
-                 memcmp(output.data + output.len - strlen(newline) * 2U, newline,
+                 memcmp(output.data + output.len - (strlen(newline) * 2U), newline,
                         strlen(newline)) != 0)) {
                 edit_result = toml_buffer_append_cstr(&output, newline);
             }
@@ -2269,7 +2269,7 @@ static int toml_build_owned_table_insert(toml_buffer_t *output, const char *exis
     size_t newline_len = strlen(newline);
     if (result == TOML_EDIT_OK && existing_len > payload_start &&
         (output->len < newline_len * 2U ||
-         memcmp(output->data + output->len - newline_len * 2U, newline, newline_len) != 0)) {
+         memcmp(output->data + output->len - (newline_len * 2U), newline, newline_len) != 0)) {
         result = toml_buffer_append_cstr(output, newline);
     }
     return result == TOML_EDIT_OK
@@ -2331,15 +2331,17 @@ static int toml_edit_owned_named_array_table(const char *file_path, const char *
     }
 
     toml_buffer_t output = {0};
-    int build_result =
-        scan.matching_count == 1
-            ? (toml_buffer_append(&output, existing, scan.start) == TOML_EDIT_OK &&
-                       toml_buffer_append(&output, existing + scan.edit_end,
-                                          existing_len - scan.edit_end) == TOML_EDIT_OK
-                   ? TOML_EDIT_OK
-                   : TOML_EDIT_ERR)
-            : toml_build_owned_table_insert(&output, existing, existing_len, table_name,
-                                            canonical_body, newline);
+    int build_result;
+    if (scan.matching_count == 1) {
+        build_result = toml_buffer_append(&output, existing, scan.start);
+        if (build_result == TOML_EDIT_OK) {
+            build_result =
+                toml_buffer_append(&output, existing + scan.edit_end, existing_len - scan.edit_end);
+        }
+    } else {
+        build_result = toml_build_owned_table_insert(&output, existing, existing_len, table_name,
+                                                     canonical_body, newline);
+    }
     int result = build_result == TOML_EDIT_OK
                      ? toml_write_atomic(file_path, existing, existing_len, output.data, output.len,
                                          &snapshot)

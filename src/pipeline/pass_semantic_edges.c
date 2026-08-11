@@ -14,6 +14,7 @@
 #include <stdint.h>
 #include "pipeline/pipeline_internal.h"
 #include "graph_buffer/graph_buffer.h"
+#include "semantic/rotsq.h"
 #include "semantic/semantic.h"
 #include "semantic/ast_profile.h"
 #include "simhash/minhash.h"

@@ -17,7 +17,7 @@
  * generations must still exchange the stable HELLO conflict envelope. */
 #define CBM_DAEMON_RENDEZVOUS_FRAME_VERSION 1U
 #define CBM_DAEMON_FRAME_HEADER_SIZE 12U
-#define CBM_DAEMON_MAX_FRAME_SIZE (10U * 1024U * 1024U)
+#define CBM_DAEMON_MAX_FRAME_SIZE ((uint64_t)10U * 1024U * 1024U)
 #define CBM_DAEMON_KEY_SIZE 17U
 
 typedef enum {

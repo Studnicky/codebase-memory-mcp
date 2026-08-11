@@ -10,6 +10,7 @@
 #include "sqlite3.h"
 
 #include <stdatomic.h>
+#include <stdint.h>
 #include <string.h>
 
 static sqlite3 *as_db(cbm_sql_t *db) {

@@ -10,10 +10,12 @@
 #include "log.h"
 #include "platform.h" /* cbm_now_ms */
 
+#include <stdint.h>
 #include <stdio.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -251,7 +253,7 @@ static size_t cbm_cmdline_append_arg(char *buf, size_t cap, size_t pos, const ch
         }
         if (*p == '"') {
             /* N backslashes then a quote -> 2N+1 backslashes then an escaped quote. */
-            for (size_t k = 0; k < nbs * 2 + 1; k++) {
+            for (size_t k = 0; k < (nbs * 2) + 1; k++) {
                 pos = cbm_cmdline_put(buf, cap, pos, '\\', ovf);
             }
             pos = cbm_cmdline_put(buf, cap, pos, '"', ovf);

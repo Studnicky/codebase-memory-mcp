@@ -953,6 +953,7 @@ static activation_create_status_t activation_private_file_create(
     *file_out = file;
     return ACTIVATION_CREATE_OK;
 #else
+    (void)path;
     int flags = O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC;
 #ifdef O_NOFOLLOW
     flags |= O_NOFOLLOW;

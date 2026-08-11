@@ -5,6 +5,7 @@
 
 #include "foundation/compat_thread.h"
 
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 

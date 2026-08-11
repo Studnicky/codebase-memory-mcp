@@ -9,6 +9,9 @@
  *
  * Called from pipeline.c when a DB with stored hashes already exists.
  */
+#include "discover/userconfig.h"
+#include "cbm.h"
+#include "arena.h"
 #include "foundation/constants.h"
 
 enum { INCR_RING_BUF = 4, INCR_RING_MASK = 3, INCR_TS_BUF = 24 };
@@ -213,9 +216,9 @@ static int semantic_manifest_hash_file(const char *abs_path, char out[CBM_SHA256
         uint8_t digest[CBM_SHA256_DIGEST_LEN];
         cbm_sha256_final(&sha, digest);
         static const char hex[] = "0123456789abcdef";
-        for (int i = 0; i < CBM_SHA256_DIGEST_LEN; i++) {
+        for (size_t i = 0; i < CBM_SHA256_DIGEST_LEN; i++) {
             out[i * 2] = hex[digest[i] >> 4];
-            out[i * 2 + 1] = hex[digest[i] & 0x0f];
+            out[(i * 2) + 1] = hex[digest[i] & 0x0f];
         }
         out[CBM_SHA256_HEX_LEN] = '\0';
         *mtime_ns = after.mtime_ns;
@@ -327,9 +330,9 @@ static void semantic_manifest_git_digest(const cbm_git_context_t *git_ctx,
     uint8_t digest[CBM_SHA256_DIGEST_LEN];
     cbm_sha256_final(&sha, digest);
     static const char hex[] = "0123456789abcdef";
-    for (int i = 0; i < CBM_SHA256_DIGEST_LEN; i++) {
+    for (size_t i = 0; i < CBM_SHA256_DIGEST_LEN; i++) {
         out[i * 2] = hex[digest[i] >> 4];
-        out[i * 2 + 1] = hex[digest[i] & 0x0f];
+        out[(i * 2) + 1] = hex[digest[i] & 0x0f];
     }
     out[CBM_SHA256_HEX_LEN] = '\0';
 }
@@ -453,7 +456,7 @@ int cbm_pipeline_build_semantic_manifest(const char *project, const char *repo_p
     *out = NULL;
     *out_count = 0;
     semantic_manifest_builder_t builder = {0};
-    uint64_t reserve = (uint64_t)(file_count > 0 ? file_count : 0) * 2U + CBM_SZ_64;
+    uint64_t reserve = ((uint64_t)(file_count > 0 ? file_count : 0) * 2U) + CBM_SZ_64;
     if (reserve > UINT32_MAX) {
         reserve = UINT32_MAX;
     }
@@ -598,7 +601,7 @@ bool cbm_pipeline_semantic_manifests_equal(const cbm_file_hash_t *left, int left
         (left_count > 0 && (!left || !right))) {
         return false;
     }
-    uint64_t reserve = (uint64_t)(right_count > 0 ? right_count : 0) * 2U + CBM_SZ_64;
+    uint64_t reserve = ((uint64_t)(right_count > 0 ? right_count : 0) * 2U) + CBM_SZ_64;
     if (reserve > UINT32_MAX) {
         reserve = UINT32_MAX;
     }
@@ -1222,7 +1225,8 @@ static CBMHashTable *surface_name_set(const char *defs_json) {
         if (!arrs[a] || !yyjson_is_arr(arrs[a])) {
             continue;
         }
-        size_t idx, max;
+        size_t idx;
+        size_t max;
         yyjson_val *item;
         yyjson_arr_foreach(arrs[a], idx, max, item) {
             const char *name = yyjson_get_str(yyjson_obj_get(item, arr_keys[a]));
@@ -1445,54 +1449,53 @@ static int run_extract_resolve(cbm_pipeline_ctx_t *ctx, cbm_file_info_t *changed
         cbm_gbuf_set_next_id(ctx->gbuf, atomic_load(&shared_ids));
         free_incremental_result_cache(cache, ci);
         return rc;
-    } else {
-        cbm_log_info("incremental.mode", "mode", "sequential", "changed", itoa_buf(ci));
-
-        /* Keep the definition pass's transformed/extracted result alive for
-         * the following resolution passes. This mirrors the full sequential
-         * pipeline and is required for transform-only inputs such as
-         * ObjectScript Studio Export XML, whose original source cannot be
-         * re-extracted directly by the call/usage/semantic passes. */
-        CBMFileResult **prior_cache = ctx->result_cache;
-        CBMFileResult **cache = prior_cache;
-        bool owns_cache = false;
-        if (!cache && ci > 0) {
-            cache = (CBMFileResult **)calloc((size_t)ci, sizeof(CBMFileResult *));
-            if (!cache) {
-                cbm_log_error("incremental.err", "phase", "result_cache_alloc");
-                return CBM_NOT_FOUND;
-            }
-            ctx->result_cache = cache;
-            owns_cache = true;
-        }
-        int rc = cbm_pipeline_pass_definitions(ctx, changed_files, ci);
-        if (rc == 0) {
-            rc = cbm_pipeline_check_cancel(ctx);
-        }
-        if (rc == 0) {
-            rc = cbm_pipeline_pass_calls(ctx, changed_files, ci);
-        }
-        if (rc == 0) {
-            rc = cbm_pipeline_check_cancel(ctx);
-        }
-        if (rc == 0) {
-            rc = cbm_pipeline_pass_usages(ctx, changed_files, ci);
-        }
-        if (rc == 0) {
-            rc = cbm_pipeline_check_cancel(ctx);
-        }
-        if (rc == 0) {
-            rc = cbm_pipeline_pass_semantic(ctx, changed_files, ci);
-        }
-        if (rc == 0) {
-            rc = cbm_pipeline_check_cancel(ctx);
-        }
-        if (owns_cache) {
-            free_incremental_result_cache(cache, ci);
-            ctx->result_cache = prior_cache;
-        }
-        return rc;
     }
+    cbm_log_info("incremental.mode", "mode", "sequential", "changed", itoa_buf(ci));
+
+    /* Keep the definition pass's transformed/extracted result alive for
+     * the following resolution passes. This mirrors the full sequential
+     * pipeline and is required for transform-only inputs such as
+     * ObjectScript Studio Export XML, whose original source cannot be
+     * re-extracted directly by the call/usage/semantic passes. */
+    CBMFileResult **prior_cache = ctx->result_cache;
+    CBMFileResult **cache = prior_cache;
+    bool owns_cache = false;
+    if (!cache && ci > 0) {
+        cache = (CBMFileResult **)calloc((size_t)ci, sizeof(CBMFileResult *));
+        if (!cache) {
+            cbm_log_error("incremental.err", "phase", "result_cache_alloc");
+            return CBM_NOT_FOUND;
+        }
+        ctx->result_cache = cache;
+        owns_cache = true;
+    }
+    int rc = cbm_pipeline_pass_definitions(ctx, changed_files, ci);
+    if (rc == 0) {
+        rc = cbm_pipeline_check_cancel(ctx);
+    }
+    if (rc == 0) {
+        rc = cbm_pipeline_pass_calls(ctx, changed_files, ci);
+    }
+    if (rc == 0) {
+        rc = cbm_pipeline_check_cancel(ctx);
+    }
+    if (rc == 0) {
+        rc = cbm_pipeline_pass_usages(ctx, changed_files, ci);
+    }
+    if (rc == 0) {
+        rc = cbm_pipeline_check_cancel(ctx);
+    }
+    if (rc == 0) {
+        rc = cbm_pipeline_pass_semantic(ctx, changed_files, ci);
+    }
+    if (rc == 0) {
+        rc = cbm_pipeline_check_cancel(ctx);
+    }
+    if (owns_cache) {
+        free_incremental_result_cache(cache, ci);
+        ctx->result_cache = prior_cache;
+    }
+    return rc;
 }
 
 /* Run post-extraction passes (tests, decorator tags, configlink). */
@@ -1737,9 +1740,9 @@ static int closure_try_plan(cbm_pipeline_t *p, cbm_store_t *store, const char *p
     const char *decline = NULL;
 
     /* Index the fresh manifest and discovery list by rel_path. */
-    CBMHashTable *fresh_by_path = cbm_ht_create((size_t)fresh_count * PAIR_LEN + CBM_SZ_64);
-    CBMHashTable *files_by_path = cbm_ht_create((size_t)file_count * PAIR_LEN + CBM_SZ_64);
-    CBMHashTable *stored_by_path = cbm_ht_create((size_t)stored_count * PAIR_LEN + CBM_SZ_64);
+    CBMHashTable *fresh_by_path = cbm_ht_create(((size_t)fresh_count * PAIR_LEN) + CBM_SZ_64);
+    CBMHashTable *files_by_path = cbm_ht_create(((size_t)file_count * PAIR_LEN) + CBM_SZ_64);
+    CBMHashTable *stored_by_path = cbm_ht_create(((size_t)stored_count * PAIR_LEN) + CBM_SZ_64);
     CBMHashTable *closure_set = cbm_ht_create(CBM_SZ_64);
     const char **changed_paths = NULL;
     char **dependents = NULL;
@@ -2084,7 +2087,7 @@ static int run_closure_delta(cbm_pipeline_t *p, const char *db_path, const char 
 
     /* Stale-surface set + rehydrated base defs, exactly as the plan computed
      * them. Owned keys: deleted[] strings die with this function's frees. */
-    stale_surface_set = cbm_ht_create((size_t)(purge_count)*PAIR_LEN + CBM_SZ_64);
+    stale_surface_set = cbm_ht_create(((size_t)purge_count * PAIR_LEN) + CBM_SZ_64);
     if (!stale_surface_set) {
         goto out;
     }

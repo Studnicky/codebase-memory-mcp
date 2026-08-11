@@ -8,6 +8,7 @@
  *
  * Operates on the graph buffer before dump to .db file.
  */
+#include "foundation/constants.h"
 #include "pipeline/pipeline.h"
 #include "pipeline/pipeline_internal.h"
 #include "graph_buffer/graph_buffer.h"

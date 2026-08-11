@@ -18,7 +18,9 @@
 #include "foundation/compat_fs.h"
 #include "foundation/str_util.h"
 #include "store/sql.h"
+#include "store/store.h"
 
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>

@@ -20,6 +20,7 @@
  */
 #include "foundation/constants.h"
 #include "hash_table.h"
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -43,8 +44,9 @@ struct CBMHashTable {
 
 CBMHashTable *cbm_ht_create(size_t initial_capacity) {
     CBMHashTable *ht = (CBMHashTable *)calloc(CBM_ALLOC_ONE, sizeof(*ht));
-    if (!ht)
+    if (!ht) {
         return NULL;
+    }
     cbm_vt_init(&ht->vt);
     if (initial_capacity > 0) {
         /* Reserve enough buckets for the requested entries. Verstable
@@ -59,15 +61,17 @@ CBMHashTable *cbm_ht_create(size_t initial_capacity) {
 }
 
 void cbm_ht_free(CBMHashTable *ht) {
-    if (!ht)
+    if (!ht) {
         return;
+    }
     cbm_vt_cleanup(&ht->vt);
     free(ht);
 }
 
 void *cbm_ht_set(CBMHashTable *ht, const char *key, void *value) {
-    if (!ht || !key)
+    if (!ht || !key) {
         return NULL;
+    }
     /* Capture previous value (if any) before overwriting.
      * Verstable's _insert overwrites silently and returns an iterator
      * to the (now updated) entry — we have to peek first to surface
@@ -82,57 +86,67 @@ void *cbm_ht_set(CBMHashTable *ht, const char *key, void *value) {
 }
 
 void *cbm_ht_get(const CBMHashTable *ht, const char *key) {
-    if (!ht || !key)
+    if (!ht || !key) {
         return NULL;
+    }
     cbm_vt_itr itr = cbm_vt_get(&ht->vt, key);
-    if (cbm_vt_is_end(itr))
+    if (cbm_vt_is_end(itr)) {
         return NULL;
+    }
     return itr.data->val;
 }
 
 bool cbm_ht_has(const CBMHashTable *ht, const char *key) {
-    if (!ht || !key)
+    if (!ht || !key) {
         return false;
+    }
     cbm_vt_itr itr = cbm_vt_get(&ht->vt, key);
     return !cbm_vt_is_end(itr);
 }
 
 const char *cbm_ht_get_key(const CBMHashTable *ht, const char *key) {
-    if (!ht || !key)
+    if (!ht || !key) {
         return NULL;
+    }
     cbm_vt_itr itr = cbm_vt_get(&ht->vt, key);
-    if (cbm_vt_is_end(itr))
+    if (cbm_vt_is_end(itr)) {
         return NULL;
+    }
     return itr.data->key;
 }
 
 void *cbm_ht_delete(CBMHashTable *ht, const char *key) {
-    if (!ht || !key)
+    if (!ht || !key) {
         return NULL;
+    }
     cbm_vt_itr itr = cbm_vt_get(&ht->vt, key);
-    if (cbm_vt_is_end(itr))
+    if (cbm_vt_is_end(itr)) {
         return NULL;
+    }
     void *prev = itr.data->val;
     (void)cbm_vt_erase(&ht->vt, key);
     return prev;
 }
 
 uint32_t cbm_ht_count(const CBMHashTable *ht) {
-    if (!ht)
+    if (!ht) {
         return 0;
+    }
     return (uint32_t)cbm_vt_size(&ht->vt);
 }
 
 void cbm_ht_foreach(const CBMHashTable *ht, cbm_ht_iter_fn fn, void *userdata) {
-    if (!ht || !fn)
+    if (!ht || !fn) {
         return;
+    }
     for (cbm_vt_itr itr = cbm_vt_first(&ht->vt); !cbm_vt_is_end(itr); itr = cbm_vt_next(itr)) {
         fn(itr.data->key, itr.data->val, userdata);
     }
 }
 
 void cbm_ht_clear(CBMHashTable *ht) {
-    if (!ht)
+    if (!ht) {
         return;
+    }
     cbm_vt_clear(&ht->vt);
 }

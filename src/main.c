@@ -15,8 +15,8 @@
  * and never create or retain a daemon generation.
  */
 #include "cbm.h"
-#include "store/store.h"
-#include "store/sql.h" // cbm_sql_bind_allocator — must precede any store open
+#include "daemon/runtime.h"
+#include "daemon/service.h"
 #include "host/application.h"
 #include "daemon/bootstrap.h"
 #include "host/frontend.h"
@@ -30,6 +30,7 @@
 #include "cli/progress_sink.h"
 #include "foundation/build_version.h"
 #include "foundation/constants.h"
+#include <stdint.h>
 
 enum {
     MAIN_MIN_ARGC = 1,
@@ -52,7 +53,6 @@ enum {
 };
 #define SLEN(s) (sizeof(s) - 1)
 #include "foundation/log.h"
-#include "foundation/diagnostics.h"
 #include "foundation/platform.h"
 #include "foundation/workspace.h"
 #include "foundation/compat.h"
@@ -1700,7 +1700,7 @@ static void main_daemon_ctl_print_ui(void) {
 static void main_daemon_ctl_open_browser(int port) {
     char url[64];
     (void)snprintf(url, sizeof(url), "http://127.0.0.1:%d", port);
-#if defined(_WIN32)
+#ifdef _WIN32
     /* ShellExecuteW resolves the http protocol association directly — no
      * command shell interprets the argument. Values > 32 signal success. */
     wchar_t *wide_url = cbm_utf8_to_wide(url);

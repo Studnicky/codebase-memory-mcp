@@ -3,20 +3,24 @@
  */
 #include "daemon/runtime.h"
 
+#include "daemon/daemon.h"
+#include "daemon/ipc.h"
 #include "daemon/ipc_internal.h"
+#include "daemon/service.h"
 #include "daemon/service_internal.h"
 
 #include "foundation/compat.h"
 #include "foundation/compat_thread.h"
 #include "foundation/log.h"
-#include "foundation/mem.h"
 #include "foundation/platform.h"
 
 #include <limits.h>
 #include <stdatomic.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #ifdef CBM_ENABLE_TEST_SEAMS
 /* #1383 test seam: force peer-image verification to fail so the rejection
@@ -280,7 +284,7 @@ static uint32_t runtime_get_u32(const uint8_t *in) {
 
 static void runtime_put_u64(uint8_t *out, uint64_t value) {
     for (size_t i = 0; i < 8; i++) {
-        out[i] = (uint8_t)(value >> (56 - i * 8));
+        out[i] = (uint8_t)(value >> (56 - (i * 8)));
     }
 }
 
@@ -1489,7 +1493,7 @@ static void runtime_worker_handle_status(cbm_daemon_runtime_worker_t *worker,
         runtime_control_collect_clients_locked(service, worker, &count, pids);
         response[8] = count;
         for (size_t index = 0; index < CBM_DAEMON_CONTROL_CLIENT_CAP; index++) {
-            size_t offset = 12U + index * 4U;
+            size_t offset = 12U + (index * 4U);
             response[offset] = (uint8_t)(pids[index] >> 24);
             response[offset + 1U] = (uint8_t)(pids[index] >> 16);
             response[offset + 2U] = (uint8_t)(pids[index] >> 8);
@@ -1552,7 +1556,7 @@ static void runtime_worker_handle_stop(cbm_daemon_runtime_worker_t *worker, cons
         response[3] = (uint8_t)(committed & 0xFFU);
         response[4] = count;
         for (size_t index = 0; index < CBM_DAEMON_CONTROL_CLIENT_CAP; index++) {
-            size_t offset = 8U + index * 4U;
+            size_t offset = 8U + (index * 4U);
             response[offset] = (uint8_t)(pids[index] >> 24);
             response[offset + 1U] = (uint8_t)(pids[index] >> 16);
             response[offset + 2U] = (uint8_t)(pids[index] >> 8);
@@ -2560,7 +2564,7 @@ bool cbm_daemon_runtime_request_status(const cbm_daemon_ipc_endpoint_t *endpoint
                                    ? (uint8_t)CBM_DAEMON_CONTROL_CLIENT_CAP
                                    : payload[8];
     for (size_t index = 0; index < CBM_DAEMON_CONTROL_CLIENT_CAP; index++) {
-        status_out->client_pids[index] = runtime_control_read_u32(payload + 12U + index * 4U);
+        status_out->client_pids[index] = runtime_control_read_u32(payload + 12U + (index * 4U));
     }
     memcpy(status_out->build_fingerprint, payload + 44U, CBM_DAEMON_BUILD_FINGERPRINT_SIZE);
     status_out->build_fingerprint[CBM_DAEMON_BUILD_FINGERPRINT_SIZE - 1U] = '\0';
@@ -2590,7 +2594,7 @@ bool cbm_daemon_runtime_request_stop(const cbm_daemon_ipc_endpoint_t *endpoint,
                                    ? (uint8_t)CBM_DAEMON_CONTROL_CLIENT_CAP
                                    : payload[4];
     for (size_t index = 0; index < CBM_DAEMON_CONTROL_CLIENT_CAP; index++) {
-        result_out->client_pids[index] = runtime_control_read_u32(payload + 8U + index * 4U);
+        result_out->client_pids[index] = runtime_control_read_u32(payload + 8U + (index * 4U));
     }
     free(payload);
     return true;

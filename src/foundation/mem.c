@@ -56,7 +56,7 @@
  * The shipped artifact's actual wiring is pinned by scripts/smoke-test.sh
  * Phase 1b, which fails in BOTH directions on the real binary — the only place
  * this can be checked honestly, since a from-source test build never has it. */
-#if defined(CBM_MEM_GLOBAL_OVERRIDE)
+#ifdef CBM_MEM_GLOBAL_OVERRIDE
 #define CBM_MEM_EXPECT_GLOBAL_OVERRIDE 1
 #else
 #define CBM_MEM_EXPECT_GLOBAL_OVERRIDE 0
@@ -406,7 +406,7 @@ void cbm_mem_init(double ram_fraction) {
 }
 
 size_t cbm_mem_rss(void) {
-#if defined(__linux__)
+#ifdef __linux__
     /* Linux: mimalloc's _mi_prim_process_info() (vendored/mimalloc/src/prim/
      * unix/prim.c) never sets pinfo->current_rss on Linux — it only sets
      * peak_rss (from getrusage's ru_maxrss). current_rss therefore keeps

@@ -5,7 +5,6 @@
  * macros in compat.h. On Windows, we implement them here.
  */
 #include "foundation/compat.h"
-#include "foundation/constants.h"
 
 #include <errno.h>
 #include <stdlib.h>

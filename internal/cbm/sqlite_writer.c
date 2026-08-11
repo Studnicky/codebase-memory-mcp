@@ -813,7 +813,7 @@ static uint8_t *build_token_vec_record(const CBMDumpTokenVec *tv, int *out_len) 
      * The scale factor is declared `float`, not an enum member, since its
      * only use is float arithmetic against tv->idf.
      */
-    static const float IDF_FIXED_POINT_SCALE = 1000.0f;
+    static const float IDF_FIXED_POINT_SCALE = 1000.0F;
     rec_add_int(&r, (int64_t)(tv->idf * IDF_FIXED_POINT_SCALE));
 
     uint8_t *data = rec_finalize(&r, out_len);

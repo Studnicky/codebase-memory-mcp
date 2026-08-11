@@ -20,6 +20,7 @@
  * Matches the Go watcher's `pollInterval()` logic.
  */
 #include <stdint.h>
+#include <unistd.h>
 #include "watcher/watcher.h"
 #include "store/store.h"
 #include "foundation/constants.h"
@@ -125,7 +126,7 @@ struct cbm_watcher {
  * helpers (for example fsmonitor). Every invocation therefore has both a hard
  * wall-clock deadline and a finite capture budget. */
 #define WATCHER_GIT_DEADLINE_MS 30000
-#define WATCHER_GIT_OUTPUT_MAX (64U * 1024U * 1024U)
+#define WATCHER_GIT_OUTPUT_MAX ((size_t)64U * 1024U * 1024U)
 #define WATCHER_GIT_HEAD_MAX 4096U
 #define WATCHER_GIT_POLL_US 10000U
 
@@ -603,7 +604,7 @@ static watcher_git_status_t git_dirty_signature(cbm_watcher_t *w, project_state_
         return WATCHER_GIT_SUPERVISION_FAILED;
     }
 
-#if !defined(_WIN32)
+#ifndef _WIN32
     /* `submodule foreach` necessarily evaluates its final fixed argument in
      * Git's documented POSIX-shell environment. No repository/user text is
      * interpolated into that argument; the outer process is still argv-spawned

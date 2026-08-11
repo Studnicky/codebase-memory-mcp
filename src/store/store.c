@@ -35,7 +35,7 @@ enum {
     /* file: URI for the immutable read-only fallback. A path is at most
      * CBM_SZ_1K; percent-encoding can triple it, plus the "file://" prefix,
      * the "?immutable=1" suffix and a leading '/'. */
-    ST_QUERY_URI_MAX = 3 * 1024 + 64,
+    ST_QUERY_URI_MAX = (3 * 1024) + 64,
     ST_GROWTH = 2,
     ST_MAX_DEGREE = 8192,
     ST_HALF_SEC = 500000,
@@ -2614,9 +2614,9 @@ static void cov_failure_fingerprint(const cbm_coverage_row_t *rows, int count,
     uint8_t digest[CBM_SHA256_DIGEST_LEN];
     cbm_sha256_final(&sha, digest);
     static const char hex[] = "0123456789abcdef";
-    for (int i = 0; i < CBM_SHA256_DIGEST_LEN; i++) {
+    for (size_t i = 0; i < CBM_SHA256_DIGEST_LEN; i++) {
         out[i * 2] = hex[digest[i] >> 4];
-        out[i * 2 + 1] = hex[digest[i] & 0x0f];
+        out[(i * 2) + 1] = hex[digest[i] & 0x0f];
     }
     out[CBM_SHA256_HEX_LEN] = 0;
 }
@@ -3277,10 +3277,12 @@ int cbm_store_find_nodes_by_qn_suffix(cbm_store_t *s, const char *project, const
 
 void cbm_store_node_degree(cbm_store_t *s, int64_t node_id, int *in_deg, int *out_deg) {
     if (!s) {
-        if (in_deg)
+        if (in_deg) {
             *in_deg = 0;
-        if (out_deg)
+        }
+        if (out_deg) {
             *out_deg = 0;
+        }
         return;
     }
     *in_deg = 0;
@@ -4196,12 +4198,14 @@ static void where_add_like_hints(const char *column, const char *pattern, char *
     for (int i = 0; i < nhints; i++) {
         char *lp = make_like_hint(hints[i]);
         free(hints[i]);
-        if (!lp)
+        if (!lp) {
             continue;
+        }
         int pool_was_full = (pool->count >= ST_LIKE_POOL_MAX);
         like_pool_add(pool, lp);
-        if (pool_was_full)
+        if (pool_was_full) {
             continue; /* lp was freed — skip bind */
+        }
         snprintf(bind_buf, sizeof(bind_buf), "%s LIKE ?%d", column, *bind_idx + SKIP_ONE);
         *wlen = where_append(where, where_sz, *wlen, nparams, bind_buf);
         where_bind_text(binds, bind_idx, lp);
@@ -5887,7 +5891,7 @@ static const char *lookup_pkg(const int64_t *nids, char **npkgs, int nn, int64_t
     int lo = 0;
     int hi = nn - SKIP_ONE;
     while (lo <= hi) {
-        int mid = lo + (hi - lo) / PAIR_LEN;
+        int mid = lo + ((hi - lo) / PAIR_LEN);
         if (nids[mid] == id) {
             return npkgs[mid];
         }
@@ -6843,7 +6847,7 @@ static void leiden_move(const cbm_lg_t *g, int *comm, double gamma, double twom)
     }
     int qhead = 0;
     int qcount = n;
-    long cap = (long)n * LEIDEN_MOVE_PASS_CAP + LEIDEN_MAX_LEVELS;
+    long cap = ((long)n * LEIDEN_MOVE_PASS_CAP) + LEIDEN_MAX_LEVELS;
     while (qcount > 0 && cap-- > 0) {
         int v = queue[qhead];
         qhead = (qhead + 1) % n;
@@ -6865,10 +6869,10 @@ static void leiden_move(const cbm_lg_t *g, int *comm, double gamma, double twom)
         stot[cv] -= g->k[v];
         double kv = g->k[v];
         int best_c = cv;
-        double best_gain = acc[cv] - gamma * kv * stot[cv] / twom;
+        double best_gain = acc[cv] - (gamma * kv * stot[cv] / twom);
         for (int d = 0; d < ndirty; d++) {
             int c = dirty[d];
-            double gain = acc[c] - gamma * kv * stot[c] / twom;
+            double gain = acc[c] - (gamma * kv * stot[c] / twom);
             if (gain > best_gain) {
                 best_gain = gain;
                 best_c = c;
@@ -6973,7 +6977,7 @@ static int leiden_refine(const cbm_lg_t *g, const int *comm, double gamma, doubl
             if (r == rv) {
                 continue;
             }
-            double gain = acc[r] - gamma * kv * stot[r] / twom;
+            double gain = acc[r] - (gamma * kv * stot[r] / twom);
             if (gain > best_gain) {
                 best_gain = gain;
                 best_r = r;

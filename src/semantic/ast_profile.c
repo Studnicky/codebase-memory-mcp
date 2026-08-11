@@ -393,10 +393,10 @@ void cbm_ast_profile_to_vector(const cbm_ast_profile_t *p, float *out) {
      * divisions mixed enum/float arithmetic, and nothing here treats them as
      * enumerators.
      */
-    static const float MAX_COUNT = 100.0f;
-    static const float MAX_DEPTH = 20.0f;
-    static const float MAX_HALSTEAD = 200.0f;
-    static const float MAX_TOKENS = 2000.0f;
+    static const float MAX_COUNT = 100.0F;
+    static const float MAX_DEPTH = 20.0F;
+    static const float MAX_HALSTEAD = 200.0F;
+    static const float MAX_TOKENS = 2000.0F;
     int i = 0;
     out[i++] = (float)p->if_count / MAX_COUNT;
     out[i++] = (float)p->for_count / MAX_COUNT;

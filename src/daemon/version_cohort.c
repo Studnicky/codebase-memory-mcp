@@ -1,6 +1,8 @@
 /* version_cohort.c — Short transition lock + process-lifetime SH/EX barrier. */
 #include "daemon/version_cohort.h"
 
+#include "daemon/ipc.h"
+#include "daemon/service.h"
 #include "foundation/compat.h"
 #include "foundation/compat_thread.h"
 #include "foundation/log.h"
@@ -90,7 +92,7 @@ static uint64_t version_cohort_deadline_after(uint32_t timeout_ms) {
  * per-process, time-scattered jitter decorrelates the schedules. */
 static void version_cohort_retry_sleep(void) {
     uint64_t mix = (cbm_now_ms() + version_cohort_current_pid()) * 2654435761ULL;
-    cbm_usleep(VERSION_COHORT_RETRY_US / 2U + (uint32_t)(mix % VERSION_COHORT_RETRY_US));
+    cbm_usleep((VERSION_COHORT_RETRY_US / 2U) + (uint32_t)(mix % VERSION_COHORT_RETRY_US));
 }
 
 static cbm_private_file_lock_status_t version_cohort_lock_release_until(

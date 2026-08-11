@@ -10,6 +10,7 @@
  *
  * Depends on: extraction layer (cbm.h), graph_buffer, pipeline internals
  */
+#include "discover/discover.h"
 #include "foundation/constants.h"
 
 enum { PD_RING = 4, PD_RING_MASK = 3, PD_JSON_MARGIN = 10, PD_ESC_MARGIN = 3, PD_ESC_SPACE = 2 };
@@ -762,14 +763,14 @@ int cbm_pipeline_pass_definitions(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t
                 /* Never a silent drop: record the oversized skip + WARN so the
                  * file surfaces in the response/logfile with its sizes. */
                 long cap = cbm_max_file_bytes();
+                const long bytes_per_mb = (long)CBM_SZ_1K * CBM_SZ_1K;
                 char reason[96];
                 snprintf(reason, sizeof(reason), "oversized (%lld MB > %lld MB)",
-                         (long long)(file_size / (CBM_SZ_1K * CBM_SZ_1K)),
-                         (long long)(cap / (CBM_SZ_1K * CBM_SZ_1K)));
+                         (long long)(file_size / bytes_per_mb), (long long)(cap / bytes_per_mb));
                 cbm_pipeline_add_file_error(ctx->pipeline, rel, reason, "oversized");
                 cbm_log_warn("index.file_oversized", "path", rel, "size_mb",
-                             itoa_log((int)(file_size / (CBM_SZ_1K * CBM_SZ_1K))), "cap_mb",
-                             itoa_log((int)(cap / (CBM_SZ_1K * CBM_SZ_1K))));
+                             itoa_log((int)(file_size / bytes_per_mb)), "cap_mb",
+                             itoa_log((int)(cap / bytes_per_mb)));
             } else if (rst == CBM_READ_OPEN_FAIL || rst == CBM_READ_OOM) {
                 cbm_pipeline_add_file_error(ctx->pipeline, rel, "read failed", "read");
             }

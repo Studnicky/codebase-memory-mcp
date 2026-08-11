@@ -4,18 +4,21 @@
 #include "index_supervisor.h"
 
 #include "daemon/runtime.h"
+#include "daemon/service.h"
 #include "foundation/compat.h"
 #include "foundation/compat_fs.h" /* cbm_mkdir_p, cbm_fopen, cbm_resolve_executable_path */
 #include "foundation/constants.h"
 #include "foundation/log.h"
 #include "foundation/platform.h" /* cbm_safe_getenv, path normalization */
 #include "foundation/profile.h"  /* cbm_profile_active (keep worker log under CBM_PROFILE) */
+#include "foundation/subprocess.h"
 
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdatomic.h>
+#include <time.h>
 
 #ifdef _WIN32
 #include <io.h>
@@ -90,7 +93,7 @@ bool cbm_index_supervisor_capture_build_fingerprint(void) {
         return g_build_fingerprint[0] != '\0';
     }
     g_build_fingerprint_capture_attempted = true;
-#if defined(CBM_CLI_ENABLE_TEST_API)
+#ifdef CBM_CLI_ENABLE_TEST_API
     /* Test-only seam: computing the real fingerprint hashes the ENTIRE
      * executable image, which for the ASan test-runner (hundreds of MB) takes
      * tens of seconds per spawned worker/daemon on constrained CI runners and
@@ -145,7 +148,7 @@ static bool worker_parse_positive_size(const char *text, size_t *value_out) {
         if (value > (SIZE_MAX - digit) / 10U) {
             return false;
         }
-        value = value * 10U + digit;
+        value = (value * 10U) + digit;
     }
     if (value == 0) {
         return false;

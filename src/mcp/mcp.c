@@ -1418,7 +1418,6 @@ static char *normalize_project_arg(char *project) {
 /* Forward decls — defined below alongside store resolution. */
 static const char *cache_dir(char *buf, size_t bufsz);
 static bool is_project_db_file(const char *name, size_t len);
-bool cbm_validate_project_name(const char *project);
 
 /* #1025: agents naturally pass the repo FOLDER name ("codebase-memory-mcp"),
  * but indexed project names derive from the full path
@@ -2209,7 +2208,6 @@ static cbm_store_t *resolve_store(cbm_mcp_server_t *srv, const char *project) {
 }
 
 /* Forward decl — definition lives below alongside list_projects. */
-static bool is_project_db_file(const char *name, size_t len);
 
 /* Forward decl — definition lives below in handle_trace_call_path's helpers. */
 static void free_node_contents(cbm_node_t *n);
@@ -2245,7 +2243,7 @@ static int collect_db_project_names(const char *dir_path, char *out, size_t out_
          * (issue #235). Stop cleanly at the last name that fits: the array then
          * always holds complete names and `count` == its length. */
         size_t off = (size_t)offset;
-        size_t need = strlen(iname) + 2 /* quotes */ + (count > 0 ? 1u : 0u) /* comma */;
+        size_t need = strlen(iname) + 2 /* quotes */ + (count > 0 ? 1U : 0U) /* comma */;
         if (off + need + 1 > out_sz) {
             break; /* would not fit entirely — stop at this element boundary */
         }
@@ -4373,11 +4371,14 @@ static char *handle_check_index_coverage(cbm_mcp_server_t *srv, const char *args
                 coverage_add_row_json(doc, entries, &rows[i], NULL);
             }
             yyjson_mut_obj_add_val(doc, item, "entries", entries);
-            const char *scope_status = !lookup_ok || !generation_matches ? "coverage_unavailable"
-                                       : row_count > 0                   ? "known_gaps"
-                                       : strcmp(recording_status, "complete") == 0
-                                           ? "no_recorded_issue"
-                                           : "coverage_unavailable";
+            const char *scope_status = "coverage_unavailable";
+            if (lookup_ok && generation_matches) {
+                if (row_count > 0) {
+                    scope_status = "known_gaps";
+                } else if (strcmp(recording_status, "complete") == 0) {
+                    scope_status = "no_recorded_issue";
+                }
+            }
             yyjson_mut_obj_add_str(doc, item, "status", scope_status);
             cbm_store_free_coverage(rows, row_count);
             yyjson_mut_arr_add_val(scope_results, item);
@@ -4588,17 +4589,18 @@ static bool scc_build(const int64_t *src, const int64_t *tgt, int ecount, scc_gr
     if (ecount <= 0) {
         return false;
     }
-    int64_t *all = malloc((size_t)ecount * 2 * sizeof(int64_t));
+    size_t endpoint_count = (size_t)ecount * 2U;
+    int64_t *all = malloc(endpoint_count * sizeof(int64_t));
     if (!all) {
         return false;
     }
-    for (int i = 0; i < ecount; i++) {
-        all[2 * i] = src[i];
-        all[2 * i + 1] = tgt[i];
+    for (size_t i = 0; i < (size_t)ecount; i++) {
+        all[2U * i] = src[i];
+        all[(2U * i) + 1U] = tgt[i];
     }
-    qsort(all, (size_t)ecount * 2, sizeof(int64_t), cmp_int64);
+    qsort(all, endpoint_count, sizeof(int64_t), cmp_int64);
     int nv = 0;
-    for (int i = 0; i < ecount * 2; i++) {
+    for (size_t i = 0; i < endpoint_count; i++) {
         if (i == 0 || all[i] != all[i - 1]) {
             all[nv++] = all[i];
         }
@@ -5905,7 +5907,7 @@ static long node_resolution_score(const cbm_node_t *n) {
     if (span < 0) {
         span = 0;
     }
-    return label_rank * (long)RES_LABEL_WEIGHT + span;
+    return (label_rank * (long)RES_LABEL_WEIGHT) + span;
 }
 
 /* A "real" callable definition: a Function/Method node with a non-empty body
@@ -5991,7 +5993,8 @@ static void bfs_union_same_name(cbm_store_t *store, const cbm_node_t *nodes, int
                                 const char *direction, const char **edge_types, int edge_type_count,
                                 int depth, int limit, cbm_traverse_result_t *out) {
     memset(out, 0, sizeof(*out));
-    size_t vcap = 0, ecap = 0;
+    size_t vcap = 0;
+    size_t ecap = 0;
     for (int k = 0; k < node_count; k++) {
         cbm_traverse_result_t tr = {0};
         cbm_store_bfs(store, nodes[k].id, direction, edge_types, edge_type_count, depth, limit,
@@ -8258,7 +8261,7 @@ static char *sanitize_utf8_lossy(const char *s) {
     if (len > (((size_t)-1) - SKIP_ONE) / UTF8_REPLACEMENT_LEN) {
         return NULL;
     }
-    char *out = malloc(len * UTF8_REPLACEMENT_LEN + SKIP_ONE);
+    char *out = malloc((len * UTF8_REPLACEMENT_LEN) + SKIP_ONE);
     if (!out) {
         return NULL;
     }
@@ -9603,7 +9606,7 @@ static char *handle_search_code(cbm_mcp_server_t *srv, const char *args) {
     if (!use_regex && strchr(pattern, ' ')) {
         size_t plen = strlen(pattern);
         /* Worst case: every char is a space → ".*" between each char */
-        char *regex_pat = malloc(plen * 3 + 1);
+        char *regex_pat = malloc((plen * 3) + 1);
         if (regex_pat) {
             char *dst = regex_pat;
             const char *src = pattern;
@@ -10478,8 +10481,8 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
             /* module rollup: a quotient view of the blast radius */
             if (impact.visited_count > 0) {
                 cbm_sb_append(&sb, "impacted_modules: (rows: module count)\n");
-                char (*mods)[CBM_SZ_128] = malloc(DETECT_MODCAP * CBM_SZ_128);
-                int *mcnt = malloc(DETECT_MODCAP * sizeof(int));
+                char (*mods)[CBM_SZ_128] = malloc((size_t)DETECT_MODCAP * CBM_SZ_128);
+                int *mcnt = malloc((size_t)DETECT_MODCAP * sizeof(int));
                 if (mods && mcnt) {
                     int overflow = 0;
                     int nmods = detect_module_rollup(&impact, mods, mcnt, &overflow);
@@ -10541,8 +10544,8 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
         yyjson_mut_obj_add_val(doc, root_obj, "impacted", imp);
         /* Model parity with the tree encoding: the complete module rollup. */
         if (impact.visited_count > 0) {
-            char (*mods)[CBM_SZ_128] = malloc(DETECT_MODCAP * CBM_SZ_128);
-            int *mcnt = malloc(DETECT_MODCAP * sizeof(int));
+            char (*mods)[CBM_SZ_128] = malloc((size_t)DETECT_MODCAP * CBM_SZ_128);
+            int *mcnt = malloc((size_t)DETECT_MODCAP * sizeof(int));
             if (mods && mcnt) {
                 int overflow = 0;
                 int nmods = detect_module_rollup(&impact, mods, mcnt, &overflow);
@@ -11117,9 +11120,10 @@ bool cbm_mcp_auto_index_within_file_limit(const char *root_path, int file_limit,
     cbm_discover_status_t status = cbm_discover_count_bounded(
         root_path, &options, file_limit, cbm_now_ms() + AUTO_INDEX_COUNT_TIMEOUT_MS, &count);
     if (file_count_out) {
-        *file_count_out = status == CBM_DISCOVER_LIMIT_EXCEEDED
-                              ? (file_limit < INT_MAX ? file_limit + 1 : INT_MAX)
-                              : count;
+        *file_count_out = count;
+        if (status == CBM_DISCOVER_LIMIT_EXCEEDED) {
+            *file_count_out = file_limit < INT_MAX ? file_limit + 1 : INT_MAX;
+        }
     }
     return status == CBM_DISCOVER_OK;
 }
@@ -11387,7 +11391,8 @@ static int read_bounded_line(FILE *in, char **line, size_t *cap, size_t max_byte
         size_t needed = len + 2; /* byte plus trailing NUL */
         if (*cap < needed) {
             size_t limit_cap = max_bytes + 1;
-            size_t new_cap = *cap ? *cap : (limit_cap < 256 ? limit_cap : 256);
+            size_t initial_cap = limit_cap < 256 ? limit_cap : 256;
+            size_t new_cap = *cap ? *cap : initial_cap;
             while (new_cap < needed && new_cap < max_bytes + 1) {
                 size_t doubled = new_cap * 2;
                 new_cap = doubled > limit_cap ? limit_cap : doubled;

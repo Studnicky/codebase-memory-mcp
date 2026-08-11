@@ -9,6 +9,7 @@
  *
  * Depends on: pass_calls having populated CALLS edges
  */
+#include "discover/discover.h"
 #include "foundation/constants.h"
 
 enum {

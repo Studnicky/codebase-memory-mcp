@@ -10,6 +10,7 @@
  * Integration: called from parallel extract workers (per-worker local arrays)
  * and merged sequentially before registry build.
  */
+#include "cbm.h"
 #include "pipeline/pipeline.h"
 #include "pipeline/pipeline_internal.h"
 #include "discover/discover.h"

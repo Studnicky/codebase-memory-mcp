@@ -811,7 +811,7 @@ static inline const CBMResolvedCall *cbm_pipeline_find_lsp_reference_indexed_in_
     int low = 0;
     int high = index->count;
     while (low < high) {
-        int middle = low + (high - low) / 2;
+        int middle = low + ((high - low) / 2);
         if (cbm_pipeline_lsp_reference_site_cmp_usage(index->entries[middle].row, usage) < 0) {
             low = middle + 1;
         } else {
@@ -821,7 +821,7 @@ static inline const CBMResolvedCall *cbm_pipeline_find_lsp_reference_indexed_in_
     int first = low;
     high = index->count;
     while (low < high) {
-        int middle = low + (high - low) / 2;
+        int middle = low + ((high - low) / 2);
         if (cbm_pipeline_lsp_reference_site_cmp_usage(index->entries[middle].row, usage) <= 0) {
             low = middle + 1;
         } else {

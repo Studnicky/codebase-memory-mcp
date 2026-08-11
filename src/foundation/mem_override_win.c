@@ -41,9 +41,7 @@
  * Allocating wrappers need no such check: serving a new allocation from
  * mimalloc is always safe.
  */
-#include "foundation/mem.h"
 
-#include <mimalloc.h>
 #include <stddef.h>
 #include <string.h>
 

@@ -15,6 +15,7 @@
 #include "foundation/platform.h" /* cbm_safe_getenv */
 #include "foundation/compat_fs.h"
 #include "foundation/sha256.h"
+#include <stdint.h>
 
 enum { MAX_CONFIG_SIZE = 65536 };
 #include "foundation/log.h"
@@ -43,9 +44,9 @@ static void userconfig_source_digest(const char *state, const void *bytes, size_
     uint8_t digest[CBM_SHA256_DIGEST_LEN];
     cbm_sha256_final(&sha, digest);
     static const char hex[] = "0123456789abcdef";
-    for (int i = 0; i < CBM_SHA256_DIGEST_LEN; i++) {
+    for (size_t i = 0; i < CBM_SHA256_DIGEST_LEN; i++) {
         out[i * 2] = hex[digest[i] >> 4];
-        out[i * 2 + 1] = hex[digest[i] & 0x0f];
+        out[(i * 2) + 1] = hex[digest[i] & 0x0f];
     }
     out[CBM_SHA256_HEX_LEN] = '\0';
 }

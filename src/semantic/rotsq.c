@@ -4,6 +4,7 @@
 #include "semantic/rotsq.h"
 
 #include <stdatomic.h>
+#include <stdint.h>
 #include <string.h>
 
 #define XXH_INLINE_ALL
@@ -28,8 +29,8 @@ static void rsq_init_diag(void) {
     if (atomic_compare_exchange_strong_explicit(&g_rsq_diag_state, &expected, RSQ_DIAG_INITIALIZING,
                                                 memory_order_acq_rel, memory_order_acquire)) {
         for (int d = 0; d < CBM_RSQ_DIM; d++) {
-            uint64_t h = XXH3_64bits_withSeed(&d, sizeof(d), 0x5bd1e995u);
-            g_rsq_diag[d] = (h & 1u) ? 1.0F : -1.0F;
+            uint64_t h = XXH3_64bits_withSeed(&d, sizeof(d), 0x5bd1e995U);
+            g_rsq_diag[d] = (h & 1U) ? 1.0F : -1.0F;
         }
         atomic_store_explicit(&g_rsq_diag_state, RSQ_DIAG_READY, memory_order_release);
         return;
@@ -116,7 +117,7 @@ void cbm_rsq_encode(const float *v, cbm_rsq_code_t *out) {
 float cbm_rsq_ip(const cbm_rsq_code_t *a, const cbm_rsq_code_t *b) {
     /* Integer dot of the 4-bit codes. */
     int64_t dot = 0;
-    for (int i = 0; i < CBM_RSQ_CODE_BYTES; i++) {
+    for (size_t i = 0; i < CBM_RSQ_CODE_BYTES; i++) {
         uint8_t ba = a->codes[i];
         uint8_t bb = b->codes[i];
         dot += (int64_t)(ba & 0x0F) * (bb & 0x0F);
@@ -125,19 +126,19 @@ float cbm_rsq_ip(const cbm_rsq_code_t *a, const cbm_rsq_code_t *b) {
     /* x_i ≈ oa + sa·ca_i, y_i ≈ ob + sb·cb_i (in the rotated space, where the
      * IP equals the original IP because the rotation is orthonormal). */
     double d = (double)CBM_RSQ_DIM;
-    double ip = d * (double)a->offset * (double)b->offset +
-                (double)a->offset * (double)b->scale * (double)b->code_sum +
-                (double)b->offset * (double)a->scale * (double)a->code_sum +
-                (double)a->scale * (double)b->scale * (double)dot;
+    double ip = (d * (double)a->offset * (double)b->offset) +
+                ((double)a->offset * (double)b->scale * (double)b->code_sum) +
+                ((double)b->offset * (double)a->scale * (double)a->code_sum) +
+                ((double)a->scale * (double)b->scale * (double)dot);
     return (float)ip;
 }
 
 /* ── Dequantize into the rotated basis ──────────────────────────────── */
 
 void cbm_rsq_decode(const cbm_rsq_code_t *c, float *out) {
-    for (int i = 0; i < CBM_RSQ_CODE_BYTES; i++) {
+    for (size_t i = 0; i < CBM_RSQ_CODE_BYTES; i++) {
         uint8_t b = c->codes[i];
-        out[i * 2] = c->offset + c->scale * (float)(b & 0x0F);
-        out[i * 2 + 1] = c->offset + c->scale * (float)(b >> 4);
+        out[i * 2] = c->offset + (c->scale * (float)(b & 0x0F));
+        out[(i * 2) + 1] = c->offset + (c->scale * (float)(b >> 4));
     }
 }

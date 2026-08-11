@@ -7,6 +7,7 @@
  */
 #include "cypher/cypher.h"
 #include "foundation/compat.h"
+#include "foundation/constants.h"
 #include "store/store.h"
 #include "foundation/platform.h"
 #include "foundation/limits.h"
@@ -3371,7 +3372,7 @@ static void expand_pattern_rels(cbm_store_t *store, cbm_pattern_t *pat, binding_
          * max_new + *bind_count. Computed in size_t so the product cannot overflow.
          * The previous "+ 1" sizing fit only a SINGLE fallback row after a
          * saturated expansion; a second one ran off the end (heap OOB, CWE-787). */
-        size_t alloc_n = (size_t)*bind_cap * (size_t)CYP_GROWTH_10 + (size_t)*bind_count;
+        size_t alloc_n = ((size_t)*bind_cap * (size_t)CYP_GROWTH_10) + (size_t)*bind_count;
         binding_t *new_bindings = malloc(alloc_n * sizeof(binding_t));
         if (!new_bindings) {
             return; /* OOM: leave existing bindings untouched rather than corrupt */
@@ -4672,7 +4673,7 @@ static void cross_join_with_rels(cbm_store_t *store, cbm_pattern_t *patn, bindin
      * graphs (e.g. an unbound `c` scanned against ~29 K `f` bindings), wrapping
      * the int product negative and yielding a tiny/garbage malloc → heap OOB
      * write → SIGSEGV/SIGABRT (#627). */
-    size_t alloc_n = (size_t)*bind_count * (size_t)extra_count * (size_t)CYP_GROWTH_10 + SKIP_ONE;
+    size_t alloc_n = ((size_t)*bind_count * (size_t)extra_count * (size_t)CYP_GROWTH_10) + SKIP_ONE;
     binding_t *new_bindings = malloc(alloc_n * sizeof(binding_t));
     if (!new_bindings) {
         return; /* OOM: leave existing bindings untouched rather than corrupt */
@@ -4729,7 +4730,7 @@ static void expand_from_bound_terminal(cbm_store_t *store, cbm_pattern_t *patn,
     bool scan_targets =
         !rel_inbound; /* (start)->(term): start = edge source = scan term's inbound */
 
-    size_t alloc_n = (size_t)*bind_count * (size_t)CYP_GROWTH_10 + SKIP_ONE;
+    size_t alloc_n = ((size_t)*bind_count * (size_t)CYP_GROWTH_10) + SKIP_ONE;
     binding_t *new_bindings = malloc(alloc_n * sizeof(binding_t));
     if (!new_bindings) {
         return;

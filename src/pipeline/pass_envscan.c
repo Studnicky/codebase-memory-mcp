@@ -20,14 +20,12 @@ enum {
 };
 
 #define SLEN(s) (sizeof(s) - 1)
-#include "pipeline/pipeline.h"
 #include "pipeline/pipeline_internal.h"
 #include "foundation/log.h"
 
 #include <ctype.h>
 #include "foundation/compat_fs.h"
 #include "foundation/compat_regex.h"
-#include "foundation/platform.h" /* cbm_normalize_path_sep */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

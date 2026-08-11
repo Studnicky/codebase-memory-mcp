@@ -9,7 +9,6 @@
 enum { CC_FLAG_IDX = 1, CC_FLAG_SKIP = 2 };
 
 #define SLEN(s) (sizeof(s) - 1)
-#include "pipeline/pipeline.h"
 #include "pipeline/pipeline_internal.h"
 
 #include <stdlib.h>

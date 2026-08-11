@@ -758,7 +758,7 @@ indexing requirements.
 
 **Remaining release blockers**
 
-- `scripts/lint.sh` reaches `lint-tidy` and reports 5,561 errors across 44 checks. The largest groups are 4,212 `readability-magic-numbers`, 416 `misc-include-cleaner`, 316 `readability-function-cognitive-complexity`, and 219 `readability-braces-around-statements`; the lint gate is not green.
+- `scripts/lint.sh` reaches `lint-tidy` and reports 4,729 errors across 33 checks. The largest groups are 4,210 `readability-magic-numbers`, 316 `readability-function-cognitive-complexity`, and 33 `readability-avoid-nested-conditional-operator`; the lint gate is not green. The braces, uppercase-literal-suffix, concise-preprocessor-directives, include-cleaner, missing-math-parentheses, and implicit-widening-multiplication groups are zero.
 - `nix` is unavailable in this environment. The sidecar contract validates installation, removal, and tamper detection using the production binary, but `nix build .#` remains unexecuted.
 
 Run only after every prior card is complete:

@@ -3,7 +3,9 @@
  */
 #include "daemon/service.h"
 
+#include "daemon/daemon.h"
 #include "daemon/service_internal.h"
+#include <stdint.h>
 #ifdef _WIN32
 #include "daemon/ipc.h"
 #endif
@@ -21,7 +23,7 @@
 enum {
     DAEMON_SERVICE_PATH_CAP = 4096,
     DAEMON_SERVICE_IO_CAP = 64 * 1024,
-    DAEMON_SERVICE_ESCAPED_VERSION_CAP = (CBM_DAEMON_VERSION_TEXT_SIZE - 1) * 6 + 1,
+    DAEMON_SERVICE_ESCAPED_VERSION_CAP = ((CBM_DAEMON_VERSION_TEXT_SIZE - 1) * 6) + 1,
     DAEMON_SERVICE_LOG_RECORD_CAP = 1536,
 };
 
@@ -148,7 +150,7 @@ static void digest_to_hex(const uint8_t digest[CBM_SHA256_DIGEST_LEN],
     static const char hex[] = "0123456789abcdef";
     for (size_t i = 0; i < CBM_SHA256_DIGEST_LEN; i++) {
         out[i * 2] = hex[digest[i] >> 4];
-        out[i * 2 + 1] = hex[digest[i] & 0x0f];
+        out[(i * 2) + 1] = hex[digest[i] & 0x0f];
     }
     out[CBM_SHA256_HEX_LEN] = '\0';
 }

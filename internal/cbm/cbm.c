@@ -19,9 +19,9 @@
 #include "foundation/hash_table.h" // CBMHashTable — crash-supervisor quarantine set
 #include "tree_sitter/api.h" // TSParser, TSNode, TSTree, TSInput, TSLanguage, TSPoint, TSParseOptions, TSParseState
 #include "foundation/constants.h"
-#include "mimalloc.h" // mi_malloc/mi_calloc/mi_realloc/mi_free/mi_usable_size — bind 3rd-party allocators (#424)
 #include <limits.h> // INT_MAX
 #include <stdint.h> // uint32_t, uint64_t, int64_t
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
@@ -56,7 +56,7 @@ int cbm_macro_extraction_enabled(void) {
 /* Use compat.h's cbm_clock_gettime which accepts CLOCK_MONOTONIC (value
  * varies by platform: 1 on Linux/Windows, 6 on macOS). We pass the
  * platform value via the compat.h fallback. */
-#if defined(CLOCK_MONOTONIC)
+#ifdef CLOCK_MONOTONIC
 #define CBM_CLOCK_MONO CLOCK_MONOTONIC
 #elif defined(__APPLE__)
 #define CBM_CLOCK_MONO 6
@@ -1241,15 +1241,17 @@ CBMFileResult *cbm_extract_file_ex(const char *source, int source_len, CBMLangua
             bool jsx_mode = (language == CBM_LANG_TSX);
             if (language == CBM_LANG_JAVASCRIPT && rel_path) {
                 size_t rl = strlen(rel_path);
-                if (rl >= 4 && strcmp(rel_path + rl - 4, ".jsx") == 0)
+                if (rl >= 4 && strcmp(rel_path + rl - 4, ".jsx") == 0) {
                     jsx_mode = true;
+                }
             }
             // dts_mode: ".d.ts" suffix (TypeScript only).
             bool dts_mode = false;
             if (language == CBM_LANG_TYPESCRIPT && rel_path) {
                 size_t rl = strlen(rel_path);
-                if (rl >= 5 && strcmp(rel_path + rl - 5, ".d.ts") == 0)
+                if (rl >= 5 && strcmp(rel_path + rl - 5, ".d.ts") == 0) {
                     dts_mode = true;
+                }
             }
             cbm_run_ts_lsp(a, result, source, source_len, root, js_mode, jsx_mode, dts_mode);
         }

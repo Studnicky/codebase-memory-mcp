@@ -17,10 +17,9 @@
 #include "pipeline/pipeline_internal.h"
 #include "graph_buffer/graph_buffer.h"
 #include "foundation/log.h"
-#include "foundation/platform.h"
 #include "foundation/compat.h"
-#include "cbm.h"
 
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>

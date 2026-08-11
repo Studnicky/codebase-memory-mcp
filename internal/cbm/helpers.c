@@ -772,8 +772,9 @@ static const char **func_kinds_for_lang(CBMLanguage lang) {
          * already uses) when the curated switch has no entry. Curated languages
          * above are unchanged. */
         const CBMLangSpec *spec = cbm_lang_spec(lang);
-        if (spec && spec->function_node_types && spec->function_node_types[0])
+        if (spec && spec->function_node_types && spec->function_node_types[0]) {
             return spec->function_node_types;
+        }
         return func_kinds_generic;
     }
     }
@@ -1413,10 +1414,12 @@ static char *append_path_segments(char *out, const char *rel_path, size_t plen, 
 }
 
 char *cbm_fqn_compute(CBMArena *a, const char *project, const char *rel_path, const char *name) {
-    if (!project)
+    if (!project) {
         project = "";
-    if (!rel_path)
+    }
+    if (!rel_path) {
         rel_path = "";
+    }
     size_t proj_len = strlen(project);
     size_t path_len = strlen(rel_path);
     size_t name_len = name ? strlen(name) : 0;

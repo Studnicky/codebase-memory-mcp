@@ -2,6 +2,8 @@
  * host.c — Lifecycle owner for the mandatory per-account CBM daemon.
  */
 #include "host/host.h"
+#include "daemon/ipc.h"
+#include "daemon/service.h"
 #include "host/host_internal.h"
 
 #include "host/application.h"
@@ -22,11 +24,13 @@
 #include "ui/http_server.h"
 #include "watcher/watcher.h"
 
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 enum {
     HOST_MAX_CLIENTS = 64,
@@ -357,11 +361,13 @@ static int host_http_thread_schedule_create(cbm_thread_t *thread, void *(*entry)
                                             cbm_http_server_t *server,
                                             host_http_thread_create_fn create,
                                             void *create_context) {
-    if (!server || !create || !cbm_http_server_schedule_run(server))
+    if (!server || !create || !cbm_http_server_schedule_run(server)) {
         return -1;
+    }
     int rc = create(create_context, thread, entry, server);
-    if (rc != 0 && !cbm_http_server_cancel_scheduled_run(server))
+    if (rc != 0 && !cbm_http_server_cancel_scheduled_run(server)) {
         return -1;
+    }
     return rc;
 }
 
@@ -760,7 +766,7 @@ bool cbm_daemon_host_http_reconcile_free_refusal_for_test(
     bool retained_after_refusal =
         host.http != NULL && !host.http_started && context.server_create_attempts == 1;
     size_t creates_after_refusal = context.server_create_attempts;
-    host_http_reconcile_at(&host, HOST_HTTP_CONFIG_POLL_MS * 2U, false);
+    host_http_reconcile_at(&host, (uint64_t)HOST_HTTP_CONFIG_POLL_MS * 2U, false);
     bool replacement_active = host.http != NULL && host.http_started;
 
     *result_out = (cbm_daemon_host_http_free_refusal_test_result_t){
@@ -789,16 +795,18 @@ static int host_http_thread_create_failure_for_test(
     (void)thread;
     (void)entry;
     host_http_thread_create_failure_test_t *test = opaque;
-    if (!test || entry_context != test->server)
+    if (!test || entry_context != test->server) {
         return -1;
+    }
     test->free_refused_while_scheduled = !cbm_http_server_free(test->server);
     return -1;
 }
 
 bool cbm_daemon_host_http_thread_create_failure_lifecycle_for_test(void) {
     cbm_http_server_t *server = cbm_http_server_new(0);
-    if (!server)
+    if (!server) {
         return false;
+    }
     host_http_thread_create_failure_test_t test = {
         .server = server,
     };
