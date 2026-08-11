@@ -2133,6 +2133,72 @@ typedef enum {
     STORE_RECOVERY_TRY_GUARD_UNAVAILABLE,
 } store_recovery_status_t;
 
+static void mcp_store_adopt(cbm_mcp_server_t *srv, const char *project, cbm_store_t *store) {
+    srv->store = store;
+    srv->owns_store = true;
+    free(srv->current_project);
+    srv->current_project = heap_strdup(project);
+}
+
+static void mcp_store_close_owned(cbm_mcp_server_t *srv) {
+    if (srv->owns_store && srv->store) {
+        cbm_store_close(srv->store);
+        srv->store = NULL;
+    }
+}
+
+static bool mcp_store_recovery_acquire(cbm_mcp_server_t *srv, const char *project,
+                                       bool mutation_already_held, bool nonblocking_recovery,
+                                       store_recovery_status_t *recovery_status) {
+    if (mutation_already_held) {
+        return true;
+    }
+    bool acquired = nonblocking_recovery ? mcp_project_mutation_try_begin(srv, project)
+                                         : mcp_project_mutation_begin(srv, project);
+    if (!acquired && nonblocking_recovery && recovery_status) {
+        *recovery_status =
+            srv->mutation_try_begin ? STORE_RECOVERY_BUSY : STORE_RECOVERY_TRY_GUARD_UNAVAILABLE;
+    }
+    return acquired;
+}
+
+static bool mcp_store_recover_corrupt(cbm_mcp_server_t *srv, const char *project, const char *path,
+                                      bool mutation_already_held, bool nonblocking_recovery,
+                                      store_recovery_status_t *recovery_status) {
+    cbm_store_close(srv->store);
+    srv->store = NULL;
+    if (!mcp_store_recovery_acquire(srv, project, mutation_already_held, nonblocking_recovery,
+                                    recovery_status)) {
+        return false;
+    }
+    srv->store = cbm_store_open_path_query(path);
+    bool current_valid = srv->store && cbm_store_check_integrity(srv->store);
+    if (!current_valid) {
+        cbm_store_close(srv->store);
+        srv->store = NULL;
+        char backup[CBM_SZ_2K] = {0};
+        bool quarantined = quarantine_corrupt_store(srv, project, path, backup, sizeof(backup));
+        cbm_log_error("store.auto_clean", "project", project, "path", path, "action",
+                      quarantined ? "corrupt generation quarantined"
+                                  : "corrupt generation preserved",
+                      "backup", quarantined ? backup : "none");
+    }
+    if (!mutation_already_held) {
+        mcp_project_mutation_end(srv, project);
+    }
+    return srv->store != NULL;
+}
+
+static bool mcp_store_current_project_matches(cbm_mcp_server_t *srv, const char *project) {
+    cbm_project_t verified_project = {0};
+    if (cbm_store_get_project(srv->store, project, &verified_project) != CBM_STORE_OK) {
+        return false;
+    }
+    cbm_project_free_fields(&verified_project);
+    mcp_store_adopt(srv, project, srv->store);
+    return true;
+}
+
 static cbm_store_t *resolve_store_internal(cbm_mcp_server_t *srv, const char *project,
                                            bool mutation_already_held, bool nonblocking_recovery,
                                            store_recovery_status_t *recovery_status) {
@@ -2150,11 +2216,8 @@ static cbm_store_t *resolve_store_internal(cbm_mcp_server_t *srv, const char *pr
         return srv->store;
     }
 
-    /* Close old store */
-    if (srv->owns_store && srv->store) {
-        cbm_store_close(srv->store);
-        srv->store = NULL;
-    }
+    /* Close old store. */
+    mcp_store_close_owned(srv);
 
     /* Open project's .db file — query-only open (no SQLITE_OPEN_CREATE) to
      * prevent ghost .db file creation for unknown/unindexed projects.
@@ -2169,57 +2232,17 @@ static cbm_store_t *resolve_store_internal(cbm_mcp_server_t *srv, const char *pr
     srv->store = path[0] ? cbm_store_open_path_query(path) : NULL;
     if (srv->store) {
         /* Check DB integrity — back up (never silently delete) a corrupt DB */
-        if (!cbm_store_check_integrity(srv->store)) {
-            cbm_store_close(srv->store);
-            srv->store = NULL;
-            bool mutation_acquired = mutation_already_held;
-            if (!mutation_acquired) {
-                mutation_acquired = nonblocking_recovery
-                                        ? mcp_project_mutation_try_begin(srv, project)
-                                        : mcp_project_mutation_begin(srv, project);
-            }
-            if (!mutation_acquired) {
-                if (nonblocking_recovery && recovery_status) {
-                    *recovery_status = srv->mutation_try_begin
-                                           ? STORE_RECOVERY_BUSY
-                                           : STORE_RECOVERY_TRY_GUARD_UNAVAILABLE;
-                }
-                return NULL;
-            }
-
-            /* The lease may have waited behind a publisher. Re-open and trust
-             * only the current generation, never the stale pre-wait verdict. */
-            srv->store = cbm_store_open_path_query(path);
-            bool current_valid = srv->store && cbm_store_check_integrity(srv->store);
-            if (!current_valid) {
-                cbm_store_close(srv->store);
-                srv->store = NULL;
-                char backup[CBM_SZ_2K] = {0};
-                bool quarantined =
-                    quarantine_corrupt_store(srv, project, path, backup, sizeof(backup));
-                cbm_log_error("store.auto_clean", "project", project, "path", path, "action",
-                              quarantined ? "corrupt generation quarantined"
-                                          : "corrupt generation preserved",
-                              "backup", quarantined ? backup : "none");
-            }
-            if (!mutation_already_held) {
-                mcp_project_mutation_end(srv, project);
-            }
-            if (!srv->store) {
-                return NULL;
-            }
+        if (!cbm_store_check_integrity(srv->store) &&
+            !mcp_store_recover_corrupt(srv, project, path, mutation_already_held,
+                                       nonblocking_recovery, recovery_status)) {
+            return NULL;
         }
 
         /* Verify the project actually exists in this database.
          * A .db file may exist but be empty (e.g., after delete_project on
          * Linux where unlink defers actual removal). Opening an empty/deleted
          * store without closing it leaks the SQLite connection. */
-        cbm_project_t proj_verify = {0};
-        if (cbm_store_get_project(srv->store, project, &proj_verify) == CBM_STORE_OK) {
-            cbm_project_free_fields(&proj_verify);
-            srv->owns_store = true;
-            free(srv->current_project);
-            srv->current_project = heap_strdup(project);
+        if (mcp_store_current_project_matches(srv, project)) {
             return srv->store; /* fast path: filename == internal name */
         }
         /* #704: <project>.db exists but its INTERNAL project name differs from
@@ -2237,10 +2260,7 @@ static cbm_store_t *resolve_store_internal(cbm_mcp_server_t *srv, const char *pr
      * No match → NULL (a genuine typo stays not-found). */
     cbm_store_t *scanned = resolve_store_fallback_scan(project);
     if (scanned) {
-        srv->store = scanned;
-        srv->owns_store = true;
-        free(srv->current_project);
-        srv->current_project = heap_strdup(project);
+        mcp_store_adopt(srv, project, scanned);
     }
 
     return srv->store;
@@ -2894,37 +2914,23 @@ static char *bm25_file_pattern_like(const char *file_pattern) {
     return like;
 }
 
-/* Run the BM25 full-text search path and return the JSON result string.
- * Returns NULL if FTS5 is unavailable or the query produced no usable tokens,
- * in which case the caller falls back to the regex-based search path. */
-static char *bm25_search(cbm_store_t *store, const char *project, const char *query,
-                         const char *file_pattern, int limit, int offset, bool toon) {
-    cbm_sql_t *db = cbm_store_sql(store);
-    if (!db) {
-        return NULL;
-    }
-    char fts_query[BM25_QUERY_BUF];
-    int tok_count = bm25_build_match(query, fts_query, sizeof(fts_query));
-    if (tok_count == 0) {
-        return NULL;
-    }
-    char *file_like = bm25_file_pattern_like(file_pattern);
+static const char *const BM25_RESULT_COLUMNS[] = {"qn", "label", "file", "lines", "rank"};
 
-    /* BM25 ranked query using a two-step approach to enable FTS5 early termination.
-     *
-     * Flat queries of the form:
-     *   SELECT ... FROM nodes_fts JOIN nodes WHERE MATCH ? AND n.project=? ORDER BY rank LIMIT N
-     * block FTS5's WAND/MaxScore early-exit because the outer JOIN+WHERE conditions
-     * are invisible to the FTS5 planner — it must score every matching document before
-     * the project/label filter can discard any of them.  On a large codebase with 100K+
-     * matches, this causes multi-minute queries.
-     *
-     * The fix: let FTS5 drive the inner subquery alone.  SQLite CAN early-terminate
-     *   SELECT rowid, bm25(nodes_fts) FROM nodes_fts WHERE MATCH ? ORDER BY bm25() LIMIT N
-     * because no outer predicate blocks it.  We fetch BM25_INNER_LIMIT top candidates
-     * from the FTS5 index, then join/filter/boost only those rows.  bm25() returns a
-     * NEGATIVE score (lower = more relevant). */
-    const char *sql =
+static void bm25_bind_file_filter(cbm_sql_stmt_t *stmt, const char *file_like) {
+    if (file_like) {
+        cbm_sql_bind_text(stmt, BM25_BIND_FILE, file_like);
+    } else {
+        cbm_sql_bind_null(stmt, BM25_BIND_FILE);
+    }
+}
+
+/* The inner FTS5 query has no outer predicates, allowing its WAND/MaxScore
+ * early termination. The outer query then applies project/file filters and
+ * deterministic boost/tie ordering to that bounded candidate window. */
+static cbm_sql_stmt_t *bm25_prepare_results(cbm_sql_t *db, const char *fts_query,
+                                            const char *project, const char *file_like, int limit,
+                                            int offset) {
+    static const char *const sql =
         "SELECT n.id, n.label, n.name, n.qualified_name, n.file_path, n.start_line, n.end_line, "
         "       (fts.base_rank "
         "        - CASE WHEN n.label IN ('Function','Method') THEN 10.0 "
@@ -2940,14 +2946,10 @@ static char *bm25_search(cbm_store_t *store, const char *project, const char *qu
         "WHERE n.project = ?2 "
         "  AND n.label NOT IN ('File','Folder','Module','Section','Variable','Project') "
         "  AND (?6 IS NULL OR n.file_path LIKE ?6) "
-        /* rank ties are common (boosted floats) — the id tie-break makes
-         * offset pages contractually stable across calls. */
         "ORDER BY rank, n.id "
         "LIMIT ?3 OFFSET ?4";
-
     cbm_sql_stmt_t *stmt = NULL;
     if (!cbm_sql_prepare(db, sql, &stmt)) {
-        free(file_like);
         return NULL;
     }
     cbm_sql_bind_text(stmt, BM25_BIND_QUERY, fts_query);
@@ -2955,109 +2957,92 @@ static char *bm25_search(cbm_store_t *store, const char *project, const char *qu
     cbm_sql_bind_int(stmt, BM25_BIND_LIMIT, limit > 0 ? limit : BM25_DEFAULT_LIMIT);
     cbm_sql_bind_int(stmt, BM25_BIND_OFFSET, offset > 0 ? offset : 0);
     cbm_sql_bind_int(stmt, BM25_BIND_INNER, BM25_INNER_LIMIT);
-    if (file_like) {
-        cbm_sql_bind_text(stmt, BM25_BIND_FILE, file_like);
+    bm25_bind_file_filter(stmt, file_like);
+    return stmt;
+}
+
+static int bm25_count_candidates(cbm_sql_t *db, const char *fts_query, const char *project,
+                                 const char *file_like) {
+    static const char *const count_sql =
+        "SELECT COUNT(*) FROM ("
+        "    SELECT fts.rowid FROM ("
+        "        SELECT rowid FROM nodes_fts WHERE nodes_fts MATCH ?1"
+        "        ORDER BY bm25(nodes_fts) LIMIT ?3"
+        "    ) fts "
+        "    JOIN nodes n ON n.id = fts.rowid "
+        "    WHERE n.project = ?2 "
+        "      AND n.label NOT IN ('File','Folder','Module','Section','Variable','Project')"
+        "      AND (?6 IS NULL OR n.file_path LIKE ?6)"
+        ")";
+    cbm_sql_stmt_t *count_stmt = NULL;
+    if (!cbm_sql_prepare(db, count_sql, &count_stmt)) {
+        return 0;
+    }
+    cbm_sql_bind_text(count_stmt, BM25_BIND_QUERY, fts_query);
+    cbm_sql_bind_text(count_stmt, BM25_BIND_PROJECT, project);
+    cbm_sql_bind_int(count_stmt, BM25_BIND_LIMIT, BM25_INNER_LIMIT);
+    bm25_bind_file_filter(count_stmt, file_like);
+    int total = cbm_sql_step(count_stmt) == CBM_SQL_ROW ? cbm_sql_column_int(count_stmt, 0) : 0;
+    cbm_sql_finalize(count_stmt);
+    return total;
+}
+
+static void bm25_line_range(cbm_sql_stmt_t *stmt, char *lines, size_t lines_size) {
+    int start_line = cbm_sql_column_int(stmt, BM25_COL_START);
+    int end_line = cbm_sql_column_int(stmt, BM25_COL_END);
+    if (start_line > 0) {
+        snprintf(lines, lines_size, "%d-%d", start_line,
+                 end_line > start_line ? end_line : start_line);
     } else {
-        cbm_sql_bind_null(stmt, BM25_BIND_FILE);
+        lines[0] = '\0';
     }
+}
 
-    /* Count hits within the same inner-limit window — capped at BM25_INNER_LIMIT.
-     * Uses the identical subquery structure so the FTS5 early-exit applies here too. */
-    int total = 0;
-    {
-        const char *count_sql =
-            "SELECT COUNT(*) FROM ("
-            "    SELECT fts.rowid FROM ("
-            "        SELECT rowid FROM nodes_fts WHERE nodes_fts MATCH ?1"
-            "        ORDER BY bm25(nodes_fts) LIMIT ?3"
-            "    ) fts "
-            "    JOIN nodes n ON n.id = fts.rowid "
-            "    WHERE n.project = ?2 "
-            "      AND n.label NOT IN ('File','Folder','Module','Section','Variable','Project')"
-            "      AND (?6 IS NULL OR n.file_path LIKE ?6)"
-            ")";
-        cbm_sql_stmt_t *cs = NULL;
-        if (cbm_sql_prepare(db, count_sql, &cs)) {
-            cbm_sql_bind_text(cs, BM25_BIND_QUERY, fts_query);
-            cbm_sql_bind_text(cs, BM25_BIND_PROJECT, project);
-            cbm_sql_bind_int(cs, BM25_BIND_LIMIT, BM25_INNER_LIMIT);
-            if (file_like) {
-                cbm_sql_bind_text(cs, BM25_BIND_FILE, file_like);
-            } else {
-                cbm_sql_bind_null(cs, BM25_BIND_FILE);
-            }
-            if (cbm_sql_step(cs) == CBM_SQL_ROW) {
-                total = cbm_sql_column_int(cs, 0);
-            }
-            cbm_sql_finalize(cs);
-        }
+static char *bm25_render_toon(cbm_sql_stmt_t *stmt, int total, int offset) {
+    cbm_sb_t rows;
+    cbm_sb_init(&rows);
+    int emitted = 0;
+    while (cbm_sql_step(stmt) == CBM_SQL_ROW) {
+        char lines[CBM_SZ_32];
+        bm25_line_range(stmt, lines, sizeof(lines));
+        cbm_tree_row_begin(&rows);
+        cbm_tree_cell_str(&rows, cbm_sql_column_text(stmt, BM25_COL_QN), true);
+        cbm_tree_cell_str(&rows, cbm_sql_column_text(stmt, BM25_COL_LABEL), false);
+        cbm_tree_cell_str(&rows, cbm_sql_column_text(stmt, BM25_COL_FILE), false);
+        cbm_tree_cell_str(&rows, lines, false);
+        cbm_tree_cell_real(&rows, cbm_sql_column_double(stmt, BM25_COL_RANK), false);
+        cbm_tree_row_end(&rows);
+        emitted++;
     }
+    cbm_sb_t result;
+    cbm_sb_init(&result);
+    cbm_tree_scalar_int(&result, "total", total);
+    cbm_tree_scalar_str(&result, "search_mode", "bm25");
+    cbm_tree_table_header(&result, "results", emitted, BM25_RESULT_COLUMNS,
+                          MCP_BM25_RESULT_COLUMN_COUNT);
+    char *rows_text = cbm_sb_finish(&rows);
+    cbm_sb_append(&result, rows_text ? rows_text : "");
+    free(rows_text);
+    cbm_tree_scalar_bool(&result, "has_more", total > offset + emitted);
+    return cbm_sb_finish(&result);
+}
 
-    if (toon) {
-        /* TOON: rows are buffered first because the table header carries the
-         * row count, which sqlite only yields by stepping to completion. */
-        cbm_sb_t rows;
-        cbm_sb_init(&rows);
-        int emitted = 0;
-        while (cbm_sql_step(stmt) == CBM_SQL_ROW) {
-            char lines[CBM_SZ_32];
-            int sl = cbm_sql_column_int(stmt, BM25_COL_START);
-            int el = cbm_sql_column_int(stmt, BM25_COL_END);
-            if (sl > 0) {
-                snprintf(lines, sizeof(lines), "%d-%d", sl, el > sl ? el : sl);
-            } else {
-                lines[0] = '\0';
-            }
-            cbm_tree_row_begin(&rows);
-            cbm_tree_cell_str(&rows, cbm_sql_column_text(stmt, BM25_COL_QN), true);
-            cbm_tree_cell_str(&rows, cbm_sql_column_text(stmt, BM25_COL_LABEL), false);
-            cbm_tree_cell_str(&rows, cbm_sql_column_text(stmt, BM25_COL_FILE), false);
-            cbm_tree_cell_str(&rows, lines, false);
-            cbm_tree_cell_real(&rows, cbm_sql_column_double(stmt, BM25_COL_RANK), false);
-            cbm_tree_row_end(&rows);
-            emitted++;
-        }
-        cbm_sql_finalize(stmt);
-        free(file_like);
-
-        cbm_sb_t sb;
-        cbm_sb_init(&sb);
-        cbm_tree_scalar_int(&sb, "total", total);
-        cbm_tree_scalar_str(&sb, "search_mode", "bm25");
-        static const char *const cols[] = {"qn", "label", "file", "lines", "rank"};
-        cbm_tree_table_header(&sb, "results", emitted, cols, MCP_BM25_RESULT_COLUMN_COUNT);
-        char *rows_text = cbm_sb_finish(&rows);
-        cbm_sb_append(&sb, rows_text ? rows_text : "");
-        free(rows_text);
-        cbm_tree_scalar_bool(&sb, "has_more", total > offset + emitted);
-        return cbm_sb_finish(&sb);
-    }
-
-    /* format:"json" = json-stringified tree: cols + column-ordered row
-     * arrays (rank order preserved — no grouping on ranked output). */
+static char *bm25_render_json(cbm_sql_stmt_t *stmt, int total, int offset) {
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
     yyjson_mut_val *root = yyjson_mut_obj(doc);
     yyjson_mut_doc_set_root(doc, root);
     yyjson_mut_obj_add_int(doc, root, "total", total);
     yyjson_mut_obj_add_str(doc, root, "search_mode", "bm25");
-    yyjson_mut_val *jcols = yyjson_mut_arr(doc);
-    static const char *const bm25_cols[] = {"qn", "label", "file", "lines", "rank"};
-    for (size_t ci = 0; ci < sizeof(bm25_cols) / sizeof(bm25_cols[0]); ci++) {
-        yyjson_mut_arr_add_str(doc, jcols, bm25_cols[ci]);
+    yyjson_mut_val *columns = yyjson_mut_arr(doc);
+    for (size_t i = 0; i < sizeof(BM25_RESULT_COLUMNS) / sizeof(BM25_RESULT_COLUMNS[0]); i++) {
+        yyjson_mut_arr_add_str(doc, columns, BM25_RESULT_COLUMNS[i]);
     }
-    yyjson_mut_obj_add_val(doc, root, "cols", jcols);
-
+    yyjson_mut_obj_add_val(doc, root, "cols", columns);
     yyjson_mut_val *rows = yyjson_mut_arr(doc);
     int emitted = 0;
     while (cbm_sql_step(stmt) == CBM_SQL_ROW) {
         char lines[CBM_SZ_32];
-        int sl = cbm_sql_column_int(stmt, BM25_COL_START);
-        int el = cbm_sql_column_int(stmt, BM25_COL_END);
-        if (sl > 0) {
-            snprintf(lines, sizeof(lines), "%d-%d", sl, el > sl ? el : sl);
-        } else {
-            lines[0] = '\0';
-        }
+        bm25_line_range(stmt, lines, sizeof(lines));
         yyjson_mut_val *row = yyjson_mut_arr(doc);
         yyjson_mut_arr_add_strcpy(doc, row, cbm_sql_column_text(stmt, BM25_COL_QN));
         yyjson_mut_arr_add_strcpy(doc, row, cbm_sql_column_text(stmt, BM25_COL_LABEL));
@@ -3067,15 +3052,38 @@ static char *bm25_search(cbm_store_t *store, const char *project, const char *qu
         yyjson_mut_arr_add_val(rows, row);
         emitted++;
     }
-    cbm_sql_finalize(stmt);
-    free(file_like);
-
     yyjson_mut_obj_add_val(doc, root, "rows", rows);
     yyjson_mut_obj_add_bool(doc, root, "has_more", total > offset + emitted);
-
     char *json = yy_doc_to_str(doc);
     yyjson_mut_doc_free(doc);
     return json;
+}
+
+/* Run the BM25 full-text search path and return the JSON result string.
+ * Returns NULL if FTS5 is unavailable or the query produced no usable tokens,
+ * in which case the caller falls back to the regex-based search path. */
+static char *bm25_search(cbm_store_t *store, const char *project, const char *query,
+                         const char *file_pattern, int limit, int offset, bool toon) {
+    cbm_sql_t *db = cbm_store_sql(store);
+    if (!db) {
+        return NULL;
+    }
+    char fts_query[BM25_QUERY_BUF];
+    if (bm25_build_match(query, fts_query, sizeof(fts_query)) == 0) {
+        return NULL;
+    }
+    char *file_like = bm25_file_pattern_like(file_pattern);
+    cbm_sql_stmt_t *stmt = bm25_prepare_results(db, fts_query, project, file_like, limit, offset);
+    if (!stmt) {
+        free(file_like);
+        return NULL;
+    }
+    int total = bm25_count_candidates(db, fts_query, project, file_like);
+    char *result =
+        toon ? bm25_render_toon(stmt, total, offset) : bm25_render_json(stmt, total, offset);
+    cbm_sql_finalize(stmt);
+    free(file_like);
+    return result;
 }
 
 /* Extract keyword strings from a yyjson array into `keywords`.  Returns the
@@ -3274,6 +3282,31 @@ static void sg_toon_extra_cells(cbm_sb_t *sb, const char *props_json, const char
     }
 }
 
+static void sg_json_extra_cells(yyjson_mut_doc *doc, yyjson_mut_val *row, const char *props_json,
+                                const char *const *fields, int nfields) {
+    yyjson_doc *properties =
+        (props_json && props_json[0]) ? yyjson_read(props_json, strlen(props_json), 0) : NULL;
+    yyjson_val *root = properties ? yyjson_doc_get_root(properties) : NULL;
+    for (int field_index = 0; field_index < nfields; field_index++) {
+        yyjson_val *value =
+            (root && yyjson_is_obj(root)) ? yyjson_obj_get(root, fields[field_index]) : NULL;
+        if (value && yyjson_is_str(value)) {
+            yyjson_mut_arr_add_strcpy(doc, row, yyjson_get_str(value));
+        } else if (value && yyjson_is_int(value)) {
+            yyjson_mut_arr_add_int(doc, row, yyjson_get_int(value));
+        } else if (value && yyjson_is_real(value)) {
+            yyjson_mut_arr_add_real(doc, row, yyjson_get_real(value));
+        } else if (value && yyjson_is_bool(value)) {
+            yyjson_mut_arr_add_bool(doc, row, yyjson_get_bool(value));
+        } else {
+            yyjson_mut_arr_add_null(doc, row);
+        }
+    }
+    if (properties) {
+        yyjson_doc_free(properties);
+    }
+}
+
 /* "start-end" line range, or empty when the node carries no line info. */
 static void sg_lines_str(char *out, size_t sz, int start, int end) {
     if (start > 0) {
@@ -3348,85 +3381,136 @@ static int sg_cmp_by_qn(const void *pa, const void *pb) {
     return strcmp(qa, qb);
 }
 
-static void emit_search_results_tree(cbm_sb_t *sb, cbm_search_output_t *out, int offset,
-                                     const char *const *fields, int nfields, cbm_store_t *store,
-                                     const char *relationship, bool include_connected) {
-    char buf[CBM_SZ_512];
-    char extra_cols[CBM_SZ_256] = "";
-    for (int f = 0; f < nfields; f++) {
-        strncat(extra_cols, " ", sizeof(extra_cols) - strlen(extra_cols) - 1);
-        strncat(extra_cols, fields[f], sizeof(extra_cols) - strlen(extra_cols) - 1);
-    }
-    if (include_connected) {
-        strncat(extra_cols, " connected", sizeof(extra_cols) - strlen(extra_cols) - 1);
-    }
-    snprintf(buf, sizeof(buf),
-             "total: %d\nresults: %d  (rows: name label lines in out%s; "
-             "qn = group prefix + \".\" + name)\n",
-             out->total, out->count, extra_cols);
-    cbm_sb_append(sb, buf);
-    /* Sort by qn so same-prefix rows are adjacent (module clustering). */
+static void sg_sort_results_by_qn(cbm_search_output_t *out) {
     if (out->count > MCP_SINGLE_PRIMARY_PROJECT) {
         qsort(out->results, (size_t)out->count, sizeof(cbm_search_result_t), sg_cmp_by_qn);
     }
-    char cur_group[CBM_SZ_1K] = "";
+}
+
+static void sg_tree_append_header(cbm_sb_t *sb, const cbm_search_output_t *out,
+                                  const char *const *fields, int nfields, bool include_connected) {
+    char extra_columns[CBM_SZ_256] = "";
+    for (int field_index = 0; field_index < nfields; field_index++) {
+        strncat(extra_columns, " ", sizeof(extra_columns) - strlen(extra_columns) - 1);
+        strncat(extra_columns, fields[field_index],
+                sizeof(extra_columns) - strlen(extra_columns) - 1);
+    }
+    if (include_connected) {
+        strncat(extra_columns, " connected", sizeof(extra_columns) - strlen(extra_columns) - 1);
+    }
+    char header[CBM_SZ_512];
+    snprintf(header, sizeof(header),
+             "total: %d\nresults: %d  (rows: name label lines in out%s; "
+             "qn = group prefix + \".\" + name)\n",
+             out->total, out->count, extra_columns);
+    cbm_sb_append(sb, header);
+}
+
+static void sg_tree_append_result(cbm_sb_t *sb, const cbm_search_result_t *result,
+                                  size_t prefix_len, const char *const *fields, int nfields,
+                                  cbm_store_t *store, const char *relationship,
+                                  bool include_connected) {
+    const char *qualified_name = result->node.qualified_name;
+    const char *short_name = prefix_len
+                                 ? qualified_name + prefix_len + MCP_QUALIFIED_NAME_SEPARATOR_BYTES
+                                 : qualified_name;
+    char lines[CBM_SZ_32];
+    sg_lines_str(lines, sizeof(lines), result->node.start_line, result->node.end_line);
+    char row[CBM_SZ_1K];
+    snprintf(row, sizeof(row), "  %s %s %s %d %d", short_name, result->node.label, lines,
+             result->in_degree, result->out_degree);
+    cbm_sb_append(sb, row);
+    if (nfields > 0) {
+        sg_toon_extra_cells(sb, result->node.properties_json, fields, nfields);
+    }
+    if (include_connected && result->node.id > 0) {
+        char joined[CBM_SZ_1K];
+        enrich_connected_joined(store, result->node.id, relationship, joined, sizeof(joined));
+        cbm_tree_cell_str(sb, joined, false);
+    }
+    cbm_sb_append(sb, "\n");
+}
+
+static void emit_search_results_tree(cbm_sb_t *sb, cbm_search_output_t *out, int offset,
+                                     const char *const *fields, int nfields, cbm_store_t *store,
+                                     const char *relationship, bool include_connected) {
+    sg_tree_append_header(sb, out, fields, nfields, include_connected);
+    sg_sort_results_by_qn(out);
+    char current_group[CBM_SZ_1K] = "";
     for (int i = 0; i < out->count; i++) {
-        const cbm_search_result_t *sr = &out->results[i];
-        const char *qn = sr->node.qualified_name;
-        const char *file = sr->node.file_path;
-        size_t plen = sg_qn_prefix_len(qn);
+        const cbm_search_result_t *result = &out->results[i];
+        const char *qualified_name = result->node.qualified_name;
+        size_t prefix_len = sg_qn_prefix_len(qualified_name);
         char group[CBM_SZ_1K];
-        snprintf(group, sizeof(group), "%.*s (%s)", (int)plen, qn, file);
-        if (strcmp(group, cur_group) != 0) {
-            snprintf(cur_group, sizeof(cur_group), "%s", group);
+        snprintf(group, sizeof(group), "%.*s (%s)", (int)prefix_len, qualified_name,
+                 result->node.file_path);
+        if (strcmp(group, current_group) != 0) {
+            snprintf(current_group, sizeof(current_group), "%s", group);
             cbm_sb_append(sb, group);
             cbm_sb_append(sb, ":\n");
         }
-        const char *shortname = plen ? qn + plen + MCP_QUALIFIED_NAME_SEPARATOR_BYTES : qn;
-        char lines[CBM_SZ_32];
-        sg_lines_str(lines, sizeof(lines), sr->node.start_line, sr->node.end_line);
-        char row[CBM_SZ_1K];
-        snprintf(row, sizeof(row), "  %s %s %s %d %d", shortname, sr->node.label, lines,
-                 sr->in_degree, sr->out_degree);
-        cbm_sb_append(sb, row);
-        /* Extra property columns (fields param). Routed through the shared
-         * cell emitters so values with spaces (signatures, docstrings) are
-         * QUOTED — a raw append would shift every following column. Missing
-         * values emit as "-" (the emitter's empty-cell placeholder). */
-        if (nfields > 0) {
-            yyjson_doc *pd =
-                (sr->node.properties_json && sr->node.properties_json[0])
-                    ? yyjson_read(sr->node.properties_json, strlen(sr->node.properties_json), 0)
-                    : NULL;
-            yyjson_val *pr = pd ? yyjson_doc_get_root(pd) : NULL;
-            for (int f = 0; f < nfields; f++) {
-                yyjson_val *v = (pr && yyjson_is_obj(pr)) ? yyjson_obj_get(pr, fields[f]) : NULL;
-                if (v && yyjson_is_str(v)) {
-                    cbm_tree_cell_str(sb, yyjson_get_str(v), false);
-                } else if (v && yyjson_is_int(v)) {
-                    cbm_tree_cell_int(sb, yyjson_get_int(v), false);
-                } else if (v && yyjson_is_real(v)) {
-                    cbm_tree_cell_real(sb, yyjson_get_real(v), false);
-                } else if (v && yyjson_is_bool(v)) {
-                    cbm_tree_cell_bool(sb, yyjson_get_bool(v), false);
-                } else {
-                    cbm_tree_cell_str(sb, "", false); /* emits "-" */
-                }
-            }
-            if (pd) {
-                yyjson_doc_free(pd);
-            }
-        }
-        if (include_connected && sr->node.id > 0) {
-            char joined[CBM_SZ_1K];
-            enrich_connected_joined(store, sr->node.id, relationship, joined, sizeof(joined));
-            cbm_tree_cell_str(sb, joined, false); /* empty emits "-" */
-        }
-        cbm_sb_append(sb, "\n");
+        sg_tree_append_result(sb, result, prefix_len, fields, nfields, store, relationship,
+                              include_connected);
     }
-    snprintf(buf, sizeof(buf), "has_more: %s\n",
+    char footer[CBM_SZ_512];
+    snprintf(footer, sizeof(footer), "has_more: %s\n",
              out->total > offset + out->count ? "true" : "false");
-    cbm_sb_append(sb, buf);
+    cbm_sb_append(sb, footer);
+}
+
+static void sg_json_add_columns(yyjson_mut_doc *doc, yyjson_mut_val *root,
+                                const char *const *fields, int nfields, bool include_connected) {
+    static const char *const core_columns[] = {"name", "label", "lines", "in", "out"};
+    yyjson_mut_val *columns = yyjson_mut_arr(doc);
+    for (size_t i = 0; i < sizeof(core_columns) / sizeof(core_columns[0]); i++) {
+        yyjson_mut_arr_add_str(doc, columns, core_columns[i]);
+    }
+    for (int field_index = 0; field_index < nfields; field_index++) {
+        yyjson_mut_arr_add_strcpy(doc, columns, fields[field_index]);
+    }
+    if (include_connected) {
+        yyjson_mut_arr_add_str(doc, columns, "connected");
+    }
+    yyjson_mut_obj_add_val(doc, root, "cols", columns);
+}
+
+static yyjson_mut_val *sg_json_start_group(yyjson_mut_doc *doc, yyjson_mut_val *groups,
+                                           const char *qualified_name, size_t prefix_len,
+                                           const char *file_path) {
+    yyjson_mut_val *group = yyjson_mut_obj(doc);
+    char prefix[CBM_SZ_1K];
+    snprintf(prefix, sizeof(prefix), "%.*s", (int)prefix_len, qualified_name);
+    yyjson_mut_obj_add_strcpy(doc, group, "qn_prefix", prefix);
+    yyjson_mut_obj_add_strcpy(doc, group, "file", file_path);
+    yyjson_mut_val *rows = yyjson_mut_arr(doc);
+    yyjson_mut_obj_add_val(doc, group, "rows", rows);
+    yyjson_mut_arr_add_val(groups, group);
+    return rows;
+}
+
+static void sg_json_append_result(yyjson_mut_doc *doc, yyjson_mut_val *rows,
+                                  const cbm_search_result_t *result, size_t prefix_len,
+                                  const char *const *fields, int nfields, cbm_store_t *store,
+                                  const char *relationship, bool include_connected) {
+    const char *qualified_name = result->node.qualified_name;
+    char lines[CBM_SZ_32];
+    sg_lines_str(lines, sizeof(lines), result->node.start_line, result->node.end_line);
+    yyjson_mut_val *row = yyjson_mut_arr(doc);
+    yyjson_mut_arr_add_strcpy(doc, row,
+                              prefix_len
+                                  ? qualified_name + prefix_len + MCP_QUALIFIED_NAME_SEPARATOR_BYTES
+                                  : qualified_name);
+    yyjson_mut_arr_add_strcpy(doc, row, result->node.label);
+    yyjson_mut_arr_add_strcpy(doc, row, lines);
+    yyjson_mut_arr_add_int(doc, row, result->in_degree);
+    yyjson_mut_arr_add_int(doc, row, result->out_degree);
+    if (nfields > 0) {
+        sg_json_extra_cells(doc, row, result->node.properties_json, fields, nfields);
+    }
+    if (include_connected && result->node.id > 0) {
+        yyjson_mut_arr_add_val(row, enrich_connected(doc, store, result->node.id, relationship));
+    }
+    yyjson_mut_arr_add_val(rows, row);
 }
 
 /* json-stringified tree: the SAME grouped model as the text tree, serialized
@@ -3440,80 +3524,25 @@ static void emit_search_results_tree_json(yyjson_mut_doc *doc, yyjson_mut_val *r
                                           bool include_connected) {
     yyjson_mut_obj_add_int(doc, root, "total", out->total);
     yyjson_mut_obj_add_int(doc, root, "count", out->count);
-    yyjson_mut_val *cols = yyjson_mut_arr(doc);
-    static const char *const col_names[] = {"name", "label", "lines", "in", "out"};
-    for (size_t i = 0; i < sizeof(col_names) / sizeof(col_names[0]); i++) {
-        yyjson_mut_arr_add_str(doc, cols, col_names[i]);
-    }
-    for (int f = 0; f < nfields; f++) {
-        yyjson_mut_arr_add_strcpy(doc, cols, fields[f]);
-    }
-    if (include_connected) {
-        yyjson_mut_arr_add_str(doc, cols, "connected");
-    }
-    yyjson_mut_obj_add_val(doc, root, "cols", cols);
-    if (out->count > MCP_SINGLE_PRIMARY_PROJECT) {
-        qsort(out->results, (size_t)out->count, sizeof(cbm_search_result_t), sg_cmp_by_qn);
-    }
+    sg_json_add_columns(doc, root, fields, nfields, include_connected);
+    sg_sort_results_by_qn(out);
     yyjson_mut_val *groups = yyjson_mut_arr(doc);
-    yyjson_mut_val *cur = NULL;
-    yyjson_mut_val *cur_rows = NULL;
-    char cur_key[CBM_SZ_1K] = "";
+    yyjson_mut_val *current_rows = NULL;
+    char current_key[CBM_SZ_1K] = "";
     for (int i = 0; i < out->count; i++) {
-        const cbm_search_result_t *sr = &out->results[i];
-        const char *qn = sr->node.qualified_name;
-        const char *file = sr->node.file_path;
-        size_t plen = sg_qn_prefix_len(qn);
+        const cbm_search_result_t *result = &out->results[i];
+        const char *qualified_name = result->node.qualified_name;
+        size_t prefix_len = sg_qn_prefix_len(qualified_name);
         char key[CBM_SZ_1K];
-        snprintf(key, sizeof(key), "%.*s|%s", (int)plen, qn, file);
-        if (!cur || strcmp(key, cur_key) != 0) {
-            snprintf(cur_key, sizeof(cur_key), "%s", key);
-            cur = yyjson_mut_obj(doc);
-            char prefix[CBM_SZ_1K];
-            snprintf(prefix, sizeof(prefix), "%.*s", (int)plen, qn);
-            yyjson_mut_obj_add_strcpy(doc, cur, "qn_prefix", prefix);
-            yyjson_mut_obj_add_strcpy(doc, cur, "file", file);
-            cur_rows = yyjson_mut_arr(doc);
-            yyjson_mut_obj_add_val(doc, cur, "rows", cur_rows);
-            yyjson_mut_arr_add_val(groups, cur);
+        snprintf(key, sizeof(key), "%.*s|%s", (int)prefix_len, qualified_name,
+                 result->node.file_path);
+        if (!current_rows || strcmp(key, current_key) != 0) {
+            snprintf(current_key, sizeof(current_key), "%s", key);
+            current_rows = sg_json_start_group(doc, groups, qualified_name, prefix_len,
+                                               result->node.file_path);
         }
-        char lines[CBM_SZ_32];
-        sg_lines_str(lines, sizeof(lines), sr->node.start_line, sr->node.end_line);
-        yyjson_mut_val *row = yyjson_mut_arr(doc);
-        yyjson_mut_arr_add_strcpy(doc, row,
-                                  plen ? qn + plen + MCP_QUALIFIED_NAME_SEPARATOR_BYTES : qn);
-        yyjson_mut_arr_add_strcpy(doc, row, sr->node.label);
-        yyjson_mut_arr_add_strcpy(doc, row, lines);
-        yyjson_mut_arr_add_int(doc, row, sr->in_degree);
-        yyjson_mut_arr_add_int(doc, row, sr->out_degree);
-        if (nfields > 0) {
-            yyjson_doc *pd =
-                (sr->node.properties_json && sr->node.properties_json[0])
-                    ? yyjson_read(sr->node.properties_json, strlen(sr->node.properties_json), 0)
-                    : NULL;
-            yyjson_val *pr = pd ? yyjson_doc_get_root(pd) : NULL;
-            for (int f = 0; f < nfields; f++) {
-                yyjson_val *v = (pr && yyjson_is_obj(pr)) ? yyjson_obj_get(pr, fields[f]) : NULL;
-                if (v && yyjson_is_str(v)) {
-                    yyjson_mut_arr_add_strcpy(doc, row, yyjson_get_str(v));
-                } else if (v && yyjson_is_int(v)) {
-                    yyjson_mut_arr_add_int(doc, row, yyjson_get_int(v));
-                } else if (v && yyjson_is_real(v)) {
-                    yyjson_mut_arr_add_real(doc, row, yyjson_get_real(v));
-                } else if (v && yyjson_is_bool(v)) {
-                    yyjson_mut_arr_add_bool(doc, row, yyjson_get_bool(v));
-                } else {
-                    yyjson_mut_arr_add_null(doc, row);
-                }
-            }
-            if (pd) {
-                yyjson_doc_free(pd);
-            }
-        }
-        if (include_connected && sr->node.id > 0) {
-            yyjson_mut_arr_add_val(row, enrich_connected(doc, store, sr->node.id, relationship));
-        }
-        yyjson_mut_arr_add_val(cur_rows, row);
+        sg_json_append_result(doc, current_rows, result, prefix_len, fields, nfields, store,
+                              relationship, include_connected);
     }
     yyjson_mut_obj_add_val(doc, root, "groups", groups);
     yyjson_mut_obj_add_bool(doc, root, "has_more", out->total > offset + out->count);
@@ -3934,89 +3963,105 @@ static char *handle_query_graph(cbm_mcp_server_t *srv, const char *args) {
  * the graph, stored outside it). Full per-project list, capped generously. */
 enum { COVERAGE_FILE_CAP = 500 };
 
+typedef struct {
+    yyjson_mut_val *entries;
+    int count;
+} coverage_bucket_t;
+
+static void coverage_append_file_entry(yyjson_mut_doc *doc, coverage_bucket_t *bucket,
+                                       const cbm_coverage_row_t *row, const char *detail_key,
+                                       bool include_phase) {
+    if (bucket->count < COVERAGE_FILE_CAP) {
+        yyjson_mut_val *entry = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_strcpy(doc, entry, "path", row->rel_path);
+        yyjson_mut_obj_add_strcpy(doc, entry, detail_key, row->detail ? row->detail : "");
+        if (include_phase) {
+            yyjson_mut_obj_add_strcpy(doc, entry, "phase", row->kind ? row->kind : "");
+        }
+        yyjson_mut_arr_add_val(bucket->entries, entry);
+    }
+    bucket->count++;
+}
+
+static void coverage_append_not_indexed_directory(yyjson_mut_doc *doc, coverage_bucket_t *bucket,
+                                                  const cbm_coverage_row_t *row) {
+    if (bucket->count < COVERAGE_FILE_CAP) {
+        yyjson_mut_arr_add_strcpy(doc, bucket->entries, row->rel_path);
+    }
+    bucket->count++;
+}
+
+static void coverage_record_row(yyjson_mut_doc *doc, const cbm_coverage_row_t *row,
+                                coverage_bucket_t *parse_partial, coverage_bucket_t *skipped,
+                                coverage_bucket_t *not_indexed_directories,
+                                coverage_bucket_t *not_indexed_files) {
+    const char *kind = row->kind ? row->kind : "";
+    if (strcmp(kind, "parse_partial") == 0) {
+        coverage_append_file_entry(doc, parse_partial, row, "error_ranges", false);
+    } else if (strcmp(kind, "not_indexed_dir") == 0) {
+        coverage_append_not_indexed_directory(doc, not_indexed_directories, row);
+    } else if (strcmp(kind, "not_indexed_file") == 0) {
+        coverage_append_file_entry(doc, not_indexed_files, row, "reason", false);
+    } else {
+        coverage_append_file_entry(doc, skipped, row, "reason", true);
+    }
+}
+
+static void coverage_add_file_section(yyjson_mut_doc *doc, yyjson_mut_val *root, const char *key,
+                                      coverage_bucket_t *bucket) {
+    yyjson_mut_val *section = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_val(doc, section, "files", bucket->entries);
+    yyjson_mut_obj_add_int(doc, section, "count", bucket->count);
+    yyjson_mut_obj_add_bool(doc, section, "truncated", bucket->count > COVERAGE_FILE_CAP);
+    yyjson_mut_obj_add_val(doc, root, key, section);
+}
+
+static void coverage_add_not_indexed_section(yyjson_mut_doc *doc, yyjson_mut_val *root,
+                                             coverage_bucket_t *directories,
+                                             coverage_bucket_t *files) {
+    yyjson_mut_val *section = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_val(doc, section, "dirs", directories->entries);
+    yyjson_mut_obj_add_int(doc, section, "dirs_count", directories->count);
+    yyjson_mut_obj_add_val(doc, section, "files", files->entries);
+    yyjson_mut_obj_add_int(doc, section, "files_count", files->count);
+    yyjson_mut_obj_add_bool(doc, section, "truncated",
+                            directories->count > COVERAGE_FILE_CAP ||
+                                files->count > COVERAGE_FILE_CAP);
+    if (directories->count > 0 || files->count > 0) {
+        yyjson_mut_obj_add_str(doc, section, "note",
+                               "Purposely not indexed — excluded BY DESIGN via "
+                               "gitignore/.cbmignore/skip-lists (see each file's reason). Not an "
+                               "error: change the ignore rules and re-index to include them.");
+    }
+    yyjson_mut_obj_add_val(doc, root, "not_indexed", section);
+}
+
 static void add_coverage_report(yyjson_mut_doc *doc, yyjson_mut_val *root, cbm_store_t *store,
                                 const char *project) {
     cbm_coverage_row_t *rows = NULL;
     int count = 0;
     (void)cbm_store_coverage_get(store, project, &rows, &count);
 
-    yyjson_mut_val *pp_files = yyjson_mut_arr(doc);
-    yyjson_mut_val *sk_files = yyjson_mut_arr(doc);
-    yyjson_mut_val *ni_dirs = yyjson_mut_arr(doc);
-    yyjson_mut_val *ni_files = yyjson_mut_arr(doc);
-    int pp_n = 0;
-    int sk_n = 0;
-    int ni_dir_n = 0;
-    int ni_file_n = 0;
+    coverage_bucket_t parse_partial = {.entries = yyjson_mut_arr(doc), .count = 0};
+    coverage_bucket_t skipped = {.entries = yyjson_mut_arr(doc), .count = 0};
+    coverage_bucket_t not_indexed_directories = {.entries = yyjson_mut_arr(doc), .count = 0};
+    coverage_bucket_t not_indexed_files = {.entries = yyjson_mut_arr(doc), .count = 0};
     for (int i = 0; i < count; i++) {
-        const char *kind = rows[i].kind ? rows[i].kind : "";
-        if (strcmp(kind, "parse_partial") == 0) {
-            if (pp_n < COVERAGE_FILE_CAP) {
-                yyjson_mut_val *fe = yyjson_mut_obj(doc);
-                yyjson_mut_obj_add_strcpy(doc, fe, "path", rows[i].rel_path);
-                yyjson_mut_obj_add_strcpy(doc, fe, "error_ranges",
-                                          rows[i].detail ? rows[i].detail : "");
-                yyjson_mut_arr_add_val(pp_files, fe);
-            }
-            pp_n++;
-        } else if (strcmp(kind, "not_indexed_dir") == 0) {
-            if (ni_dir_n < COVERAGE_FILE_CAP) {
-                yyjson_mut_arr_add_strcpy(doc, ni_dirs, rows[i].rel_path);
-            }
-            ni_dir_n++;
-        } else if (strcmp(kind, "not_indexed_file") == 0) {
-            if (ni_file_n < COVERAGE_FILE_CAP) {
-                yyjson_mut_val *fe = yyjson_mut_obj(doc);
-                yyjson_mut_obj_add_strcpy(doc, fe, "path", rows[i].rel_path);
-                yyjson_mut_obj_add_strcpy(doc, fe, "reason", rows[i].detail ? rows[i].detail : "");
-                yyjson_mut_arr_add_val(ni_files, fe);
-            }
-            ni_file_n++;
-        } else {
-            if (sk_n < COVERAGE_FILE_CAP) {
-                yyjson_mut_val *fe = yyjson_mut_obj(doc);
-                yyjson_mut_obj_add_strcpy(doc, fe, "path", rows[i].rel_path);
-                yyjson_mut_obj_add_strcpy(doc, fe, "reason", rows[i].detail ? rows[i].detail : "");
-                yyjson_mut_obj_add_strcpy(doc, fe, "phase", rows[i].kind ? rows[i].kind : "");
-                yyjson_mut_arr_add_val(sk_files, fe);
-            }
-            sk_n++;
-        }
+        coverage_record_row(doc, &rows[i], &parse_partial, &skipped, &not_indexed_directories,
+                            &not_indexed_files);
     }
     cbm_store_free_coverage(rows, count);
 
-    yyjson_mut_val *pp = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_val(doc, pp, "files", pp_files);
-    yyjson_mut_obj_add_int(doc, pp, "count", pp_n);
-    yyjson_mut_obj_add_bool(doc, pp, "truncated", pp_n > COVERAGE_FILE_CAP);
-    yyjson_mut_obj_add_val(doc, root, "parse_partial", pp);
-
-    yyjson_mut_val *sk = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_val(doc, sk, "files", sk_files);
-    yyjson_mut_obj_add_int(doc, sk, "count", sk_n);
-    yyjson_mut_obj_add_bool(doc, sk, "truncated", sk_n > COVERAGE_FILE_CAP);
-    yyjson_mut_obj_add_val(doc, root, "skipped", sk);
+    coverage_add_file_section(doc, root, "parse_partial", &parse_partial);
+    coverage_add_file_section(doc, root, "skipped", &skipped);
 
     /* By-design exclusions (#963 "purposely not indexed"): a deliberate,
      * deterministic class — NOT a failure and NOT best-effort. Dirs are
      * exhaustive; per-file entries are capped in discovery (2000) with the
      * truncation explicit. */
-    yyjson_mut_val *ni = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_val(doc, ni, "dirs", ni_dirs);
-    yyjson_mut_obj_add_int(doc, ni, "dirs_count", ni_dir_n);
-    yyjson_mut_obj_add_val(doc, ni, "files", ni_files);
-    yyjson_mut_obj_add_int(doc, ni, "files_count", ni_file_n);
-    yyjson_mut_obj_add_bool(doc, ni, "truncated",
-                            ni_dir_n > COVERAGE_FILE_CAP || ni_file_n > COVERAGE_FILE_CAP);
-    if (ni_dir_n > 0 || ni_file_n > 0) {
-        yyjson_mut_obj_add_str(doc, ni, "note",
-                               "Purposely not indexed — excluded BY DESIGN via "
-                               "gitignore/.cbmignore/skip-lists (see each file's reason). Not an "
-                               "error: change the ignore rules and re-index to include them.");
-    }
-    yyjson_mut_obj_add_val(doc, root, "not_indexed", ni);
+    coverage_add_not_indexed_section(doc, root, &not_indexed_directories, &not_indexed_files);
 
-    if (pp_n > 0 || sk_n > 0) {
+    if (parse_partial.count > 0 || skipped.count > 0) {
         yyjson_mut_obj_add_str(
             doc, root, "coverage_note",
             "Best-effort signal, not a completeness guarantee: parse_partial files WERE indexed, "
@@ -4685,20 +4730,30 @@ typedef struct {
     int nedges;    /* |E| within the vertex set */
 } scc_graph_t;
 
+enum {
+    SCC_INDEX_NOT_FOUND = -1,
+    SCC_INDEX_STEP = 1,
+    SCC_BINARY_SEARCH_DIVISOR = 2,
+    SCC_EDGE_ENDPOINT_COUNT = 2U,
+    SCC_EDGE_TARGET_OFFSET = 1U,
+    SCC_ADJ_HEAD_TRAILER = 1,
+    SCC_NONTRIVIAL_COMPONENT_MIN_VERTICES = 2,
+};
+
 static int scc_id_index(const int64_t *ids, int n, int64_t id) {
     int lo = 0;
-    int hi = n - 1;
+    int hi = n - SCC_INDEX_STEP;
     while (lo <= hi) {
-        int mid = (lo + hi) / 2;
+        int mid = (lo + hi) / SCC_BINARY_SEARCH_DIVISOR;
         if (ids[mid] < id) {
-            lo = mid + 1;
+            lo = mid + SCC_INDEX_STEP;
         } else if (ids[mid] > id) {
-            hi = mid - 1;
+            hi = mid - SCC_INDEX_STEP;
         } else {
             return mid;
         }
     }
-    return -1;
+    return SCC_INDEX_NOT_FOUND;
 }
 
 static int cmp_int64(const void *a, const void *b) {
@@ -4714,25 +4769,25 @@ static bool scc_build(const int64_t *src, const int64_t *tgt, int ecount, scc_gr
     if (ecount <= 0) {
         return false;
     }
-    size_t endpoint_count = (size_t)ecount * 2U;
+    size_t endpoint_count = (size_t)ecount * SCC_EDGE_ENDPOINT_COUNT;
     int64_t *all = malloc(endpoint_count * sizeof(int64_t));
     if (!all) {
         return false;
     }
     for (size_t i = 0; i < (size_t)ecount; i++) {
-        all[2U * i] = src[i];
-        all[(2U * i) + 1U] = tgt[i];
+        all[SCC_EDGE_ENDPOINT_COUNT * i] = src[i];
+        all[(SCC_EDGE_ENDPOINT_COUNT * i) + SCC_EDGE_TARGET_OFFSET] = tgt[i];
     }
     qsort(all, endpoint_count, sizeof(int64_t), cmp_int64);
     int nv = 0;
     for (size_t i = 0; i < endpoint_count; i++) {
-        if (i == 0 || all[i] != all[i - 1]) {
+        if (i == 0 || all[i] != all[i - SCC_INDEX_STEP]) {
             all[nv++] = all[i];
         }
     }
     g->ids = all;
     g->nverts = nv;
-    g->adj_head = calloc((size_t)nv + 1, sizeof(int));
+    g->adj_head = calloc((size_t)nv + SCC_ADJ_HEAD_TRAILER, sizeof(int));
     g->adj = malloc((size_t)ecount * sizeof(int));
     if (!g->adj_head || !g->adj) {
         free(g->ids);
@@ -4752,10 +4807,10 @@ static bool scc_build(const int64_t *src, const int64_t *tgt, int ecount, scc_gr
         if (u < 0 || v < 0) {
             continue;
         }
-        g->adj_head[u + 1]++;
+        g->adj_head[u + SCC_ADJ_HEAD_TRAILER]++;
     }
     for (int i = 0; i < nv; i++) {
-        g->adj_head[i + 1] += g->adj_head[i];
+        g->adj_head[i + SCC_ADJ_HEAD_TRAILER] += g->adj_head[i];
     }
     int *cursor = malloc((size_t)nv * sizeof(int));
     if (!cursor) {
@@ -4790,82 +4845,122 @@ static void scc_free(scc_graph_t *g) {
     memset(g, 0, sizeof(*g));
 }
 
+typedef struct {
+    int *index;
+    int *low;
+    bool *on_stack;
+    int *tarjan_stack;
+    int *dfs_vertex;
+    int *dfs_edge;
+    int counter;
+    int tarjan_stack_size;
+    int component_count;
+} scc_tarjan_state_t;
+
+static void scc_tarjan_state_free(scc_tarjan_state_t *state) {
+    free(state->index);
+    free(state->low);
+    free(state->on_stack);
+    free(state->tarjan_stack);
+    free(state->dfs_vertex);
+    free(state->dfs_edge);
+    memset(state, 0, sizeof(*state));
+}
+
+static bool scc_tarjan_state_init(scc_tarjan_state_t *state, int nverts, int *comp) {
+    memset(state, 0, sizeof(*state));
+    state->index = malloc((size_t)nverts * sizeof(int));
+    state->low = malloc((size_t)nverts * sizeof(int));
+    state->on_stack = calloc((size_t)nverts, sizeof(bool));
+    state->tarjan_stack = malloc((size_t)nverts * sizeof(int));
+    state->dfs_vertex = malloc((size_t)nverts * sizeof(int));
+    state->dfs_edge = malloc((size_t)nverts * sizeof(int));
+    if (!state->index || !state->low || !state->on_stack || !state->tarjan_stack ||
+        !state->dfs_vertex || !state->dfs_edge) {
+        scc_tarjan_state_free(state);
+        return false;
+    }
+    for (int i = 0; i < nverts; i++) {
+        state->index[i] = SCC_INDEX_NOT_FOUND;
+        comp[i] = SCC_INDEX_NOT_FOUND;
+    }
+    return true;
+}
+
+static void scc_tarjan_discover(scc_tarjan_state_t *state, int vertex) {
+    state->index[vertex] = state->counter;
+    state->low[vertex] = state->counter;
+    state->counter++;
+    state->tarjan_stack[state->tarjan_stack_size++] = vertex;
+    state->on_stack[vertex] = true;
+}
+
+static bool scc_tarjan_visit_next_edge(const scc_graph_t *graph, scc_tarjan_state_t *state,
+                                       int *dfs_depth_io) {
+    int dfs_depth = *dfs_depth_io;
+    int vertex = state->dfs_vertex[dfs_depth];
+    if (state->dfs_edge[dfs_depth] >= graph->adj_head[vertex + SCC_ADJ_HEAD_TRAILER]) {
+        return false;
+    }
+    int adjacent = graph->adj[state->dfs_edge[dfs_depth]++];
+    if (state->index[adjacent] == SCC_INDEX_NOT_FOUND) {
+        scc_tarjan_discover(state, adjacent);
+        dfs_depth += SCC_INDEX_STEP;
+        state->dfs_vertex[dfs_depth] = adjacent;
+        state->dfs_edge[dfs_depth] = graph->adj_head[adjacent];
+        *dfs_depth_io = dfs_depth;
+    } else if (state->on_stack[adjacent] && state->index[adjacent] < state->low[vertex]) {
+        state->low[vertex] = state->index[adjacent];
+    }
+    return true;
+}
+
+static void scc_tarjan_finish_vertex(scc_tarjan_state_t *state, int *comp, int *dfs_depth_io) {
+    int dfs_depth = *dfs_depth_io;
+    int vertex = state->dfs_vertex[dfs_depth];
+    if (state->low[vertex] == state->index[vertex]) {
+        while (true) {
+            int member = state->tarjan_stack[--state->tarjan_stack_size];
+            state->on_stack[member] = false;
+            comp[member] = state->component_count;
+            if (member == vertex) {
+                break;
+            }
+        }
+        state->component_count++;
+    }
+    dfs_depth--;
+    if (dfs_depth >= 0 && state->low[vertex] < state->low[state->dfs_vertex[dfs_depth]]) {
+        state->low[state->dfs_vertex[dfs_depth]] = state->low[vertex];
+    }
+    *dfs_depth_io = dfs_depth;
+}
+
 /* Iterative Tarjan. Fills comp[v] with a component id; components are numbered
  * in discovery order. Returns the component count, or -1 on OOM. */
 static int scc_tarjan(const scc_graph_t *g, int *comp) {
-    enum { SCC_UNVISITED = -1 };
     int nv = g->nverts;
-    int *index = malloc((size_t)nv * sizeof(int));
-    int *low = malloc((size_t)nv * sizeof(int));
-    bool *on_stack = calloc((size_t)nv, sizeof(bool));
-    int *tstack = malloc((size_t)nv * sizeof(int)); /* Tarjan's node stack */
-    int *dfs_v = malloc((size_t)nv * sizeof(int));  /* explicit DFS: vertex */
-    int *dfs_i = malloc((size_t)nv * sizeof(int));  /* explicit DFS: adj cursor */
-    if (!index || !low || !on_stack || !tstack || !dfs_v || !dfs_i) {
-        free(index);
-        free(low);
-        free(on_stack);
-        free(tstack);
-        free(dfs_v);
-        free(dfs_i);
-        return -1;
+    scc_tarjan_state_t state;
+    if (!scc_tarjan_state_init(&state, nv, comp)) {
+        return SCC_INDEX_NOT_FOUND;
     }
-    for (int i = 0; i < nv; i++) {
-        index[i] = SCC_UNVISITED;
-        comp[i] = SCC_UNVISITED;
-    }
-    int counter = 0;
-    int tsp = 0;   /* Tarjan stack pointer */
-    int ncomp = 0; /* component id allocator */
     for (int s = 0; s < nv; s++) {
-        if (index[s] != SCC_UNVISITED) {
+        if (state.index[s] != SCC_INDEX_NOT_FOUND) {
             continue;
         }
-        int dsp = 0; /* DFS stack pointer */
-        dfs_v[dsp] = s;
-        dfs_i[dsp] = g->adj_head[s];
-        index[s] = low[s] = counter++;
-        tstack[tsp++] = s;
-        on_stack[s] = true;
-        while (dsp >= 0) {
-            int v = dfs_v[dsp];
-            if (dfs_i[dsp] < g->adj_head[v + 1]) {
-                int w = g->adj[dfs_i[dsp]++];
-                if (index[w] == SCC_UNVISITED) {
-                    index[w] = low[w] = counter++;
-                    tstack[tsp++] = w;
-                    on_stack[w] = true;
-                    dsp++;
-                    dfs_v[dsp] = w;
-                    dfs_i[dsp] = g->adj_head[w];
-                } else if (on_stack[w] && index[w] < low[v]) {
-                    low[v] = index[w];
-                }
-            } else {
-                /* v fully explored: it is a root iff low==index -> pop an SCC */
-                if (low[v] == index[v]) {
-                    int w;
-                    do {
-                        w = tstack[--tsp];
-                        on_stack[w] = false;
-                        comp[w] = ncomp;
-                    } while (w != v);
-                    ncomp++;
-                }
-                dsp--;
-                if (dsp >= 0 && low[v] < low[dfs_v[dsp]]) {
-                    low[dfs_v[dsp]] = low[v];
-                }
+        int dfs_depth = 0;
+        state.dfs_vertex[dfs_depth] = s;
+        state.dfs_edge[dfs_depth] = g->adj_head[s];
+        scc_tarjan_discover(&state, s);
+        while (dfs_depth >= 0) {
+            if (!scc_tarjan_visit_next_edge(g, &state, &dfs_depth)) {
+                scc_tarjan_finish_vertex(&state, comp, &dfs_depth);
             }
         }
     }
-    free(index);
-    free(low);
-    free(on_stack);
-    free(tstack);
-    free(dfs_v);
-    free(dfs_i);
-    return ncomp;
+    int component_count = state.component_count;
+    scc_tarjan_state_free(&state);
+    return component_count;
 }
 
 static bool aspect_is_valid(const char *name) {
@@ -5033,7 +5128,7 @@ static int arch_compute_cycles(cbm_store_t *store, const char *project, int64_t 
     /* collect components with size > 1 (the cycles) */
     int ncyc = 0;
     for (int c = 0; c < ncomp; c++) {
-        if (csize[c] > 1) {
+        if (csize[c] >= SCC_NONTRIVIAL_COMPONENT_MIN_VERTICES) {
             ncyc++;
         }
     }
@@ -5057,13 +5152,13 @@ static int arch_compute_cycles(cbm_store_t *store, const char *project, int64_t 
     }
     int next_slot = 0;
     for (int c = 0; c < ncomp; c++) {
-        if (csize[c] > 1 && next_slot < ncyc) {
+        if (csize[c] >= SCC_NONTRIVIAL_COMPONENT_MIN_VERTICES && next_slot < ncyc) {
             slot[c] = next_slot;
             sizes[next_slot] = csize[c];
             members[next_slot] = malloc((size_t)csize[c] * sizeof(int64_t));
             next_slot++;
         } else {
-            slot[c] = -1;
+            slot[c] = SCC_INDEX_NOT_FOUND;
         }
     }
     int *fill = calloc((size_t)ncyc, sizeof(int));
@@ -5127,6 +5222,24 @@ static void arch_node_qn(cbm_store_t *store, int64_t id, char *out, size_t outsz
     }
     free_node_contents(&n);
 }
+
+enum {
+    ARCH_NODE_LABEL_COLUMN_COUNT = 2,
+    ARCH_EDGE_TYPE_COLUMN_COUNT = 2,
+    ARCH_RELATIONSHIP_PATTERN_COLUMN_COUNT = 1,
+    ARCH_LANGUAGE_COLUMN_COUNT = 2,
+    ARCH_PACKAGE_COLUMN_COUNT = 4,
+    ARCH_ENTRY_POINT_COLUMN_COUNT = 2,
+    ARCH_ROUTE_COLUMN_COUNT = 3,
+    ARCH_HOTSPOT_COLUMN_COUNT = 2,
+    ARCH_BOUNDARY_COLUMN_COUNT = 3,
+    ARCH_SERVICE_COLUMN_COUNT = 4,
+    ARCH_LAYER_COLUMN_COUNT = 3,
+    ARCH_CLUSTER_COLUMN_COUNT = 7,
+    ARCH_FILE_TREE_COLUMN_COUNT = 3,
+    ARCH_CYCLE_ROW_APPEND_RESERVE = 2,
+    ARCH_CYCLE_TRUNCATION_RESERVE = 8,
+};
 
 static char *handle_get_architecture(cbm_mcp_server_t *srv, const char *args) {
     char *project = get_project_arg(args);
@@ -5263,7 +5376,8 @@ static char *handle_get_architecture(cbm_mcp_server_t *srv, const char *args) {
 
         if (aspect_wanted(aspects_doc, aspects_arr, "structure") && schema.node_label_count > 0) {
             static const char *const lcols[] = {"label", "count"};
-            cbm_tree_table_header(&sb, "node_labels", schema.node_label_count, lcols, 2);
+            cbm_tree_table_header(&sb, "node_labels", schema.node_label_count, lcols,
+                                  ARCH_NODE_LABEL_COLUMN_COUNT);
             for (int i = 0; i < schema.node_label_count; i++) {
                 cbm_tree_row_begin(&sb);
                 cbm_tree_cell_str(&sb, schema.node_labels[i].label, true);
@@ -5273,7 +5387,8 @@ static char *handle_get_architecture(cbm_mcp_server_t *srv, const char *args) {
         }
         if (aspect_wanted(aspects_doc, aspects_arr, "dependencies") && schema.edge_type_count > 0) {
             static const char *const tcols[] = {"type", "count"};
-            cbm_tree_table_header(&sb, "edge_types", schema.edge_type_count, tcols, 2);
+            cbm_tree_table_header(&sb, "edge_types", schema.edge_type_count, tcols,
+                                  ARCH_EDGE_TYPE_COLUMN_COUNT);
             for (int i = 0; i < schema.edge_type_count; i++) {
                 cbm_tree_row_begin(&sb);
                 cbm_tree_cell_str(&sb, schema.edge_types[i].type, true);
@@ -5283,7 +5398,8 @@ static char *handle_get_architecture(cbm_mcp_server_t *srv, const char *args) {
         }
         if (aspect_wanted(aspects_doc, aspects_arr, "routes") && schema.rel_pattern_count > 0) {
             static const char *const pcols[] = {"pattern"};
-            cbm_tree_table_header(&sb, "relationship_patterns", schema.rel_pattern_count, pcols, 1);
+            cbm_tree_table_header(&sb, "relationship_patterns", schema.rel_pattern_count, pcols,
+                                  ARCH_RELATIONSHIP_PATTERN_COLUMN_COUNT);
             for (int i = 0; i < schema.rel_pattern_count; i++) {
                 cbm_tree_row_begin(&sb);
                 cbm_tree_cell_str(&sb, schema.rel_patterns[i], true);
@@ -5292,7 +5408,8 @@ static char *handle_get_architecture(cbm_mcp_server_t *srv, const char *args) {
         }
         if (arch.language_count > 0) {
             static const char *const gcols[] = {"language", "files"};
-            cbm_tree_table_header(&sb, "languages", arch.language_count, gcols, 2);
+            cbm_tree_table_header(&sb, "languages", arch.language_count, gcols,
+                                  ARCH_LANGUAGE_COLUMN_COUNT);
             for (int i = 0; i < arch.language_count; i++) {
                 cbm_tree_row_begin(&sb);
                 cbm_tree_cell_str(&sb, arch.languages[i].language, true);
@@ -5302,7 +5419,8 @@ static char *handle_get_architecture(cbm_mcp_server_t *srv, const char *args) {
         }
         if (arch.package_count > 0) {
             static const char *const kcols[] = {"name", "nodes", "fan_in", "fan_out"};
-            cbm_tree_table_header(&sb, "packages", arch.package_count, kcols, 4);
+            cbm_tree_table_header(&sb, "packages", arch.package_count, kcols,
+                                  ARCH_PACKAGE_COLUMN_COUNT);
             for (int i = 0; i < arch.package_count; i++) {
                 cbm_tree_row_begin(&sb);
                 cbm_tree_cell_str(&sb, arch.packages[i].name, true);
@@ -5315,7 +5433,8 @@ static char *handle_get_architecture(cbm_mcp_server_t *srv, const char *args) {
         if (arch.entry_point_count > 0) {
             /* qn only — `name` is its last segment. */
             static const char *const ecols[] = {"qn", "file"};
-            cbm_tree_table_header(&sb, "entry_points", arch.entry_point_count, ecols, 2);
+            cbm_tree_table_header(&sb, "entry_points", arch.entry_point_count, ecols,
+                                  ARCH_ENTRY_POINT_COLUMN_COUNT);
             for (int i = 0; i < arch.entry_point_count; i++) {
                 cbm_tree_row_begin(&sb);
                 cbm_tree_cell_str(&sb, arch.entry_points[i].qualified_name, true);
@@ -5325,7 +5444,7 @@ static char *handle_get_architecture(cbm_mcp_server_t *srv, const char *args) {
         }
         if (arch.route_count > 0) {
             static const char *const rcols[] = {"method", "path", "handler"};
-            cbm_tree_table_header(&sb, "routes", arch.route_count, rcols, 3);
+            cbm_tree_table_header(&sb, "routes", arch.route_count, rcols, ARCH_ROUTE_COLUMN_COUNT);
             for (int i = 0; i < arch.route_count; i++) {
                 cbm_tree_row_begin(&sb);
                 cbm_tree_cell_str(&sb, arch.routes[i].method, true);
@@ -5336,7 +5455,8 @@ static char *handle_get_architecture(cbm_mcp_server_t *srv, const char *args) {
         }
         if (arch.hotspot_count > 0) {
             static const char *const hcols[] = {"qn", "fan_in"};
-            cbm_tree_table_header(&sb, "hotspots", arch.hotspot_count, hcols, 2);
+            cbm_tree_table_header(&sb, "hotspots", arch.hotspot_count, hcols,
+                                  ARCH_HOTSPOT_COLUMN_COUNT);
             for (int i = 0; i < arch.hotspot_count; i++) {
                 cbm_tree_row_begin(&sb);
                 cbm_tree_cell_str(&sb, arch.hotspots[i].qualified_name, true);
@@ -5346,7 +5466,8 @@ static char *handle_get_architecture(cbm_mcp_server_t *srv, const char *args) {
         }
         if (arch.boundary_count > 0) {
             static const char *const bcols[] = {"from", "to", "calls"};
-            cbm_tree_table_header(&sb, "boundaries", arch.boundary_count, bcols, 3);
+            cbm_tree_table_header(&sb, "boundaries", arch.boundary_count, bcols,
+                                  ARCH_BOUNDARY_COLUMN_COUNT);
             for (int i = 0; i < arch.boundary_count; i++) {
                 cbm_tree_row_begin(&sb);
                 cbm_tree_cell_str(&sb, arch.boundaries[i].from, true);
@@ -5357,7 +5478,8 @@ static char *handle_get_architecture(cbm_mcp_server_t *srv, const char *args) {
         }
         if (arch.service_count > 0) {
             static const char *const scols[] = {"from", "to", "type", "count"};
-            cbm_tree_table_header(&sb, "services", arch.service_count, scols, 4);
+            cbm_tree_table_header(&sb, "services", arch.service_count, scols,
+                                  ARCH_SERVICE_COLUMN_COUNT);
             for (int i = 0; i < arch.service_count; i++) {
                 cbm_tree_row_begin(&sb);
                 cbm_tree_cell_str(&sb, arch.services[i].from, true);
@@ -5369,7 +5491,7 @@ static char *handle_get_architecture(cbm_mcp_server_t *srv, const char *args) {
         }
         if (arch.layer_count > 0) {
             static const char *const ycols[] = {"name", "layer", "reason"};
-            cbm_tree_table_header(&sb, "layers", arch.layer_count, ycols, 3);
+            cbm_tree_table_header(&sb, "layers", arch.layer_count, ycols, ARCH_LAYER_COLUMN_COUNT);
             for (int i = 0; i < arch.layer_count; i++) {
                 cbm_tree_row_begin(&sb);
                 cbm_tree_cell_str(&sb, arch.layers[i].name, true);
@@ -5382,7 +5504,8 @@ static char *handle_get_architecture(cbm_mcp_server_t *srv, const char *args) {
             /* Nested lists become ';'-joined cells. */
             static const char *const ccols[] = {"id",        "label",    "members",   "cohesion",
                                                 "top_nodes", "packages", "edge_types"};
-            cbm_tree_table_header(&sb, "clusters", arch.cluster_count, ccols, 7);
+            cbm_tree_table_header(&sb, "clusters", arch.cluster_count, ccols,
+                                  ARCH_CLUSTER_COLUMN_COUNT);
             for (int i = 0; i < arch.cluster_count; i++) {
                 const cbm_cluster_info_t *c = &arch.clusters[i];
                 char joined[CBM_SZ_1K];
@@ -5402,7 +5525,8 @@ static char *handle_get_architecture(cbm_mcp_server_t *srv, const char *args) {
         }
         if (arch.file_tree_count > 0) {
             static const char *const fcols[] = {"path", "type", "children"};
-            cbm_tree_table_header(&sb, "file_tree", arch.file_tree_count, fcols, 3);
+            cbm_tree_table_header(&sb, "file_tree", arch.file_tree_count, fcols,
+                                  ARCH_FILE_TREE_COLUMN_COUNT);
             for (int i = 0; i < arch.file_tree_count; i++) {
                 cbm_tree_row_begin(&sb);
                 cbm_tree_cell_str(&sb, arch.file_tree[i].path, true);
@@ -5464,14 +5588,15 @@ static char *handle_get_architecture(cbm_mcp_server_t *srv, const char *args) {
                     int off = snprintf(row, sizeof(row), "  %d ", sizes[c]);
                     bool clipped = sizes[c] > ARCH_SCC_MEMBERS_SHOWN;
                     int show = clipped ? ARCH_SCC_MEMBERS_SHOWN : sizes[c];
-                    for (int m = 0; m < show && off < (int)sizeof(row) - 2; m++) {
+                    for (int m = 0;
+                         m < show && off < (int)sizeof(row) - ARCH_CYCLE_ROW_APPEND_RESERVE; m++) {
                         char qn[CBM_SZ_512];
                         arch_node_qn(store, members[c][m], qn, sizeof(qn));
                         // Loop guard above holds off in [0, sizeof(row) - 2).
                         off += snprintf(row + off, sizeof(row) - (size_t)off, "%s%s", m ? ";" : "",
                                         qn);
                     }
-                    if (clipped && off < (int)sizeof(row) - 8) {
+                    if (clipped && off < (int)sizeof(row) - ARCH_CYCLE_TRUNCATION_RESERVE) {
                         // Guard above holds off in [0, sizeof(row) - 8).
                         snprintf(row + off, sizeof(row) - (size_t)off, ";+%d", sizes[c] - show);
                     }
@@ -5526,7 +5651,8 @@ static char *handle_get_architecture(cbm_mcp_server_t *srv, const char *args) {
      * mirrors the text tree tables one-for-one. */
     if (aspect_wanted(aspects_doc, aspects_arr, "structure")) {
         static const char *const lcols[] = {"label", "count"};
-        yyjson_mut_val *rows = arch_json_section(doc, root, "node_labels", lcols, 2);
+        yyjson_mut_val *rows =
+            arch_json_section(doc, root, "node_labels", lcols, ARCH_NODE_LABEL_COLUMN_COUNT);
         for (int i = 0; i < schema.node_label_count; i++) {
             yyjson_mut_val *row = yyjson_mut_arr(doc);
             yyjson_mut_arr_add_strcpy(doc, row, schema.node_labels[i].label);
@@ -5537,7 +5663,8 @@ static char *handle_get_architecture(cbm_mcp_server_t *srv, const char *args) {
 
     if (aspect_wanted(aspects_doc, aspects_arr, "dependencies")) {
         static const char *const tcols[] = {"type", "count"};
-        yyjson_mut_val *rows = arch_json_section(doc, root, "edge_types", tcols, 2);
+        yyjson_mut_val *rows =
+            arch_json_section(doc, root, "edge_types", tcols, ARCH_EDGE_TYPE_COLUMN_COUNT);
         for (int i = 0; i < schema.edge_type_count; i++) {
             yyjson_mut_val *row = yyjson_mut_arr(doc);
             yyjson_mut_arr_add_strcpy(doc, row, schema.edge_types[i].type);
@@ -5557,7 +5684,8 @@ static char *handle_get_architecture(cbm_mcp_server_t *srv, const char *args) {
 
     if (arch.language_count > 0) {
         static const char *const gcols[] = {"language", "files"};
-        yyjson_mut_val *rows = arch_json_section(doc, root, "languages", gcols, 2);
+        yyjson_mut_val *rows =
+            arch_json_section(doc, root, "languages", gcols, ARCH_LANGUAGE_COLUMN_COUNT);
         for (int i = 0; i < arch.language_count; i++) {
             yyjson_mut_val *row = yyjson_mut_arr(doc);
             yyjson_mut_arr_add_strcpy(doc, row,
@@ -5569,7 +5697,8 @@ static char *handle_get_architecture(cbm_mcp_server_t *srv, const char *args) {
 
     if (arch.package_count > 0) {
         static const char *const kcols[] = {"name", "nodes", "fan_in", "fan_out"};
-        yyjson_mut_val *rows = arch_json_section(doc, root, "packages", kcols, 4);
+        yyjson_mut_val *rows =
+            arch_json_section(doc, root, "packages", kcols, ARCH_PACKAGE_COLUMN_COUNT);
         for (int i = 0; i < arch.package_count; i++) {
             yyjson_mut_val *row = yyjson_mut_arr(doc);
             yyjson_mut_arr_add_strcpy(doc, row, arch.packages[i].name ? arch.packages[i].name : "");
@@ -5582,7 +5711,8 @@ static char *handle_get_architecture(cbm_mcp_server_t *srv, const char *args) {
 
     if (arch.entry_point_count > 0) {
         static const char *const ecols[] = {"qn", "file"};
-        yyjson_mut_val *rows = arch_json_section(doc, root, "entry_points", ecols, 2);
+        yyjson_mut_val *rows =
+            arch_json_section(doc, root, "entry_points", ecols, ARCH_ENTRY_POINT_COLUMN_COUNT);
         for (int i = 0; i < arch.entry_point_count; i++) {
             yyjson_mut_val *row = yyjson_mut_arr(doc);
             yyjson_mut_arr_add_strcpy(
@@ -5596,7 +5726,8 @@ static char *handle_get_architecture(cbm_mcp_server_t *srv, const char *args) {
 
     if (arch.route_count > 0) {
         static const char *const rcols[] = {"method", "path", "handler"};
-        yyjson_mut_val *rows = arch_json_section(doc, root, "routes", rcols, 3);
+        yyjson_mut_val *rows =
+            arch_json_section(doc, root, "routes", rcols, ARCH_ROUTE_COLUMN_COUNT);
         for (int i = 0; i < arch.route_count; i++) {
             yyjson_mut_val *row = yyjson_mut_arr(doc);
             yyjson_mut_arr_add_strcpy(doc, row, arch.routes[i].method ? arch.routes[i].method : "");
@@ -5609,7 +5740,8 @@ static char *handle_get_architecture(cbm_mcp_server_t *srv, const char *args) {
 
     if (arch.hotspot_count > 0) {
         static const char *const hcols[] = {"qn", "fan_in"};
-        yyjson_mut_val *rows = arch_json_section(doc, root, "hotspots", hcols, 2);
+        yyjson_mut_val *rows =
+            arch_json_section(doc, root, "hotspots", hcols, ARCH_HOTSPOT_COLUMN_COUNT);
         for (int i = 0; i < arch.hotspot_count; i++) {
             yyjson_mut_val *row = yyjson_mut_arr(doc);
             yyjson_mut_arr_add_strcpy(
@@ -5621,7 +5753,8 @@ static char *handle_get_architecture(cbm_mcp_server_t *srv, const char *args) {
 
     if (arch.boundary_count > 0) {
         static const char *const bcols[] = {"from", "to", "calls"};
-        yyjson_mut_val *rows = arch_json_section(doc, root, "boundaries", bcols, 3);
+        yyjson_mut_val *rows =
+            arch_json_section(doc, root, "boundaries", bcols, ARCH_BOUNDARY_COLUMN_COUNT);
         for (int i = 0; i < arch.boundary_count; i++) {
             yyjson_mut_val *row = yyjson_mut_arr(doc);
             yyjson_mut_arr_add_strcpy(doc, row,
@@ -5634,7 +5767,8 @@ static char *handle_get_architecture(cbm_mcp_server_t *srv, const char *args) {
 
     if (arch.service_count > 0) {
         static const char *const scols[] = {"from", "to", "type", "count"};
-        yyjson_mut_val *rows = arch_json_section(doc, root, "services", scols, 4);
+        yyjson_mut_val *rows =
+            arch_json_section(doc, root, "services", scols, ARCH_SERVICE_COLUMN_COUNT);
         for (int i = 0; i < arch.service_count; i++) {
             yyjson_mut_val *row = yyjson_mut_arr(doc);
             yyjson_mut_arr_add_strcpy(doc, row, arch.services[i].from ? arch.services[i].from : "");
@@ -5647,7 +5781,8 @@ static char *handle_get_architecture(cbm_mcp_server_t *srv, const char *args) {
 
     if (arch.layer_count > 0) {
         static const char *const ycols[] = {"name", "layer", "reason"};
-        yyjson_mut_val *rows = arch_json_section(doc, root, "layers", ycols, 3);
+        yyjson_mut_val *rows =
+            arch_json_section(doc, root, "layers", ycols, ARCH_LAYER_COLUMN_COUNT);
         for (int i = 0; i < arch.layer_count; i++) {
             yyjson_mut_val *row = yyjson_mut_arr(doc);
             yyjson_mut_arr_add_strcpy(doc, row, arch.layers[i].name ? arch.layers[i].name : "");
@@ -5661,7 +5796,8 @@ static char *handle_get_architecture(cbm_mcp_server_t *srv, const char *args) {
         /* Nested lists stay nested arrays within the row (tree-json). */
         static const char *const ccols[] = {"id",        "label",    "members",   "cohesion",
                                             "top_nodes", "packages", "edge_types"};
-        yyjson_mut_val *rows = arch_json_section(doc, root, "clusters", ccols, 7);
+        yyjson_mut_val *rows =
+            arch_json_section(doc, root, "clusters", ccols, ARCH_CLUSTER_COLUMN_COUNT);
         for (int i = 0; i < arch.cluster_count; i++) {
             const cbm_cluster_info_t *c = &arch.clusters[i];
             yyjson_mut_val *row = yyjson_mut_arr(doc);
@@ -5690,7 +5826,8 @@ static char *handle_get_architecture(cbm_mcp_server_t *srv, const char *args) {
 
     if (arch.file_tree_count > 0) {
         static const char *const fcols[] = {"path", "type", "children"};
-        yyjson_mut_val *rows = arch_json_section(doc, root, "file_tree", fcols, 3);
+        yyjson_mut_val *rows =
+            arch_json_section(doc, root, "file_tree", fcols, ARCH_FILE_TREE_COLUMN_COUNT);
         for (int i = 0; i < arch.file_tree_count; i++) {
             yyjson_mut_val *row = yyjson_mut_arr(doc);
             yyjson_mut_arr_add_strcpy(doc, row,
@@ -5871,6 +6008,19 @@ static const char *bfs_edge_args_for_hop(cbm_traverse_result_t *tr, int64_t hop_
  *
  * Returns NULL only for a NULL/empty strategy — every non-empty value lands in
  * a class, so an unmapped strategy can never silently vanish from output. */
+static const char MCP_STRATEGY_LSP_PREFIX[] = "lsp_";
+static const char MCP_STRATEGY_PHP_PREFIX[] = "php_";
+static const char MCP_STRATEGY_PERL_PREFIX[] = "perl_";
+static const char MCP_STRATEGY_JSON_KEY[] = "\"strategy\"";
+
+enum {
+    MCP_JSON_CHARACTER_STEP = 1,
+    MCP_BFS_TOON_CORE_COLUMN_COUNT = 2,
+    MCP_BFS_TOON_MAX_COLUMN_COUNT = 5,
+};
+
+static const double MCP_EDGE_CONFIDENCE_UNRECORDED = -1.0;
+
 const char *cbm_mcp_edge_strategy_class(const char *strategy) {
     if (!strategy || !strategy[0]) {
         return NULL;
@@ -5880,10 +6030,14 @@ const char *cbm_mcp_edge_strategy_class(const char *strategy) {
     if (strcmp(strategy, "lsp_unresolved") == 0 || strcmp(strategy, "unknown") == 0) {
         return "unresolved";
     }
-    if (strncmp(strategy, "lsp_", 4) == 0) {
+    if (strncmp(strategy, MCP_STRATEGY_LSP_PREFIX,
+                sizeof(MCP_STRATEGY_LSP_PREFIX) - MCP_JSON_CHARACTER_STEP) == 0) {
         return "lsp";
     }
-    if (strncmp(strategy, "php_", 4) == 0 || strncmp(strategy, "perl_", 5) == 0) {
+    if (strncmp(strategy, MCP_STRATEGY_PHP_PREFIX,
+                sizeof(MCP_STRATEGY_PHP_PREFIX) - MCP_JSON_CHARACTER_STEP) == 0 ||
+        strncmp(strategy, MCP_STRATEGY_PERL_PREFIX,
+                sizeof(MCP_STRATEGY_PERL_PREFIX) - MCP_JSON_CHARACTER_STEP) == 0) {
         return "language_rule";
     }
     /* Everything else is a name/shape heuristic: callee_suffix,
@@ -5909,15 +6063,16 @@ static bool bfs_edge_evidence_for_hop(cbm_traverse_result_t *tr, int64_t hop_nod
         if (!pj) {
             continue;
         }
-        const char *key = strstr(pj, "\"strategy\"");
+        const char *key = strstr(pj, MCP_STRATEGY_JSON_KEY);
         if (!key) {
             continue;
         }
-        const char *open = strchr(key + 10, '"');
+        const char *open =
+            strchr(key + sizeof(MCP_STRATEGY_JSON_KEY) - MCP_JSON_CHARACTER_STEP, '"');
         if (!open) {
             continue;
         }
-        open++;
+        open += MCP_JSON_CHARACTER_STEP;
         const char *close = strchr(open, '"');
         if (!close || close == open) {
             continue;
@@ -5925,7 +6080,7 @@ static bool bfs_edge_evidence_for_hop(cbm_traverse_result_t *tr, int64_t hop_nod
         char raw[CBM_SZ_64];
         size_t len = (size_t)(close - open);
         if (len >= sizeof(raw)) {
-            len = sizeof(raw) - 1;
+            len = sizeof(raw) - MCP_STRING_TERMINATOR_BYTES;
         }
         memcpy(raw, open, len);
         raw[len] = '\0';
@@ -5936,12 +6091,12 @@ static bool bfs_edge_evidence_for_hop(cbm_traverse_result_t *tr, int64_t hop_nod
         *class_out = cls;
         /* Confidence rides on the same edge; absent is reported as -1 so a
          * genuine 0.0 stays distinguishable from "not recorded". */
-        *confidence_out = -1.0;
+        *confidence_out = MCP_EDGE_CONFIDENCE_UNRECORDED;
         const char *conf = strstr(pj, "\"confidence\"");
         if (conf) {
             const char *colon = strchr(conf, ':');
             if (colon) {
-                *confidence_out = strtod(colon + 1, NULL);
+                *confidence_out = strtod(colon + MCP_JSON_CHARACTER_STEP, NULL);
             }
         }
         return true;
@@ -5961,8 +6116,8 @@ static void bfs_to_toon_table(cbm_sb_t *sb, const char *key, cbm_traverse_result
         }
         visible++;
     }
-    const char *cols[5] = {"qn", "hop"};
-    int ncols = 2;
+    const char *cols[MCP_BFS_TOON_MAX_COLUMN_COUNT] = {"qn", "hop"};
+    int ncols = MCP_BFS_TOON_CORE_COLUMN_COUNT;
     if (risk_labels) {
         cols[ncols++] = "risk";
     }
@@ -6014,11 +6169,26 @@ static char *snippet_suggestions(const char *input, cbm_node_t *nodes, int count
  * Consequence: two same-tier candidates with equal span tie and are reported
  * ambiguous (see pick_resolved_node) rather than guessed. */
 enum {
-    RES_RANK_CALLABLE = 2,     /* Function / Method */
-    RES_RANK_OTHER = 1,        /* Class / Struct / etc. */
-    RES_RANK_MODULE = 0,       /* Module / File */
-    RES_LABEL_WEIGHT = 1000000 /* label tier dominates span */
+    RES_RANK_CALLABLE = 2,      /* Function / Method */
+    RES_RANK_OTHER = 1,         /* Class / Struct / etc. */
+    RES_RANK_MODULE = 0,        /* Module / File */
+    RES_LABEL_WEIGHT = 1000000, /* label tier dominates span */
+    RESOLUTION_UNIQUE_CANDIDATE_COUNT = 1,
+    NODE_HOP_ORDER_LESS = -1,
+    NODE_HOP_ORDER_GREATER = 1,
+    BFS_COLLECTION_GROWTH_FACTOR = 2,
+    BFS_COLLECTION_INITIAL_CAPACITY = 8,
+    BFS_COLLECTION_SORT_MINIMUM_COUNT = 1,
+    TRACE_CURSOR_GENERATION_CAPACITY = 96,
+    TRACE_CURSOR_NUMBER_TEXT_CAPACITY = 64,
+    TRACE_CURSOR_LEG_FIELD_BYTES = 2,
+    TRACE_CURSOR_SCAN_VALUE_COUNT = 3,
+    TRACE_CURSOR_BOOLEAN_TRUE = 1,
 };
+
+static const uint64_t TRACE_FNV1A_64_PRIME = UINT64_C(0x100000001b3);
+static const uint64_t TRACE_FNV1A_64_OFFSET_BASIS = UINT64_C(0xcbf29ce484222325);
+static const char TRACE_CURSOR_PREFIX[] = "c1.";
 static long node_resolution_score(const cbm_node_t *n) {
     long label_rank = RES_RANK_MODULE;
     if (n->label) {
@@ -6064,12 +6234,12 @@ static bool node_is_real_callable_def(const cbm_node_t *n) {
  * Body-less .d.ts stubs still union with their implementation (#650). */
 static int pick_resolved_node(const cbm_node_t *nodes, int count, bool *ambiguous) {
     *ambiguous = false;
-    if (count <= 1) {
+    if (count <= RESOLUTION_UNIQUE_CANDIDATE_COUNT) {
         return 0;
     }
     int best = 0;
     long best_score = node_resolution_score(&nodes[0]);
-    for (int i = 1; i < count; i++) {
+    for (int i = RESOLUTION_UNIQUE_CANDIDATE_COUNT; i < count; i++) {
         long s = node_resolution_score(&nodes[i]);
         if (s > best_score) {
             best_score = s;
@@ -6086,10 +6256,10 @@ static int pick_resolved_node(const cbm_node_t *nodes, int count, bool *ambiguou
             real_def_count++;
         }
     }
-    if (real_def_count > 1) {
+    if (real_def_count > RESOLUTION_UNIQUE_CANDIDATE_COUNT) {
         *ambiguous = true;
     }
-    if (top_count > 1) {
+    if (top_count > RESOLUTION_UNIQUE_CANDIDATE_COUNT) {
         *ambiguous = true;
     }
     return best;
@@ -6099,12 +6269,79 @@ static int node_hop_cmp_hop_id(const void *pa, const void *pb) {
     const cbm_node_hop_t *a = (const cbm_node_hop_t *)pa;
     const cbm_node_hop_t *b = (const cbm_node_hop_t *)pb;
     if (a->hop != b->hop) {
-        return a->hop < b->hop ? -1 : 1;
+        return a->hop < b->hop ? NODE_HOP_ORDER_LESS : NODE_HOP_ORDER_GREATER;
     }
     if (a->node.id != b->node.id) {
-        return a->node.id < b->node.id ? -1 : 1;
+        return a->node.id < b->node.id ? NODE_HOP_ORDER_LESS : NODE_HOP_ORDER_GREATER;
     }
     return 0;
+}
+
+enum { BFS_UNION_INDEX_NOT_FOUND = -1 };
+
+static int bfs_visited_index_by_id(const cbm_traverse_result_t *result, int64_t node_id) {
+    for (int index = 0; index < result->visited_count; index++) {
+        if (result->visited[index].node.id == node_id) {
+            return index;
+        }
+    }
+    return BFS_UNION_INDEX_NOT_FOUND;
+}
+
+static bool bfs_edge_exists(const cbm_traverse_result_t *result, const cbm_edge_info_t *candidate) {
+    for (int index = 0; index < result->edge_count; index++) {
+        const cbm_edge_info_t *existing = &result->edges[index];
+        if (existing->source_id == candidate->source_id &&
+            existing->target_id == candidate->target_id && existing->type && candidate->type &&
+            strcmp(existing->type, candidate->type) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static size_t bfs_next_capacity(size_t capacity) {
+    return capacity ? capacity * BFS_COLLECTION_GROWTH_FACTOR : BFS_COLLECTION_INITIAL_CAPACITY;
+}
+
+static void bfs_union_visited(cbm_traverse_result_t *out, cbm_traverse_result_t *incoming,
+                              size_t *capacity_io) {
+    for (int index = 0; index < incoming->visited_count; index++) {
+        cbm_node_hop_t *candidate = &incoming->visited[index];
+        int existing_index = bfs_visited_index_by_id(out, candidate->node.id);
+        if (existing_index != BFS_UNION_INDEX_NOT_FOUND) {
+            /* Merging multiple seed traversals preserves the minimum distance
+             * used by risk labels and pagination watermarks. */
+            if (candidate->hop < out->visited[existing_index].hop) {
+                out->visited[existing_index].hop = candidate->hop;
+            }
+            continue;
+        }
+        if ((size_t)out->visited_count >= *capacity_io) {
+            *capacity_io = bfs_next_capacity(*capacity_io);
+            out->visited =
+                cbm_realloc_or_abort(out->visited, *capacity_io * sizeof(cbm_node_hop_t));
+        }
+        out->visited[out->visited_count++] = *candidate;
+        memset(candidate, 0, sizeof(*candidate));
+    }
+}
+
+static void bfs_union_edges(cbm_traverse_result_t *out, cbm_traverse_result_t *incoming,
+                            size_t *capacity_io) {
+    for (int index = 0; index < incoming->edge_count; index++) {
+        cbm_edge_info_t *candidate = &incoming->edges[index];
+        /* Overlapping seed neighborhoods can reach the same typed edge. */
+        if (bfs_edge_exists(out, candidate)) {
+            continue;
+        }
+        if ((size_t)out->edge_count >= *capacity_io) {
+            *capacity_io = bfs_next_capacity(*capacity_io);
+            out->edges = cbm_realloc_or_abort(out->edges, *capacity_io * sizeof(cbm_edge_info_t));
+        }
+        out->edges[out->edge_count++] = *candidate;
+        memset(candidate, 0, sizeof(*candidate));
+    }
 }
 
 /* BFS from EVERY node sharing the resolved name and merge the results, so the
@@ -6124,58 +6361,13 @@ static void bfs_union_same_name(cbm_store_t *store, const cbm_node_t *nodes, int
         cbm_traverse_result_t tr = {0};
         cbm_store_bfs(store, nodes[k].id, direction, edge_types, edge_type_count, depth, limit,
                       &tr);
-        for (int i = 0; i < tr.visited_count; i++) {
-            bool dup = false;
-            for (int j = 0; j < out->visited_count; j++) {
-                if (out->visited[j].node.id == tr.visited[i].node.id) {
-                    /* Min-hop across seeds: keep-first recorded the EARLIER
-                     * seed's (possibly longer) distance; hop feeds risk_labels
-                     * and pagination watermarks, so it must match the
-                     * single-BFS MIN(hop) semantics (#797). */
-                    if (tr.visited[i].hop < out->visited[j].hop) {
-                        out->visited[j].hop = tr.visited[i].hop;
-                    }
-                    dup = true;
-                    break;
-                }
-            }
-            if (dup) {
-                continue;
-            }
-            if ((size_t)out->visited_count >= vcap) {
-                vcap = vcap ? vcap * 2 : 8;
-                out->visited = cbm_realloc_or_abort(out->visited, vcap * sizeof(cbm_node_hop_t));
-            }
-            out->visited[out->visited_count++] = tr.visited[i];
-            memset(&tr.visited[i], 0, sizeof(tr.visited[i])); /* ownership moved */
-        }
-        for (int i = 0; i < tr.edge_count; i++) {
-            /* Overlapping seed neighborhoods yield the same edge from more
-             * than one BFS — dedup by (source, target, type). */
-            bool edup = false;
-            for (int j = 0; j < out->edge_count; j++) {
-                if (out->edges[j].source_id == tr.edges[i].source_id &&
-                    out->edges[j].target_id == tr.edges[i].target_id && out->edges[j].type &&
-                    tr.edges[i].type && strcmp(out->edges[j].type, tr.edges[i].type) == 0) {
-                    edup = true;
-                    break;
-                }
-            }
-            if (edup) {
-                continue;
-            }
-            if ((size_t)out->edge_count >= ecap) {
-                ecap = ecap ? ecap * 2 : 8;
-                out->edges = cbm_realloc_or_abort(out->edges, ecap * sizeof(cbm_edge_info_t));
-            }
-            out->edges[out->edge_count++] = tr.edges[i];
-            memset(&tr.edges[i], 0, sizeof(tr.edges[i])); /* ownership moved */
-        }
+        bfs_union_visited(out, &tr, &vcap);
+        bfs_union_edges(out, &tr, &ecap);
         cbm_store_traverse_free(&tr); /* frees only the un-moved (root + dup) fields */
     }
     /* Canonical (hop, id) order — a pure function of the graph, independent of
      * seed iteration order; required for deterministic output and watermarks. */
-    if (out->visited_count > 1) {
+    if (out->visited_count > BFS_COLLECTION_SORT_MINIMUM_COUNT) {
         qsort(out->visited, (size_t)out->visited_count, sizeof(cbm_node_hop_t),
               node_hop_cmp_hop_id);
     }
@@ -6195,16 +6387,16 @@ static void bfs_union_same_name(cbm_store_t *store, const cbm_node_t *nodes, int
 static uint64_t cursor_fnv1a64(const char *s, uint64_t h) {
     while (s && *s) {
         h ^= (uint64_t)(unsigned char)*s++;
-        h *= 0x100000001b3ULL;
+        h *= TRACE_FNV1A_64_PRIME;
     }
     return h;
 }
 
 typedef struct {
-    char leg;            /* 'o' callees, 'i' callers */
-    char generation[96]; /* store generation at mint time */
-    uint64_t qhash;      /* canonical-params hash */
-    int hop;             /* watermark: last emitted row */
+    char leg;                                          /* 'o' callees, 'i' callers */
+    char generation[TRACE_CURSOR_GENERATION_CAPACITY]; /* store generation at mint time */
+    uint64_t qhash;                                    /* canonical-params hash */
+    int hop;                                           /* watermark: last emitted row */
     int64_t node_id;
 } trace_cursor_t;
 
@@ -6212,7 +6404,7 @@ typedef struct {
  * different params must fail loudly, never silently mis-skip. */
 static uint64_t trace_params_hash(const char *project, const char *func_name, const char *direction,
                                   const char *mode, int depth, bool include_tests, int limit) {
-    uint64_t h = 0xcbf29ce484222325ULL;
+    uint64_t h = TRACE_FNV1A_64_OFFSET_BASIS;
     h = cursor_fnv1a64(project ? project : "", h);
     h = cursor_fnv1a64("|", h);
     h = cursor_fnv1a64(func_name ? func_name : "", h);
@@ -6220,8 +6412,9 @@ static uint64_t trace_params_hash(const char *project, const char *func_name, co
     h = cursor_fnv1a64(direction ? direction : "", h);
     h = cursor_fnv1a64("|", h);
     h = cursor_fnv1a64(mode ? mode : "", h);
-    char nums[64];
-    snprintf(nums, sizeof(nums), "|%d|%d|%d", depth, include_tests ? 1 : 0, limit);
+    char nums[TRACE_CURSOR_NUMBER_TEXT_CAPACITY];
+    snprintf(nums, sizeof(nums), "|%d|%d|%d", depth, include_tests ? TRACE_CURSOR_BOOLEAN_TRUE : 0,
+             limit);
     h = cursor_fnv1a64(nums, h);
     return h;
 }
@@ -6235,15 +6428,16 @@ static void trace_cursor_encode(const trace_cursor_t *c, char *buf, size_t bufsz
 static const char *trace_cursor_decode(const char *token, const char *current_generation,
                                        uint64_t expected_qhash, trace_cursor_t *out) {
     memset(out, 0, sizeof(*out));
-    if (!token || strncmp(token, "c1.", 3) != 0) {
+    if (!token || strncmp(token, TRACE_CURSOR_PREFIX,
+                          sizeof(TRACE_CURSOR_PREFIX) - MCP_STRING_TERMINATOR_BYTES) != 0) {
         return "invalid_cursor: unrecognized token — re-run the original query without 'cursor'";
     }
-    const char *p = token + 3;
+    const char *p = token + sizeof(TRACE_CURSOR_PREFIX) - MCP_STRING_TERMINATOR_BYTES;
     if (*p != 'o' && *p != 'i') {
         return "invalid_cursor: unrecognized token — re-run the original query without 'cursor'";
     }
     out->leg = *p;
-    p += 2; /* leg + '.' */
+    p += TRACE_CURSOR_LEG_FIELD_BYTES; /* leg + '.' */
     const char *gen_end = strchr(p, '.');
     if (!gen_end || (size_t)(gen_end - p) >= sizeof(out->generation)) {
         return "invalid_cursor: unrecognized token — re-run the original query without 'cursor'";
@@ -6252,7 +6446,8 @@ static const char *trace_cursor_decode(const char *token, const char *current_ge
     out->generation[gen_end - p] = '\0';
     unsigned long long qh = 0;
     long long nid = 0;
-    if (sscanf(gen_end + 1, "%16llx.%d.%lld", &qh, &out->hop, &nid) != 3) {
+    if (sscanf(gen_end + MCP_STRING_TERMINATOR_BYTES, "%16llx.%d.%lld", &qh, &out->hop, &nid) !=
+        TRACE_CURSOR_SCAN_VALUE_COUNT) {
         return "invalid_cursor: unrecognized token — re-run the original query without 'cursor'";
     }
     out->qhash = qh;
@@ -9074,102 +9269,100 @@ static char *assemble_search_output_toon(search_result_t *sr, int sr_count, grep
     return cbm_sb_finish(&sb);
 }
 
-/* Phase 4: assemble JSON output from search results */
-static char *assemble_search_output(search_result_t *sr, int sr_count, grep_match_t *raw,
-                                    int raw_count, int gm_count, int limit, int mode,
-                                    int context_lines, const char *root_path,
-                                    bool warn_literal_pipe, uint64_t elapsed_ms) {
-    enum { MODE_COMPACT = 0, MODE_FULL = 1, MODE_FILES = 2, SEARCH_SLOW_MS = 5000 };
+enum {
+    SEARCH_OUTPUT_MODE_COMPACT = 0,
+    SEARCH_OUTPUT_MODE_FULL = 1,
+    SEARCH_OUTPUT_MODE_FILES = 2,
+    SEARCH_OUTPUT_SLOW_MS = 5000,
+    SEARCH_OUTPUT_RAW_LIMIT = 20,
+};
 
-    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-    yyjson_mut_val *root_obj = yyjson_mut_obj(doc);
-    yyjson_mut_doc_set_root(doc, root_obj);
-
-    int output_count = sr_count < limit ? sr_count : limit;
-
-    if (mode == MODE_FILES) {
-        yyjson_mut_obj_add_val(doc, root_obj, "files",
-                               build_dedup_files_array(doc, sr, output_count, raw, raw_count));
-    } else {
-        /* json-stringified tree: cols + column-ordered row arrays. FULL mode
-         * appends a per-row object cell with the (guarded, windowed) source —
-         * attach_result_source semantics unchanged. */
-        yyjson_mut_val *jcols = yyjson_mut_arr(doc);
-        static const char *const sc_cols[] = {"qn",      "label", "file", "lines",
-                                              "matches", "in",    "out"};
-        for (size_t ci = 0; ci < sizeof(sc_cols) / sizeof(sc_cols[0]); ci++) {
-            yyjson_mut_arr_add_str(doc, jcols, sc_cols[ci]);
-        }
-        if (mode == MODE_FULL) {
-            yyjson_mut_arr_add_str(doc, jcols, "source");
-        }
-        yyjson_mut_obj_add_val(doc, root_obj, "cols", jcols);
-
-        yyjson_mut_val *results_arr = yyjson_mut_arr(doc);
-        for (int ri = 0; ri < output_count; ri++) {
-            search_result_t *r = &sr[ri];
-            char lines[CBM_SZ_32];
-            if (r->start_line > 0) {
-                snprintf(lines, sizeof(lines), "%d-%d", r->start_line,
-                         r->end_line > r->start_line ? r->end_line : r->start_line);
-            } else {
-                lines[0] = '\0';
-            }
-            yyjson_mut_val *row = yyjson_mut_arr(doc);
-            yyjson_mut_arr_add_strcpy(doc, row, r->qualified_name);
-            yyjson_mut_arr_add_strcpy(doc, row, r->label);
-            yyjson_mut_arr_add_strcpy(doc, row, r->file);
-            yyjson_mut_arr_add_strcpy(doc, row, lines);
-            yyjson_mut_val *ml = yyjson_mut_arr(doc);
-            for (int j = 0; j < r->match_count; j++) {
-                yyjson_mut_arr_add_int(doc, ml, r->match_lines[j]);
-            }
-            yyjson_mut_arr_add_val(row, ml);
-            yyjson_mut_arr_add_int(doc, row, r->in_degree);
-            yyjson_mut_arr_add_int(doc, row, r->out_degree);
-            if (mode == MODE_FULL) {
-                yyjson_mut_val *src = yyjson_mut_obj(doc);
-                attach_result_source(doc, src, r, mode, context_lines, root_path);
-                yyjson_mut_arr_add_val(row, src);
-            }
-            yyjson_mut_arr_add_val(results_arr, row);
-        }
-        yyjson_mut_obj_add_val(doc, root_obj, "rows", results_arr);
-
-        enum { MAX_RAW = 20 };
-        yyjson_mut_val *raw_obj = yyjson_mut_obj(doc);
-        yyjson_mut_val *rcols = yyjson_mut_arr(doc);
-        yyjson_mut_arr_add_str(doc, rcols, "file");
-        yyjson_mut_arr_add_str(doc, rcols, "line");
-        yyjson_mut_arr_add_str(doc, rcols, "content");
-        yyjson_mut_obj_add_val(doc, raw_obj, "cols", rcols);
-        yyjson_mut_val *raw_arr = yyjson_mut_arr(doc);
-        int raw_output = raw_count < MAX_RAW ? raw_count : MAX_RAW;
-        for (int ri = 0; ri < raw_output; ri++) {
-            yyjson_mut_val *row = yyjson_mut_arr(doc);
-            yyjson_mut_arr_add_str(doc, row, raw[ri].file);
-            yyjson_mut_arr_add_int(doc, row, raw[ri].line);
-            yyjson_mut_arr_add_str(doc, row, raw[ri].content);
-            yyjson_mut_arr_add_val(raw_arr, row);
-        }
-        yyjson_mut_obj_add_val(doc, raw_obj, "rows", raw_arr);
-        yyjson_mut_obj_add_val(doc, root_obj, "raw_matches", raw_obj);
+static void search_output_add_columns(yyjson_mut_doc *doc, yyjson_mut_val *root, int mode) {
+    static const char *const columns[] = {"qn", "label", "file", "lines", "matches", "in", "out"};
+    yyjson_mut_val *json_columns = yyjson_mut_arr(doc);
+    for (size_t index = 0; index < sizeof(columns) / sizeof(columns[0]); index++) {
+        yyjson_mut_arr_add_str(doc, json_columns, columns[index]);
     }
+    if (mode == SEARCH_OUTPUT_MODE_FULL) {
+        yyjson_mut_arr_add_str(doc, json_columns, "source");
+    }
+    yyjson_mut_obj_add_val(doc, root, "cols", json_columns);
+}
 
-    yyjson_mut_obj_add_val(doc, root_obj, "directories", build_dir_distribution(doc, sr, sr_count));
+static void search_output_append_result(yyjson_mut_doc *doc, yyjson_mut_val *rows,
+                                        search_result_t *result, int mode, int context_lines,
+                                        const char *root_path) {
+    char lines[CBM_SZ_32];
+    sg_lines_str(lines, sizeof(lines), result->start_line, result->end_line);
+    yyjson_mut_val *row = yyjson_mut_arr(doc);
+    yyjson_mut_arr_add_strcpy(doc, row, result->qualified_name);
+    yyjson_mut_arr_add_strcpy(doc, row, result->label);
+    yyjson_mut_arr_add_strcpy(doc, row, result->file);
+    yyjson_mut_arr_add_strcpy(doc, row, lines);
+    yyjson_mut_val *match_lines = yyjson_mut_arr(doc);
+    for (int index = 0; index < result->match_count; index++) {
+        yyjson_mut_arr_add_int(doc, match_lines, result->match_lines[index]);
+    }
+    yyjson_mut_arr_add_val(row, match_lines);
+    yyjson_mut_arr_add_int(doc, row, result->in_degree);
+    yyjson_mut_arr_add_int(doc, row, result->out_degree);
+    if (mode == SEARCH_OUTPUT_MODE_FULL) {
+        yyjson_mut_val *source = yyjson_mut_obj(doc);
+        attach_result_source(doc, source, result, mode, context_lines, root_path);
+        yyjson_mut_arr_add_val(row, source);
+    }
+    yyjson_mut_arr_add_val(rows, row);
+}
 
-    /* Summary stats */
-    yyjson_mut_obj_add_int(doc, root_obj, "total_grep_matches", gm_count);
-    yyjson_mut_obj_add_int(doc, root_obj, "total_results", sr_count);
-    yyjson_mut_obj_add_int(doc, root_obj, "raw_match_count", raw_count);
-    yyjson_mut_obj_add_int(doc, root_obj, "elapsed_ms", (int)elapsed_ms);
-    if (sr_count > 0 && gm_count > 0) {
+static void search_output_add_results(yyjson_mut_doc *doc, yyjson_mut_val *root,
+                                      search_result_t *results, int result_count, int mode,
+                                      int context_lines, const char *root_path) {
+    search_output_add_columns(doc, root, mode);
+    yyjson_mut_val *rows = yyjson_mut_arr(doc);
+    for (int index = 0; index < result_count; index++) {
+        search_output_append_result(doc, rows, &results[index], mode, context_lines, root_path);
+    }
+    yyjson_mut_obj_add_val(doc, root, "rows", rows);
+}
+
+static void search_output_add_raw_matches(yyjson_mut_doc *doc, yyjson_mut_val *root,
+                                          const grep_match_t *raw, int raw_count) {
+    static const char *const columns[] = {"file", "line", "content"};
+    yyjson_mut_val *section = yyjson_mut_obj(doc);
+    yyjson_mut_val *json_columns = yyjson_mut_arr(doc);
+    for (size_t index = 0; index < sizeof(columns) / sizeof(columns[0]); index++) {
+        yyjson_mut_arr_add_str(doc, json_columns, columns[index]);
+    }
+    yyjson_mut_obj_add_val(doc, section, "cols", json_columns);
+    yyjson_mut_val *rows = yyjson_mut_arr(doc);
+    int output_count = raw_count < SEARCH_OUTPUT_RAW_LIMIT ? raw_count : SEARCH_OUTPUT_RAW_LIMIT;
+    for (int index = 0; index < output_count; index++) {
+        yyjson_mut_val *row = yyjson_mut_arr(doc);
+        yyjson_mut_arr_add_str(doc, row, raw[index].file);
+        yyjson_mut_arr_add_int(doc, row, raw[index].line);
+        yyjson_mut_arr_add_str(doc, row, raw[index].content);
+        yyjson_mut_arr_add_val(rows, row);
+    }
+    yyjson_mut_obj_add_val(doc, section, "rows", rows);
+    yyjson_mut_obj_add_val(doc, root, "raw_matches", section);
+}
+
+static void search_output_add_summary(yyjson_mut_doc *doc, yyjson_mut_val *root, int result_count,
+                                      int raw_count, int grep_match_count, uint64_t elapsed_ms) {
+    yyjson_mut_obj_add_int(doc, root, "total_grep_matches", grep_match_count);
+    yyjson_mut_obj_add_int(doc, root, "total_results", result_count);
+    yyjson_mut_obj_add_int(doc, root, "raw_match_count", raw_count);
+    yyjson_mut_obj_add_int(doc, root, "elapsed_ms", (int)elapsed_ms);
+    if (result_count > 0 && grep_match_count > 0) {
         char ratio[CBM_SZ_32];
-        snprintf(ratio, sizeof(ratio), "%.1fx", (double)gm_count / (double)(sr_count + raw_count));
-        yyjson_mut_obj_add_strcpy(doc, root_obj, "dedup_ratio", ratio);
+        snprintf(ratio, sizeof(ratio), "%.1fx",
+                 (double)grep_match_count / (double)(result_count + raw_count));
+        yyjson_mut_obj_add_strcpy(doc, root, "dedup_ratio", ratio);
     }
+}
 
-    /* Warnings: surface common foot-guns instead of leaving them silent. */
+static void search_output_add_warnings(yyjson_mut_doc *doc, yyjson_mut_val *root,
+                                       bool warn_literal_pipe, uint64_t elapsed_ms) {
     yyjson_mut_val *warnings = yyjson_mut_arr(doc);
     if (warn_literal_pipe) {
         yyjson_mut_arr_add_strcpy(
@@ -9177,20 +9370,44 @@ static char *assemble_search_output(search_result_t *sr, int sr_count, grep_matc
             "pattern contains '|' but regex=false, so it is matched literally (not as "
             "alternation). Pass regex=true for 'foo|bar' to mean 'foo OR bar'.");
     }
-    if (elapsed_ms >= SEARCH_SLOW_MS) {
+    if (elapsed_ms >= SEARCH_OUTPUT_SLOW_MS) {
         char slow[CBM_SZ_128];
         snprintf(slow, sizeof(slow),
                  "search took %dms (>%ds); narrow file_pattern/path_filter or use a more "
                  "specific pattern",
-                 (int)elapsed_ms, SEARCH_SLOW_MS / 1000);
+                 (int)elapsed_ms, SEARCH_OUTPUT_SLOW_MS / 1000);
         yyjson_mut_arr_add_strcpy(doc, warnings, slow);
-        char ems[CBM_SZ_32];
-        snprintf(ems, sizeof(ems), "%d", (int)elapsed_ms);
-        cbm_log_warn("search.slow", "elapsed_ms", ems); /* visibility in logs */
+        char elapsed_text[CBM_SZ_32];
+        snprintf(elapsed_text, sizeof(elapsed_text), "%d", (int)elapsed_ms);
+        cbm_log_warn("search.slow", "elapsed_ms", elapsed_text);
     }
     if (yyjson_mut_arr_size(warnings) > 0) {
-        yyjson_mut_obj_add_val(doc, root_obj, "warnings", warnings);
+        yyjson_mut_obj_add_val(doc, root, "warnings", warnings);
     }
+}
+
+/* Phase 4: assemble JSON output from search results */
+static char *assemble_search_output(search_result_t *sr, int sr_count, grep_match_t *raw,
+                                    int raw_count, int gm_count, int limit, int mode,
+                                    int context_lines, const char *root_path,
+                                    bool warn_literal_pipe, uint64_t elapsed_ms) {
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *root_obj = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root_obj);
+
+    int output_count = sr_count < limit ? sr_count : limit;
+
+    if (mode == SEARCH_OUTPUT_MODE_FILES) {
+        yyjson_mut_obj_add_val(doc, root_obj, "files",
+                               build_dedup_files_array(doc, sr, output_count, raw, raw_count));
+    } else {
+        search_output_add_results(doc, root_obj, sr, output_count, mode, context_lines, root_path);
+        search_output_add_raw_matches(doc, root_obj, raw, raw_count);
+    }
+
+    yyjson_mut_obj_add_val(doc, root_obj, "directories", build_dir_distribution(doc, sr, sr_count));
+    search_output_add_summary(doc, root_obj, sr_count, raw_count, gm_count, elapsed_ms);
+    search_output_add_warnings(doc, root_obj, warn_literal_pipe, elapsed_ms);
 
     char *json = yy_doc_to_str(doc);
     if (json) {
