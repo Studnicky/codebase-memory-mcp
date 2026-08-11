@@ -516,6 +516,53 @@ struct cbm_sem_corpus {
     size_t doc_cap;
 };
 
+#ifdef CBM_ENABLE_TEST_SEAMS
+static int g_doc_array_alloc_fail_after = CBM_NOT_FOUND;
+
+void cbm_sem_corpus_fail_doc_array_alloc_after_for_test(int successful_allocations) {
+    g_doc_array_alloc_fail_after = successful_allocations;
+}
+#endif
+
+static void *corpus_doc_array_alloc(size_t bytes) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    if (g_doc_array_alloc_fail_after == 0) {
+        g_doc_array_alloc_fail_after = CBM_NOT_FOUND;
+        return NULL;
+    }
+    if (g_doc_array_alloc_fail_after > 0) {
+        g_doc_array_alloc_fail_after--;
+    }
+#endif
+    return malloc(bytes);
+}
+
+/* Grow the paired per-document arrays as one transaction.  Fresh allocations
+ * keep the current arrays valid until both replacements and their live prefix
+ * are ready to publish. */
+static bool corpus_grow_doc_arrays(cbm_sem_corpus_t *corpus, size_t new_cap) {
+    int **new_ids = corpus_doc_array_alloc(new_cap * sizeof(*new_ids));
+    if (!new_ids) {
+        return false;
+    }
+    int *new_counts = corpus_doc_array_alloc(new_cap * sizeof(*new_counts));
+    if (!new_counts) {
+        free(new_ids);
+        return false;
+    }
+    size_t live_count = (size_t)corpus->doc_count;
+    if (live_count > 0) {
+        memcpy(new_ids, corpus->doc_token_ids, live_count * sizeof(*new_ids));
+        memcpy(new_counts, corpus->doc_token_counts, live_count * sizeof(*new_counts));
+    }
+    free(corpus->doc_token_ids);
+    free(corpus->doc_token_counts);
+    corpus->doc_token_ids = new_ids;
+    corpus->doc_token_counts = new_counts;
+    corpus->doc_cap = new_cap;
+    return true;
+}
+
 static int corpus_get_or_add(cbm_sem_corpus_t *c, const char *token) {
     char idx_buf[CBM_SZ_16];
     const char *existing = cbm_ht_get(c->token_map, token);
@@ -558,16 +605,9 @@ void cbm_sem_corpus_add_doc(cbm_sem_corpus_t *corpus, const char **tokens, int c
     if ((size_t)corpus->doc_count >= corpus->doc_cap) {
         size_t new_cap =
             corpus->doc_cap < DOC_TOKENS_INIT ? DOC_TOKENS_INIT : corpus->doc_cap * PAIR_LEN;
-        int **grown_ids = realloc(corpus->doc_token_ids, new_cap * sizeof(int *));
-        int *grown_counts = realloc(corpus->doc_token_counts, new_cap * sizeof(int));
-        if (!grown_ids || !grown_counts) {
-            free(grown_ids);
-            free(grown_counts);
+        if (!corpus_grow_doc_arrays(corpus, new_cap)) {
             return;
         }
-        corpus->doc_token_ids = grown_ids;
-        corpus->doc_token_counts = grown_counts;
-        corpus->doc_cap = new_cap;
     }
     int doc_idx = corpus->doc_count++;
     corpus->doc_token_ids[doc_idx] = malloc((size_t)count * sizeof(int));
@@ -714,16 +754,9 @@ void cbm_sem_corpus_add_docs_batch(cbm_sem_corpus_t *corpus, char **all_tokens,
      * Hash table mutation can't be parallelized; strdup+insert is the cost. */
     if (corpus->doc_cap < (size_t)corpus->doc_count + (size_t)doc_count) {
         size_t new_cap = (size_t)corpus->doc_count + (size_t)doc_count;
-        int **grown_ids = realloc(corpus->doc_token_ids, new_cap * sizeof(int *));
-        int *grown_counts = realloc(corpus->doc_token_counts, new_cap * sizeof(int));
-        if (!grown_ids || !grown_counts) {
-            free(grown_ids);
-            free(grown_counts);
+        if (!corpus_grow_doc_arrays(corpus, new_cap)) {
             return;
         }
-        corpus->doc_token_ids = grown_ids;
-        corpus->doc_token_counts = grown_counts;
-        corpus->doc_cap = new_cap;
     }
     int base_doc = corpus->doc_count;
     corpus->doc_count += doc_count;

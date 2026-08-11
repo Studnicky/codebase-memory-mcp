@@ -39,9 +39,9 @@
 #include "test_framework.h"
 #include "suites.h"
 #include "repro_harness.h"
+#include <store/sql.h>
 #include <store/store.h>
 #include <pipeline/pipeline.h>
-#include <sqlite3.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -57,7 +57,7 @@
 /* Sorted (source_qn|type|target_qn) fingerprint of the whole project graph.
  * Heap string (caller frees) or NULL on error. */
 static char *rpd_edge_fingerprint(cbm_store_t *s, const char *project) {
-    struct sqlite3 *db = cbm_store_get_db(s);
+    cbm_sql_t *db = cbm_store_sql(s);
     if (!db)
         return NULL;
     const char *sql = "SELECT s.qualified_name, e.type, t.qualified_name "
@@ -66,39 +66,43 @@ static char *rpd_edge_fingerprint(cbm_store_t *s, const char *project) {
                       "JOIN nodes t ON e.target_id = t.id "
                       "WHERE e.project = ?1 "
                       "ORDER BY 1, 2, 3;";
-    sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+    cbm_sql_stmt_t *stmt = NULL;
+    if (!cbm_sql_prepare(db, sql, &stmt))
         return NULL;
-    sqlite3_bind_text(stmt, 1, project, -1, SQLITE_TRANSIENT);
+    if (!cbm_sql_bind_text(stmt, 1, project)) {
+        (void)cbm_sql_finalize(stmt);
+        return NULL;
+    }
 
     size_t cap = 1 << 20, len = 0;
     char *buf = (char *)malloc(cap);
     if (!buf) {
-        sqlite3_finalize(stmt);
+        (void)cbm_sql_finalize(stmt);
         return NULL;
     }
     buf[0] = '\0';
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
-        const char *src = (const char *)sqlite3_column_text(stmt, 0);
-        const char *typ = (const char *)sqlite3_column_text(stmt, 1);
-        const char *tgt = (const char *)sqlite3_column_text(stmt, 2);
-        src = src ? src : "";
-        typ = typ ? typ : "";
-        tgt = tgt ? tgt : "";
+    cbm_sql_step_t step = CBM_SQL_ROW;
+    while ((step = cbm_sql_step(stmt)) == CBM_SQL_ROW) {
+        const char *src = cbm_sql_column_text(stmt, 0);
+        const char *typ = cbm_sql_column_text(stmt, 1);
+        const char *tgt = cbm_sql_column_text(stmt, 2);
         size_t need = strlen(src) + strlen(typ) + strlen(tgt) + 4;
         while (len + need >= cap) {
             cap *= 2;
             char *nb = (char *)realloc(buf, cap);
             if (!nb) {
                 free(buf);
-                sqlite3_finalize(stmt);
+                (void)cbm_sql_finalize(stmt);
                 return NULL;
             }
             buf = nb;
         }
         len += (size_t)snprintf(buf + len, cap - len, "%s|%s|%s\n", src, typ, tgt);
     }
-    sqlite3_finalize(stmt);
+    if (step != CBM_SQL_DONE || !cbm_sql_finalize(stmt)) {
+        free(buf);
+        return NULL;
+    }
     return buf;
 }
 

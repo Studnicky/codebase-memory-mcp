@@ -9,10 +9,15 @@
 #include "../src/foundation/compat_thread.h"
 #include "../src/foundation/platform.h"
 #include "../src/foundation/platform_internal.h"
+#if !defined(CBM_TEST_HOST_WITHOUT_SQLITE)
+#include <store/sql.h>
+#include <store/store.h>
+#endif
 #include "../src/foundation/system_info_internal.h"
 #include <errno.h>
 #include <signal.h>
 #include <stdatomic.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -34,6 +39,150 @@ enum { PLATFORM_TIME_THREADS = 8 };
 
 #include <stdio.h>
 #include <string.h>
+
+#if !defined(CBM_TEST_HOST_WITHOUT_SQLITE)
+typedef union {
+    max_align_t alignment;
+    size_t size;
+} platform_sql_allocation_t;
+
+static atomic_int g_platform_sql_a_calls;
+static atomic_int g_platform_sql_b_calls;
+
+static void *platform_sql_alloc_with_counter(size_t size, atomic_int *calls) {
+    platform_sql_allocation_t *allocation = malloc(sizeof(*allocation) + size);
+    if (!allocation) {
+        return NULL;
+    }
+    allocation->size = size;
+    (void)atomic_fetch_add_explicit(calls, 1, memory_order_relaxed);
+    return allocation + 1;
+}
+
+static void *platform_sql_grow_with_counter(void *block, size_t size, atomic_int *calls) {
+    if (!block) {
+        return platform_sql_alloc_with_counter(size, calls);
+    }
+    platform_sql_allocation_t *allocation = (platform_sql_allocation_t *)block - 1;
+    platform_sql_allocation_t *grown = realloc(allocation, sizeof(*grown) + size);
+    if (!grown) {
+        return NULL;
+    }
+    grown->size = size;
+    (void)atomic_fetch_add_explicit(calls, 1, memory_order_relaxed);
+    return grown + 1;
+}
+
+static void platform_sql_release_with_counter(void *block, atomic_int *calls) {
+    if (block) {
+        (void)atomic_fetch_add_explicit(calls, 1, memory_order_relaxed);
+        free((platform_sql_allocation_t *)block - 1);
+    }
+}
+
+static size_t platform_sql_usable_size(void *block) {
+    return block ? ((platform_sql_allocation_t *)block - 1)->size : 0;
+}
+
+static void *platform_sql_a_alloc(size_t size) {
+    return platform_sql_alloc_with_counter(size, &g_platform_sql_a_calls);
+}
+
+static void *platform_sql_a_grow(void *block, size_t size) {
+    return platform_sql_grow_with_counter(block, size, &g_platform_sql_a_calls);
+}
+
+static void platform_sql_a_release(void *block) {
+    platform_sql_release_with_counter(block, &g_platform_sql_a_calls);
+}
+
+static void *platform_sql_b_alloc(size_t size) {
+    return platform_sql_alloc_with_counter(size, &g_platform_sql_b_calls);
+}
+
+static void *platform_sql_b_grow(void *block, size_t size) {
+    return platform_sql_grow_with_counter(block, size, &g_platform_sql_b_calls);
+}
+
+static void platform_sql_b_release(void *block) {
+    platform_sql_release_with_counter(block, &g_platform_sql_b_calls);
+}
+
+static const cbm_sql_allocator_t g_platform_sql_allocator_a = {
+    .alloc = platform_sql_a_alloc,
+    .grow = platform_sql_a_grow,
+    .release = platform_sql_a_release,
+    .usable_size = platform_sql_usable_size,
+};
+
+static const cbm_sql_allocator_t g_platform_sql_allocator_b = {
+    .alloc = platform_sql_b_alloc,
+    .grow = platform_sql_b_grow,
+    .release = platform_sql_b_release,
+    .usable_size = platform_sql_usable_size,
+};
+
+typedef struct {
+    atomic_int ready;
+    atomic_bool go;
+    atomic_int winners;
+} platform_sql_bind_race_t;
+
+static void *platform_sql_bind_race_worker(void *opaque) {
+    platform_sql_bind_race_t *race = opaque;
+    (void)atomic_fetch_add_explicit(&race->ready, 1, memory_order_acq_rel);
+    while (!atomic_load_explicit(&race->go, memory_order_acquire)) {
+        atomic_signal_fence(memory_order_seq_cst);
+    }
+    if (cbm_sql_bind_allocator(&g_platform_sql_allocator_a)) {
+        (void)atomic_fetch_add_explicit(&race->winners, 1, memory_order_acq_rel);
+    }
+    return NULL;
+}
+
+TEST(platform_sql_allocator_bind_is_one_shot_and_transactional) {
+    enum { BIND_THREADS = 8 };
+    cbm_thread_t threads[BIND_THREADS];
+    platform_sql_bind_race_t race;
+    atomic_init(&race.ready, 0);
+    atomic_init(&race.go, false);
+    atomic_init(&race.winners, 0);
+    atomic_init(&g_platform_sql_a_calls, 0);
+    atomic_init(&g_platform_sql_b_calls, 0);
+
+    size_t created = 0;
+    for (; created < BIND_THREADS; created++) {
+        if (cbm_thread_create(&threads[created], 0, platform_sql_bind_race_worker, &race) != 0) {
+            break;
+        }
+    }
+    while (created == BIND_THREADS &&
+           atomic_load_explicit(&race.ready, memory_order_acquire) != BIND_THREADS) {
+        atomic_signal_fence(memory_order_seq_cst);
+    }
+    atomic_store_explicit(&race.go, true, memory_order_release);
+    for (size_t index = 0; index < created; index++) {
+        ASSERT_EQ(cbm_thread_join(&threads[index]), 0);
+    }
+    ASSERT_EQ(created, BIND_THREADS);
+    ASSERT_EQ(atomic_load_explicit(&race.winners, memory_order_acquire), 1);
+
+    cbm_store_t *store = cbm_store_open_memory();
+    ASSERT_NOT_NULL(store);
+    ASSERT_EQ(cbm_store_upsert_project(store, "allocator-port", "/tmp/allocator-port"),
+              CBM_STORE_OK);
+    int a_before_rejected_bind = atomic_load_explicit(&g_platform_sql_a_calls, memory_order_acquire);
+    ASSERT_FALSE(cbm_sql_bind_allocator(&g_platform_sql_allocator_b));
+    ASSERT_EQ(cbm_store_upsert_project(store, "allocator-port", "/tmp/allocator-port-2"),
+              CBM_STORE_OK);
+    cbm_store_close(store);
+
+    ASSERT_GT(atomic_load_explicit(&g_platform_sql_a_calls, memory_order_acquire),
+              a_before_rejected_bind);
+    ASSERT_EQ(atomic_load_explicit(&g_platform_sql_b_calls, memory_order_acquire), 0);
+    PASS();
+}
+#endif
 
 /* Worker staging files land under CBM_CACHE_DIR, which users may place at
  * non-ASCII paths. On Windows the templates must round-trip through the wide
@@ -700,6 +849,10 @@ TEST(cgroup_no_mem_files) {
 #endif /* __linux__ */
 
 SUITE(platform) {
+#if !defined(CBM_TEST_HOST_WITHOUT_SQLITE)
+    /* SQLite's allocator must bind before any test opens a store. */
+    RUN_TEST(platform_sql_allocator_bind_is_one_shot_and_transactional);
+#endif
     RUN_TEST(platform_file_apis_survive_max_path_overflow);
     RUN_TEST(platform_mkstemp_and_mkdtemp_survive_non_ascii_directory);
     RUN_TEST(platform_counter_scaling_avoids_intermediate_overflow);

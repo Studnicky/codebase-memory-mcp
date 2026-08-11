@@ -84,7 +84,6 @@ bool cbm_extract_http_info(const cbm_trace_span_t *span, const char *service_nam
     out->span_kind = span->kind;
 
     bool has_http = false;
-    static char url_buf[CBM_SZ_1K];
 
     for (int i = 0; i < span->attr_count; i++) {
         const char *key = span->attributes[i].key;
@@ -103,7 +102,7 @@ bool cbm_extract_http_info(const cbm_trace_span_t *span, const char *service_nam
         } else if (strcmp(key, "http.status_code") == 0) {
             out->status_code = val;
         } else if (strcmp(key, "url.full") == 0) {
-            const char *path = cbm_extract_path_from_url(val, url_buf, sizeof(url_buf));
+            const char *path = cbm_extract_path_from_url(val, out->url_path, sizeof(out->url_path));
             if (path[0] != '\0') {
                 out->path = path;
                 has_http = true;

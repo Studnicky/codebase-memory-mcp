@@ -442,6 +442,82 @@ TEST(minhash_hex_roundtrip) {
     PASS();
 }
 
+TEST(minhash_hex_decode_accepts_mixed_case) {
+    cbm_minhash_t original;
+    for (int i = 0; i < CBM_MINHASH_K; i++) {
+        original.values[i] = 0xabcdef01U + (uint32_t)i;
+    }
+    char hex[CBM_MINHASH_HEX_BUF];
+    cbm_minhash_to_hex(&original, hex, sizeof(hex));
+    for (int i = 0; i < CBM_MINHASH_HEX_LEN; i++) {
+        if (hex[i] >= 'a' && hex[i] <= 'f' && (i % 2) == 0) {
+            hex[i] = (char)(hex[i] - ('a' - 'A'));
+        }
+    }
+
+    cbm_minhash_t decoded;
+    ASSERT_TRUE(cbm_minhash_from_hex(hex, &decoded));
+    ASSERT_MEM_EQ(&original, &decoded, sizeof(original));
+    PASS();
+}
+
+TEST(minhash_hex_decode_rejects_malformed_atomically) {
+    cbm_minhash_t original;
+    for (int i = 0; i < CBM_MINHASH_K; i++) {
+        original.values[i] = 0xabcdef01U + (uint32_t)i;
+    }
+    char valid[CBM_MINHASH_HEX_BUF];
+    cbm_minhash_to_hex(&original, valid, sizeof(valid));
+
+    cbm_minhash_t output;
+    cbm_minhash_t sentinel;
+    memset(&output, 0xA5, sizeof(output));
+    sentinel = output;
+    char malformed[CBM_MINHASH_HEX_BUF];
+
+    ASSERT_FALSE(cbm_minhash_from_hex(NULL, &output));
+    ASSERT_MEM_EQ(&sentinel, &output, sizeof(output));
+
+    ASSERT_FALSE(cbm_minhash_from_hex("0", &output));
+    ASSERT_MEM_EQ(&sentinel, &output, sizeof(output));
+
+    const int invalid_positions[] = {0, CBM_MINHASH_HEX_LEN / 2, CBM_MINHASH_HEX_LEN - 1};
+    for (size_t i = 0; i < sizeof(invalid_positions) / sizeof(invalid_positions[0]); i++) {
+        memcpy(malformed, valid, sizeof(malformed));
+        malformed[invalid_positions[i]] = '#';
+        ASSERT_FALSE(cbm_minhash_from_hex(malformed, &output));
+        ASSERT_MEM_EQ(&sentinel, &output, sizeof(output));
+    }
+
+    memcpy(malformed, valid, sizeof(malformed));
+    malformed[0] = '-';
+    ASSERT_FALSE(cbm_minhash_from_hex(malformed, &output));
+    ASSERT_MEM_EQ(&sentinel, &output, sizeof(output));
+
+    memcpy(malformed, valid, sizeof(malformed));
+    malformed[CBM_MINHASH_HEX_LEN / 2] = ' ';
+    ASSERT_FALSE(cbm_minhash_from_hex(malformed, &output));
+    ASSERT_MEM_EQ(&sentinel, &output, sizeof(output));
+
+    memcpy(malformed, valid, sizeof(malformed));
+    malformed[CBM_MINHASH_HEX_LEN / 2] = '\0';
+    ASSERT_FALSE(cbm_minhash_from_hex(malformed, &output));
+    ASSERT_MEM_EQ(&sentinel, &output, sizeof(output));
+
+    memcpy(malformed, valid, sizeof(malformed));
+    malformed[CBM_MINHASH_HEX_LEN - 1] = '\0';
+    ASSERT_FALSE(cbm_minhash_from_hex(malformed, &output));
+    ASSERT_MEM_EQ(&sentinel, &output, sizeof(output));
+
+    char too_long[CBM_MINHASH_HEX_BUF + 1];
+    memcpy(too_long, valid, CBM_MINHASH_HEX_LEN);
+    too_long[CBM_MINHASH_HEX_LEN] = '0';
+    too_long[CBM_MINHASH_HEX_LEN + 1] = '\0';
+    ASSERT_FALSE(cbm_minhash_from_hex(too_long, &output));
+    ASSERT_MEM_EQ(&sentinel, &output, sizeof(output));
+    PASS();
+}
+
 TEST(lsh_same_bucket_similar) {
     /* Two fingerprints with Jaccard ≈ 0.97 (62/64 match) should share a bucket */
     cbm_minhash_t a, b;
@@ -1206,6 +1282,8 @@ SUITE(simhash) {
     RUN_TEST(jaccard_disjoint);
     RUN_TEST(jaccard_partial_overlap);
     RUN_TEST(minhash_hex_roundtrip);
+    RUN_TEST(minhash_hex_decode_accepts_mixed_case);
+    RUN_TEST(minhash_hex_decode_rejects_malformed_atomically);
     RUN_TEST(lsh_same_bucket_similar);
     RUN_TEST(lsh_different_bucket_dissimilar);
     RUN_TEST(lsh_index_build_and_query);

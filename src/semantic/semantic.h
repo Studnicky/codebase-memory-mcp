@@ -172,6 +172,12 @@ void cbm_sem_corpus_add_doc(cbm_sem_corpus_t *corpus, const char **tokens, int c
 void cbm_sem_corpus_add_docs_batch(cbm_sem_corpus_t *corpus, char **all_tokens,
                                    const int *token_counts, int doc_count, int max_tokens_per_doc);
 
+#ifdef CBM_ENABLE_TEST_SEAMS
+/* Refuse one paired document-array allocation after this many successes.
+ * Pass a negative value to disable the seam. */
+void cbm_sem_corpus_fail_doc_array_alloc_after_for_test(int successful_allocations);
+#endif
+
 /* Finalize: compute IDF, build enriched token vectors via co-occurrence. */
 void cbm_sem_corpus_finalize(cbm_sem_corpus_t *corpus);
 

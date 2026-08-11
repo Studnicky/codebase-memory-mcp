@@ -449,6 +449,8 @@ TEST(subprocess_cancel_is_idempotent_and_kills_ignoring_tree) {
     pid_t parent_pid = -1;
     pid_t grandchild_pid = -1;
     bool ready = wait_for_tree_pids(pid_path, process, &parent_pid, &grandchild_pid, 1000);
+    bool child_group_contained =
+        ready && getpgid(parent_pid) == parent_pid && getpgid(grandchild_pid) == parent_pid;
     bool first_cancel = ready && cbm_subprocess_request_cancel(process);
     bool second_cancel = ready && cbm_subprocess_request_cancel(process);
     cbm_proc_result_t result;
@@ -467,6 +469,7 @@ TEST(subprocess_cancel_is_idempotent_and_kills_ignoring_tree) {
     (void)unlink(pid_path);
 
     ASSERT_TRUE(ready);
+    ASSERT_TRUE(child_group_contained);
     ASSERT_TRUE(first_cancel);
     ASSERT_TRUE(second_cancel);
     ASSERT_TRUE(terminal);

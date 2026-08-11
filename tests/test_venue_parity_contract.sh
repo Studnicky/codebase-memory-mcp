@@ -57,6 +57,14 @@ CANONICAL = re.compile(
     r"|scripts/test-windows\.ps1"
     r"|pkg/glama/verify\.sh"
 )
+# This strict compiler target is a canonical lint leg, not provisioning: it
+# recompiles the LSP unity object with production warnings enabled and compares
+# the result to the checked-in zero-warning census. Keep the exact target
+# explicit so the whitelist does not turn into a general allowance for inline
+# `make` product execution in workflow YAML.
+CANONICAL_MAKE_TARGETS = re.compile(
+    r"^make\s+-f\s+Makefile\.cbm\s+lsp-warning-census(?:\s|$)"
+)
 
 # ── Layer 1: forbidden in ANY workflow (the known drift signatures) ──
 FORBIDDEN = [
@@ -153,6 +161,8 @@ def classify_line(line: str, allowed: set[str]) -> bool:
     if first in {"bash", "sh", "pwsh", "powershell", "powershell.exe", "&"}:
         # interpreter prefix: the thing being run must itself be canonical
         return bool(CANONICAL.search(s))
+    if CANONICAL_MAKE_TARGETS.match(s):
+        return True
     if CANONICAL.search(s):
         return True
     # data fragments: quoted strings, JSON, heredoc bodies, YAML-ish keys
@@ -245,6 +255,8 @@ REQUIRED = [
     ("_soak.yml", r"scripts/ci/new-protected-temp-root\.ps1", "Windows soak uses the shared temp root"),
     ("_test.yml", r"scripts/ci/new-protected-temp-root\.ps1", "Windows tests use the shared temp root"),
     ("_test.yml", r"scripts/test\.sh", "the test legs run the canonical entry"),
+    ("_lint.yml", r"make\s+-f\s+Makefile\.cbm\s+lsp-warning-census",
+     "the LSP unity warning census is a mandatory strict-build lint leg"),
     ("pr.yml", r"vm-smoke\.sh", "PR CI smokes through the shared wrapper"),
     ("_build.yml", r"scripts/package-release\.sh",
      "release archives are produced by the canonical packaging entry"),

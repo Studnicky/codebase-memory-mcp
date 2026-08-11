@@ -20,6 +20,7 @@
 #include <mcp/mcp.h>
 #include <mcp/mcp_internal.h>
 #include <pipeline/pipeline.h>
+#include <store/sql.h>
 #include <store/store.h>
 #include <watcher/watcher.h>
 #include <yyjson/yyjson.h>
@@ -782,7 +783,7 @@ TEST(mcp_tools_list) {
     ASSERT_NOT_NULL(strstr(json, "check_index_coverage"));
     ASSERT_NOT_NULL(strstr(json, "detect_changes"));
     ASSERT_NOT_NULL(strstr(json, "manage_adr"));
-    ASSERT_NOT_NULL(strstr(json, "ingest_traces"));
+    ASSERT_NULL(strstr(json, "ingest_traces"));
     free(json);
     PASS();
 }
@@ -865,7 +866,6 @@ TEST(mcp_tools_have_behavior_annotations) {
         {"check_index_coverage", false, true, true, false},
         {"detect_changes", false, true, true, false},
         {"manage_adr", false, true, false, false},
-        {"ingest_traces", false, false, false, false},
     };
 
     char *json = cbm_mcp_tools_list();
@@ -957,66 +957,17 @@ TEST(mcp_tools_array_schemas_have_items) {
     PASS();
 }
 
-TEST(mcp_ingest_traces_items_disallow_additional_properties_issue731) {
+TEST(mcp_ingest_traces_is_not_advertised) {
     char *json = cbm_mcp_tools_list();
     ASSERT_NOT_NULL(json);
-
-    yyjson_doc *doc = yyjson_read(json, strlen(json), 0);
-    ASSERT_NOT_NULL(doc);
-    yyjson_val *root = yyjson_doc_get_root(doc);
-    ASSERT_NOT_NULL(root);
-    yyjson_val *tools = yyjson_obj_get(root, "tools");
-    ASSERT_NOT_NULL(tools);
-    ASSERT_TRUE(yyjson_is_arr(tools));
-
-    yyjson_val *tool;
-    yyjson_arr_iter iter;
-    yyjson_arr_iter_init(tools, &iter);
-    yyjson_val *ingest_traces = NULL;
-    while ((tool = yyjson_arr_iter_next(&iter)) != NULL) {
-        yyjson_val *name = yyjson_obj_get(tool, "name");
-        if (name && yyjson_is_str(name) && strcmp(yyjson_get_str(name), "ingest_traces") == 0) {
-            ingest_traces = tool;
-            break;
-        }
-    }
-    ASSERT_NOT_NULL(ingest_traces);
-
-    yyjson_val *input_schema = yyjson_obj_get(ingest_traces, "inputSchema");
-    ASSERT_NOT_NULL(input_schema);
-    yyjson_val *properties = yyjson_obj_get(input_schema, "properties");
-    ASSERT_NOT_NULL(properties);
-    yyjson_val *traces = yyjson_obj_get(properties, "traces");
-    ASSERT_NOT_NULL(traces);
-    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(traces, "type")), "array");
-    yyjson_val *items = yyjson_obj_get(traces, "items");
-    ASSERT_NOT_NULL(items);
-    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(items, "type")), "object");
-    yyjson_val *item_properties = yyjson_obj_get(items, "properties");
-    ASSERT_NOT_NULL(item_properties);
-    yyjson_val *caller = yyjson_obj_get(item_properties, "caller");
-    ASSERT_NOT_NULL(caller);
-    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(caller, "type")), "string");
-    yyjson_val *callee = yyjson_obj_get(item_properties, "callee");
-    ASSERT_NOT_NULL(callee);
-    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(callee, "type")), "string");
-    yyjson_val *count = yyjson_obj_get(item_properties, "count");
-    ASSERT_NOT_NULL(count);
-    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(count, "type")), "integer");
-    yyjson_val *additional_properties = yyjson_obj_get(items, "additionalProperties");
-    ASSERT_NOT_NULL(additional_properties);
-    ASSERT_TRUE(yyjson_is_bool(additional_properties));
-    ASSERT_FALSE(yyjson_get_bool(additional_properties));
-
-    yyjson_doc_free(doc);
+    ASSERT_NULL(strstr(json, "ingest_traces"));
     free(json);
     PASS();
 }
 
 /* Guard for PR #560 (schema enum): the get_architecture aspects items schema
  * must carry an enum of the valid tokens — including the new "overview" —
- * mirroring VALID_ASPECTS in mcp.c. Parsed structurally like
- * mcp_ingest_traces_items_disallow_additional_properties_issue731. */
+ * mirroring VALID_ASPECTS in mcp.c. */
 TEST(mcp_get_architecture_aspects_schema_enum_pr560) {
     char *json = cbm_mcp_tools_list();
     ASSERT_NOT_NULL(json);
@@ -1256,7 +1207,7 @@ TEST(server_handle_tools_list_defaults_to_all_tools_and_accepts_cursor) {
     ASSERT_NULL(strstr(resp, "\"nextCursor\""));
     ASSERT_NOT_NULL(strstr(resp, "index_repository"));
     ASSERT_NOT_NULL(strstr(resp, "manage_adr"));
-    ASSERT_NOT_NULL(strstr(resp, "ingest_traces"));
+    ASSERT_NULL(strstr(resp, "ingest_traces"));
     free(resp);
 
     resp = cbm_mcp_server_handle(
@@ -1265,7 +1216,7 @@ TEST(server_handle_tools_list_defaults_to_all_tools_and_accepts_cursor) {
     ASSERT_NOT_NULL(strstr(resp, "\"id\":202"));
     ASSERT_NULL(strstr(resp, "\"nextCursor\""));
     ASSERT_NOT_NULL(strstr(resp, "manage_adr"));
-    ASSERT_NOT_NULL(strstr(resp, "ingest_traces"));
+    ASSERT_NULL(strstr(resp, "ingest_traces"));
     free(resp);
 
     resp = cbm_mcp_server_handle(
@@ -4867,9 +4818,8 @@ TEST(tool_outer_request_scope_preserves_predispatch_cancel) {
     cbm_mcp_server_request_scope_end(srv);
 
     char *next_response = srv ? cbm_mcp_handle_tool(srv, "ingest_traces", "{\"traces\":[]}") : NULL;
-    bool next_response_clean = next_response && strstr(next_response, "accepted") &&
-                               !strstr(next_response, "cancelled") &&
-                               !strstr(next_response, "\"isError\":true");
+    bool next_response_clean = next_response && strstr(next_response, "not supported") &&
+                               !strstr(next_response, "cancelled");
 
     free(cancelled_response);
     free(next_response);
@@ -4928,9 +4878,8 @@ TEST(tool_index_repository_early_raw_cancel_survives_index_entry) {
     bool no_project_published = !cbm_file_exists(db_path);
 
     char *next_response = srv ? cbm_mcp_handle_tool(srv, "ingest_traces", "{\"traces\":[]}") : NULL;
-    bool next_response_clean = next_response && strstr(next_response, "accepted") &&
-                               !strstr(next_response, "cancelled") &&
-                               !strstr(next_response, "\"isError\":true");
+    bool next_response_clean = next_response && strstr(next_response, "not supported") &&
+                               !strstr(next_response, "cancelled");
 
     free(cancelled_response);
     free(next_response);
@@ -6842,8 +6791,10 @@ TEST(tool_ingest_traces_basic) {
              "\"params\":{\"name\":\"ingest_traces\","
              "\"arguments\":{\"traces\":[{\"caller\":\"a\",\"callee\":\"b\"}]}}}");
     ASSERT_NOT_NULL(resp);
-    ASSERT_NOT_NULL(strstr(resp, "accepted"));
-    ASSERT_NOT_NULL(strstr(resp, "traces_received"));
+    ASSERT_NOT_NULL(strstr(resp, "ingest_traces is not supported"));
+    ASSERT_NOT_NULL(strstr(resp, "\"isError\":true"));
+    ASSERT_NULL(strstr(resp, "accepted"));
+    ASSERT_NULL(strstr(resp, "traces_received"));
     free(resp);
 
     cbm_mcp_server_free(srv);
@@ -6858,7 +6809,9 @@ TEST(tool_ingest_traces_empty) {
                                    "\"params\":{\"name\":\"ingest_traces\","
                                    "\"arguments\":{\"traces\":[]}}}");
     ASSERT_NOT_NULL(resp);
-    ASSERT_NOT_NULL(strstr(resp, "accepted"));
+    ASSERT_NOT_NULL(strstr(resp, "ingest_traces is not supported"));
+    ASSERT_NOT_NULL(strstr(resp, "\"isError\":true"));
+    ASSERT_NULL(strstr(resp, "accepted"));
     free(resp);
 
     cbm_mcp_server_free(srv);
@@ -9363,6 +9316,21 @@ static int idx773_double_index_check(const char *dir_a, const char *dir_b) {
 }
 #endif /* !_WIN32 */
 
+static bool mcp_store_query_count(cbm_store_t *store, const char *query, int *out) {
+    if (!store || !query || !out) {
+        return false;
+    }
+    cbm_sql_stmt_t *statement = NULL;
+    if (!cbm_sql_prepare(cbm_store_sql(store), query, &statement)) {
+        return false;
+    }
+    bool has_row = cbm_sql_step(statement) == CBM_SQL_ROW;
+    if (has_row) {
+        *out = cbm_sql_column_int(statement, 0);
+    }
+    return cbm_sql_finalize(statement) && has_row;
+}
+
 /* #898: the SEQUENTIAL pipeline emitted malformed JSON for brokered
  * ASYNC_CALLS edges ("broker":"bullmq} — missing closing quote) and stored
  * the RAW broker/method string as the synthesized Route node's properties
@@ -9419,51 +9387,36 @@ TEST(sequential_service_edge_props_are_valid_json_issue898) {
     snprintf(db_path, sizeof(db_path), "%s/%s.db", cache, project);
     cbm_store_t *store = cbm_store_open_path_query(db_path);
     ASSERT_NOT_NULL(store);
-    struct sqlite3 *db = cbm_store_get_db(store);
-    ASSERT_NOT_NULL(db);
 
     /* Non-vacuous: the fixture must actually produce a brokered edge. */
-    sqlite3_stmt *stmt = NULL;
-    ASSERT_EQ(sqlite3_prepare_v2(db, "SELECT count(*) FROM edges WHERE type='ASYNC_CALLS';", -1,
-                                 &stmt, NULL),
-              SQLITE_OK);
-    ASSERT_EQ(sqlite3_step(stmt), SQLITE_ROW);
-    int async_edges = sqlite3_column_int(stmt, 0);
-    sqlite3_finalize(stmt);
+    int async_edges = 0;
+    ASSERT_TRUE(mcp_store_query_count(store, "SELECT count(*) FROM edges WHERE type='ASYNC_CALLS';",
+                                      &async_edges));
     ASSERT_TRUE(async_edges >= 1);
 
     /* THE BUG: malformed properties on edges (broker quote) and Route nodes
      * (raw string). Every properties blob must be valid JSON. */
-    ASSERT_EQ(sqlite3_prepare_v2(db,
-                                 "SELECT count(*) FROM edges WHERE properties IS NOT NULL "
-                                 "AND properties != '' AND json_valid(properties)=0;",
-                                 -1, &stmt, NULL),
-              SQLITE_OK);
-    ASSERT_EQ(sqlite3_step(stmt), SQLITE_ROW);
-    int bad_edges = sqlite3_column_int(stmt, 0);
-    sqlite3_finalize(stmt);
+    int bad_edges = 0;
+    ASSERT_TRUE(mcp_store_query_count(store,
+                                      "SELECT count(*) FROM edges WHERE properties IS NOT NULL "
+                                      "AND properties != '' AND json_valid(properties)=0;",
+                                      &bad_edges));
     ASSERT_EQ(bad_edges, 0);
 
-    ASSERT_EQ(sqlite3_prepare_v2(db,
-                                 "SELECT count(*) FROM nodes WHERE properties IS NOT NULL "
-                                 "AND properties != '' AND json_valid(properties)=0;",
-                                 -1, &stmt, NULL),
-              SQLITE_OK);
-    ASSERT_EQ(sqlite3_step(stmt), SQLITE_ROW);
-    int bad_nodes = sqlite3_column_int(stmt, 0);
-    sqlite3_finalize(stmt);
+    int bad_nodes = 0;
+    ASSERT_TRUE(mcp_store_query_count(store,
+                                      "SELECT count(*) FROM nodes WHERE properties IS NOT NULL "
+                                      "AND properties != '' AND json_valid(properties)=0;",
+                                      &bad_nodes));
     ASSERT_EQ(bad_nodes, 0);
 
     /* Pipeline parity: the broker must be extractable exactly like the
      * parallel path emits it. */
-    ASSERT_EQ(sqlite3_prepare_v2(db,
-                                 "SELECT count(*) FROM edges WHERE type='ASYNC_CALLS' AND "
-                                 "json_extract(properties,'$.broker')='celery';",
-                                 -1, &stmt, NULL),
-              SQLITE_OK);
-    ASSERT_EQ(sqlite3_step(stmt), SQLITE_ROW);
-    int brokered = sqlite3_column_int(stmt, 0);
-    sqlite3_finalize(stmt);
+    int brokered = 0;
+    ASSERT_TRUE(mcp_store_query_count(
+        store, "SELECT count(*) FROM edges WHERE type='ASYNC_CALLS' AND "
+               "json_extract(properties,'$.broker')='celery';",
+        &brokered));
     ASSERT_TRUE(brokered >= 1);
 
     cbm_store_close(store);
@@ -10450,7 +10403,7 @@ SUITE(mcp) {
     RUN_TEST(mcp_tools_have_behavior_annotations);
     RUN_TEST(mcp_index_repository_declares_name_override_issue571);
     RUN_TEST(mcp_tools_array_schemas_have_items);
-    RUN_TEST(mcp_ingest_traces_items_disallow_additional_properties_issue731);
+    RUN_TEST(mcp_ingest_traces_is_not_advertised);
     RUN_TEST(mcp_get_architecture_aspects_schema_enum_pr560);
     RUN_TEST(mcp_text_result);
     RUN_TEST(mcp_text_result_does_not_duplicate_plain_text_into_structured_content);

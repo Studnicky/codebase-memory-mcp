@@ -9,6 +9,7 @@
 
 #include "sqlite3.h"
 
+#include <stdatomic.h>
 #include <string.h>
 
 static sqlite3 *as_db(cbm_sql_t *db) {
@@ -17,10 +18,6 @@ static sqlite3 *as_db(cbm_sql_t *db) {
 
 static sqlite3_stmt *as_stmt(cbm_sql_stmt_t *st) {
     return (sqlite3_stmt *)(void *)st;
-}
-
-cbm_sql_t *cbm_store_sql(cbm_store_t *s) {
-    return (cbm_sql_t *)(void *)cbm_store_get_db(s);
 }
 
 bool cbm_sql_open(const char *path, cbm_sql_t **out) {
@@ -189,6 +186,8 @@ int cbm_sql_total_changes(cbm_sql_t *db) {
  * in size_t, so the narrowing happens once, here, instead of at whatever
  * module happened to own the allocator. */
 static cbm_sql_allocator_t g_alloc;
+static atomic_flag g_allocator_bind_lock = ATOMIC_FLAG_INIT;
+static atomic_bool g_allocator_bound = ATOMIC_VAR_INIT(false);
 
 static void *sql_alloc(int size) {
     return size > 0 && g_alloc.alloc ? g_alloc.alloc((size_t)size) : NULL;
@@ -230,14 +229,28 @@ bool cbm_sql_bind_allocator(const cbm_sql_allocator_t *alloc) {
     if (!alloc || !alloc->alloc || !alloc->grow || !alloc->release || !alloc->usable_size) {
         return false;
     }
-    g_alloc = *alloc;
+
+    while (atomic_flag_test_and_set_explicit(&g_allocator_bind_lock, memory_order_acquire)) {
+        atomic_signal_fence(memory_order_seq_cst);
+    }
+    if (atomic_load_explicit(&g_allocator_bound, memory_order_relaxed)) {
+        atomic_flag_clear_explicit(&g_allocator_bind_lock, memory_order_release);
+        return false;
+    }
+
     /* Field order matches struct sqlite3_mem_methods exactly:
      * xMalloc, xFree, xRealloc, xSize, xRoundup, xInit, xShutdown, pAppData. */
-    static sqlite3_mem_methods methods;
-    methods = (sqlite3_mem_methods){sql_alloc,   sql_free,     sql_grow,         sql_size,
-                                    sql_roundup, sql_mem_init, sql_mem_shutdown, NULL};
+    const sqlite3_mem_methods methods = {sql_alloc,   sql_free,     sql_grow,         sql_size,
+                                         sql_roundup, sql_mem_init, sql_mem_shutdown, NULL};
     /* SQLITE_CONFIG_MALLOC must precede sqlite3_initialize and the first
-     * sqlite3_open*, or sqlite returns SQLITE_MISUSE. Reporting that as false
-     * keeps the ordering requirement checkable by the caller. */
-    return sqlite3_config(SQLITE_CONFIG_MALLOC, &methods) == SQLITE_OK;
+     * sqlite3_open*. Publish the callbacks only after SQLite accepts its local
+     * copy, so a rejected late bind cannot redirect frees made by live stores. */
+    bool configured = sqlite3_config(SQLITE_CONFIG_MALLOC, &methods) == SQLITE_OK;
+    if (configured) {
+        atomic_signal_fence(memory_order_seq_cst);
+        g_alloc = *alloc;
+        atomic_store_explicit(&g_allocator_bound, true, memory_order_release);
+    }
+    atomic_flag_clear_explicit(&g_allocator_bind_lock, memory_order_release);
+    return configured;
 }

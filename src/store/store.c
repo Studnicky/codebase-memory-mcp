@@ -67,6 +67,7 @@ enum {
 
 #define SLEN(s) (sizeof(s) - 1)
 #include "store/store.h"
+#include "store/sql.h"
 
 #include <stdatomic.h>
 #include "foundation/compat_fs.h"
@@ -79,6 +80,7 @@ enum {
 #define XXH_INLINE_ALL
 #include "xxhash/xxhash.h"
 
+#include <errno.h>
 #include <limits.h>
 #include <sqlite3.h>
 #include <stdarg.h>
@@ -88,6 +90,15 @@ enum {
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+
+#ifdef CBM_ENABLE_TEST_SEAMS
+static atomic_bool g_query_force_fallback_for_test = false;
+void cbm_store_query_force_fallback_for_test(bool enabled);
+
+void cbm_store_query_force_fallback_for_test(bool enabled) {
+    atomic_store_explicit(&g_query_force_fallback_for_test, enabled, memory_order_relaxed);
+}
+#endif
 
 /* ── SQLite bind helpers ───────────────────────────────────────── */
 
@@ -849,6 +860,25 @@ static bool build_immutable_uri(const char *path, char *out, size_t out_sz) {
     return true;
 }
 
+/* immutable=1 deliberately ignores SQLite's WAL.  It is safe only when the
+ * main database contains the complete committed generation. */
+static bool query_wal_has_frames(const char *db_path) {
+    char wal_path[CBM_SZ_4K];
+    int written = snprintf(wal_path, sizeof(wal_path), "%s-wal", db_path);
+    if (written < 0 || (size_t)written >= sizeof(wal_path)) {
+        /* An unrepresentable sidecar path cannot be proven empty. */
+        return true;
+    }
+
+    struct stat st = {0};
+    if (stat(wal_path, &st) == 0) {
+        return st.st_size > 0;
+    }
+    /* A missing sidecar is empty; an inaccessible sidecar is not safe to
+     * treat as empty because it may contain committed frames. */
+    return errno != ENOENT;
+}
+
 cbm_store_t *cbm_store_open_path_query(const char *db_path) {
     if (!db_path) {
         return NULL;
@@ -868,7 +898,8 @@ cbm_store_t *cbm_store_open_path_query(const char *db_path) {
      * so a read-only-filesystem failure (cannot create -shm for a WAL-mode
      * DB) surfaces on first access, not at open time; we probe with a trivial
      * read to force it. If the probe fails, retry once with an immutable URI
-     * that bypasses WAL and reads the main DB file directly.
+     * only when there are no WAL frames. immutable=1 bypasses the WAL, so
+     * using it with committed frames would return a stale graph.
      *
      * No SQLITE_OPEN_CREATE on either path — a missing DB must return NULL
      * (no ghost .db for unknown/unindexed projects). */
@@ -880,8 +911,15 @@ cbm_store_t *cbm_store_open_path_query(const char *db_path) {
     int rc = sqlite3_open_v2(open_path, &s->db, SQLITE_OPEN_READONLY, NULL);
     if (rc == SQLITE_OK) {
         /* Force first DB access so a read-only-FS WAL failure surfaces now. */
-        if (sqlite3_exec(s->db, "SELECT 1 FROM sqlite_master LIMIT 1;", NULL, NULL, NULL) !=
-            SQLITE_OK) {
+        bool probe_failed = false;
+#ifdef CBM_ENABLE_TEST_SEAMS
+        probe_failed = atomic_load_explicit(&g_query_force_fallback_for_test, memory_order_relaxed);
+#endif
+        if (!probe_failed) {
+            probe_failed = sqlite3_exec(s->db, "SELECT 1 FROM sqlite_master LIMIT 1;", NULL, NULL,
+                                        NULL) != SQLITE_OK;
+        }
+        if (probe_failed) {
             sqlite3_close(s->db);
             s->db = NULL;
             rc = SQLITE_CANTOPEN; /* trigger immutable fallback */
@@ -895,6 +933,10 @@ cbm_store_t *cbm_store_open_path_query(const char *db_path) {
          * be opened (the read-only-filesystem case). This also keeps the
          * common "project not found" path to a single open attempt. */
         if (!cbm_file_exists(db_path)) {
+            free(s);
+            return NULL;
+        }
+        if (query_wal_has_frames(db_path)) {
             free(s);
             return NULL;
         }
@@ -1092,8 +1134,8 @@ void cbm_store_close(cbm_store_t *s) {
     free(s);
 }
 
-sqlite3 *cbm_store_get_db(cbm_store_t *s) {
-    return s ? s->db : NULL;
+cbm_sql_t *cbm_store_sql(cbm_store_t *s) {
+    return s ? (cbm_sql_t *)(void *)s->db : NULL;
 }
 
 int cbm_store_exec(cbm_store_t *s, const char *sql) {
@@ -1488,26 +1530,42 @@ int cbm_store_dump_to_file(cbm_store_t *s, const char *dest_path) {
 
 /* ── Project CRUD ───────────────────────────────────────────────── */
 
+static int rollback_project_upsert(cbm_store_t *s) {
+    char error[sizeof(s->errbuf)];
+    snprintf(error, sizeof(error), "%s", s->errbuf);
+    (void)exec_sql(s, "ROLLBACK TO cbm_upsert_project;");
+    (void)exec_sql(s, "RELEASE cbm_upsert_project;");
+    store_set_error(s, error);
+    return CBM_STORE_ERR;
+}
+
 int cbm_store_upsert_project(cbm_store_t *s, const char *name, const char *root_path) {
+    if (exec_sql(s, "SAVEPOINT cbm_upsert_project;") != CBM_STORE_OK) {
+        return CBM_STORE_ERR;
+    }
+
     sqlite3_stmt *stmt =
         prepare_cached(s, &s->stmt_upsert_project,
                        "INSERT INTO projects (name, indexed_at, root_path) VALUES (?1, ?2, ?3) "
                        "ON CONFLICT(name) DO UPDATE SET indexed_at=?2, root_path=?3;");
     if (!stmt) {
-        return CBM_STORE_ERR;
+        return rollback_project_upsert(s);
     }
 
     char ts[CBM_SZ_64];
     iso_now(ts, sizeof(ts));
 
-    bind_text(stmt, SKIP_ONE, name);
-    bind_text(stmt, ST_COL_2, ts);
-    bind_text(stmt, ST_COL_3, root_path);
+    if (bind_text(stmt, SKIP_ONE, name) != SQLITE_OK ||
+        bind_text(stmt, ST_COL_2, ts) != SQLITE_OK ||
+        bind_text(stmt, ST_COL_3, root_path) != SQLITE_OK) {
+        store_set_error_sqlite(s, "upsert_project bind");
+        return rollback_project_upsert(s);
+    }
 
     int rc = sqlite3_step(stmt);
     if (rc != SQLITE_DONE) {
         store_set_error_sqlite(s, "upsert_project");
-        return CBM_STORE_ERR;
+        return rollback_project_upsert(s);
     }
 
     /* Store generation for cursor staleness (pagination): db_uid is a random
@@ -1519,14 +1577,17 @@ int cbm_store_upsert_project(cbm_store_t *s, const char *name, const char *root_
      * point every index run (full, incremental, watcher) passes through.
      * Created here rather than in the byte-level writer: adding a table to
      * its hand-built sqlite_master is rootpage surgery for zero benefit. */
-    (void)sqlite3_exec(s->db,
-                       "CREATE TABLE IF NOT EXISTS store_meta (k TEXT PRIMARY KEY, v TEXT);"
-                       "INSERT OR IGNORE INTO store_meta VALUES"
-                       "('db_uid', lower(hex(randomblob(8))));"
-                       "INSERT OR IGNORE INTO store_meta VALUES('mutation_gen','0');"
-                       "UPDATE store_meta SET v = CAST(CAST(v AS INTEGER)+1 AS TEXT) "
-                       "WHERE k='mutation_gen';",
-                       NULL, NULL, NULL);
+    if (exec_sql(s, "CREATE TABLE IF NOT EXISTS store_meta (k TEXT PRIMARY KEY, v TEXT);"
+                    "INSERT OR IGNORE INTO store_meta VALUES"
+                    "('db_uid', lower(hex(randomblob(8))));"
+                    "INSERT OR IGNORE INTO store_meta VALUES('mutation_gen','0');"
+                    "UPDATE store_meta SET v = CAST(CAST(v AS INTEGER)+1 AS TEXT) "
+                    "WHERE k='mutation_gen';") != CBM_STORE_OK) {
+        return rollback_project_upsert(s);
+    }
+    if (exec_sql(s, "RELEASE cbm_upsert_project;") != CBM_STORE_OK) {
+        return rollback_project_upsert(s);
+    }
     return CBM_STORE_OK;
 }
 
@@ -4890,8 +4951,8 @@ enum { SCHEMA_MAX_JSON_KEYS = 50 };
  * Prepends base_cols, then appends up to SCHEMA_MAX_JSON_KEYS from the query.
  * Caller must free the returned array and each string in it. */
 static void schema_discover_props(sqlite3 *db, const char *sql, const char *project,
-                                  const char *filter, const char **base_cols,
-                                  size_t base_col_count, char ***out_props, int *out_count) {
+                                  const char *filter, const char **base_cols, size_t base_col_count,
+                                  char ***out_props, int *out_count) {
     size_t pcap = base_col_count + SCHEMA_MAX_JSON_KEYS;
     char **props = malloc(pcap * sizeof(char *));
     size_t pn = 0;
@@ -5127,8 +5188,8 @@ static int get_schema_impl(cbm_store_t *s, const char *project, cbm_schema_info_
         for (int i = 0; i < out->node_label_count; i++) {
             schema_discover_props(
                 s->db, prop_sql, project, out->node_labels[i].label, node_base_cols,
-                sizeof(node_base_cols) / sizeof(node_base_cols[0]),
-                &out->node_labels[i].properties, &out->node_labels[i].property_count);
+                sizeof(node_base_cols) / sizeof(node_base_cols[0]), &out->node_labels[i].properties,
+                &out->node_labels[i].property_count);
         }
     }
 
@@ -6091,7 +6152,8 @@ static int arch_packages_from_qn(cbm_store_t *s, const char *project, const char
         np = MAX_PREVIEW_NAMES;
     }
 
-    cbm_package_summary_t *arr = (np > 0) ? calloc((size_t)np, sizeof(cbm_package_summary_t)) : NULL;
+    cbm_package_summary_t *arr =
+        (np > 0) ? calloc((size_t)np, sizeof(cbm_package_summary_t)) : NULL;
     for (int i = 0; i < np; i++) {
         arr[i].name = pnames[i];
         arr[i].node_count = pcounts[i];
@@ -6365,8 +6427,7 @@ static void dir_add_child(char ***children, size_t *child_count, size_t *child_c
 
 /* Find or create a directory entry by path. Returns its index, or -1 if full. */
 static int dir_find_or_create(char **dir_paths, size_t *dir_child_counts, char ***dir_children,
-                              size_t *dir_children_caps, size_t *dn, size_t dcap,
-                              const char *dir) {
+                              size_t *dir_children_caps, size_t *dn, size_t dcap, const char *dir) {
     for (size_t i = 0; i < *dn; i++) {
         if (strcmp(dir_paths[i], dir) == 0) {
             return (int)i;

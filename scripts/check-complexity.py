@@ -38,6 +38,14 @@ nodes before trusting a query result.
                                  sanity check all still run unchanged, so the
                                  seam cannot be used to weaken a real run
                                  (which never passes this flag).
+  --sanity-query-output <path|->
+                                read the Function-node sanity query's CLI
+                                output from a file (or stdin with `-`). This
+                                testing seam is paired with --query-output so
+                                the comparison contract can exercise clean,
+                                violation, stale, malformed, and empty-index
+                                cases without indexing a worktree. Normal
+                                gate invocations never pass either seam.
 
 Usage:
     scripts/check-complexity.py --report        # current over-threshold set
@@ -241,9 +249,17 @@ def main():
                          help="testing seam: read the population query's CLI output "
                               "from this file (or '-' for stdin) instead of invoking "
                               "the binary")
+    parser.add_argument("--sanity-query-output", default=None,
+                         help="testing seam: read the Function-node sanity-query output "
+                              "from this file (or '-' for stdin) instead of invoking "
+                              "the binary")
     args = parser.parse_args()
 
-    if args.query_output is None and not os.path.isfile(args.binary):
+    # The population-output seam only replaces the second query's data.  It
+    # never makes the live binary or its indexed Function population optional:
+    # accepting a missing binary here would make a synthetic report look like
+    # a successful gate run.
+    if not os.path.isfile(args.binary):
         print(f"MISSING: no binary at {args.binary}.")
         print("Build it first — this gate measures the graph the product builds, "
               "it does not reimplement complexity measurement.")
@@ -253,9 +269,14 @@ def main():
 
     # Sanity check: the graph must actually hold Function nodes, or every
     # query below returning zero rows is indistinguishable from "the index
-    # is missing/stale" — and THAT must never read as "clean tree".
+    # is missing/stale" — and THAT must never read as "clean tree". The
+    # paired fixture seam exists only to test this branch without indexing a
+    # worktree; ordinary invocations always execute the live query.
     try:
-        sanity_rows = query_graph(args.binary, project, SANITY_QUERY)
+        if args.sanity_query_output is not None:
+            sanity_rows = read_query_output_override(args.sanity_query_output)
+        else:
+            sanity_rows = query_graph(args.binary, project, SANITY_QUERY)
     except ValueError as exc:
         print(f"MISSING: could not query the graph — {exc}")
         print("Index the repo first (cli index_repository) before running this gate.")

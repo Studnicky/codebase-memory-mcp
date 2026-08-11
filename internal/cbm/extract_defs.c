@@ -2086,8 +2086,8 @@ static const char **extract_cpp_base_classes(CBMArena *a, TSNode clause, const c
         }
     }
     if (base_count > 0) {
-        const char **result =
-            (const char **)cbm_arena_alloc(a, (size_t)(base_count + NULL_TERM) * sizeof(const char *));
+        const char **result = (const char **)cbm_arena_alloc(a, (size_t)(base_count + NULL_TERM) *
+                                                                    sizeof(const char *));
         if (result) {
             for (int j = 0; j < base_count; j++) {
                 result[j] = bases[j];
@@ -2511,8 +2511,8 @@ static const char **extract_base_classes(CBMArena *a, TSNode node, const char *s
                 }
             }
             if (base_count > 0) {
-                const char **result =
-                    (const char **)cbm_arena_alloc(a, (size_t)(base_count + 1) * sizeof(const char *));
+                const char **result = (const char **)cbm_arena_alloc(a, (size_t)(base_count + 1) *
+                                                                            sizeof(const char *));
                 if (result) {
                     for (int i = 0; i < base_count; i++) {
                         result[i] = bases[i];
@@ -2730,8 +2730,8 @@ static const char **extract_base_classes(CBMArena *a, TSNode node, const char *s
     }
 
     if (base_count > 0) {
-        const char **result =
-            (const char **)cbm_arena_alloc(a, (size_t)(base_count + NULL_TERM) * sizeof(const char *));
+        const char **result = (const char **)cbm_arena_alloc(a, (size_t)(base_count + NULL_TERM) *
+                                                                    sizeof(const char *));
         if (result) {
             for (int i = 0; i < base_count; i++) {
                 result[i] = bases[i];
@@ -6634,7 +6634,7 @@ typedef struct {
 typedef struct {
     walk_defs_frame_t *data;
     int top;
-    size_t cap; // capacity only — never a sentinel, doubles without signed-overflow risk
+    size_t cap;       // capacity only — never a sentinel, doubles without signed-overflow risk
     const char *path; // for the WARN when the ceiling is hit (may be NULL)
     bool warned;
 } wd_stack_t;

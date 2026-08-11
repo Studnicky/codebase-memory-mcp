@@ -12,7 +12,7 @@
       packages = forAllSystems (pkgs: {
         default = pkgs.stdenv.mkDerivation {
           pname = "codebase-memory-mcp";
-          version = "0.6.0";
+          version = "0.8.1";
 
           src = ./.;
 
@@ -29,6 +29,7 @@
 
           installPhase = ''
             install -Dm755 build/c/codebase-memory-mcp $out/bin/codebase-memory-mcp
+            install -Dm644 assets/cbm-integrations.json $out/bin/cbm-integrations.json
           '';
 
           meta = {

@@ -127,12 +127,16 @@ export function Sidebar({ nodes, onSelectPath, selectedPath }: SidebarProps) {
       </div>
       <div className="px-3 pb-2.5 border-b border-border/30 shrink-0">
         <div className="relative">
+          <label htmlFor="sidebar-search" className="sr-only">
+            {t.graph.search}
+          </label>
           <input
+            id="sidebar-search"
             type="text"
             placeholder={t.graph.search}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="w-full bg-white/[0.04] border border-white/[0.06] rounded-lg px-3 py-1.5 text-[12px] text-foreground placeholder-foreground/25 outline-none focus:border-primary/40 focus:bg-white/[0.06] transition-all"
+            className="w-full bg-white/[0.04] border border-white/[0.06] rounded-lg px-3 py-1.5 text-[12px] text-foreground placeholder-foreground/25 outline-none focus:border-primary/40 focus:bg-white/[0.06] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary transition-all"
           />
         </div>
       </div>

@@ -1996,7 +1996,8 @@ static int parse_match_chain(parser_t *p, cbm_query_t *q, size_t *pat_cap) {
         if ((size_t)q->pattern_count >= *pat_cap) {
             *pat_cap *= PAIR_LEN;
             q->patterns = cbm_realloc_or_abort(q->patterns, *pat_cap * sizeof(cbm_pattern_t));
-            q->pattern_optional = cbm_realloc_or_abort(q->pattern_optional, *pat_cap * sizeof(bool));
+            q->pattern_optional =
+                cbm_realloc_or_abort(q->pattern_optional, *pat_cap * sizeof(bool));
         }
         if (parse_match_pattern(p, &q->patterns[q->pattern_count]) < 0) {
             return CBM_NOT_FOUND;
@@ -3517,7 +3518,7 @@ static void rb_apply_skip_limit(result_builder_t *rb, int skip_n, int limit) {
         }
         /* guarded above: skip_n < rb->row_count, so the subtraction stays positive. */
         memmove(rb->rows, rb->rows + skip_n,
-               (size_t)(rb->row_count - skip_n) * sizeof(const char **));
+                (size_t)(rb->row_count - skip_n) * sizeof(const char **));
         rb->row_count -= skip_n;
     } else if (skip_n >= rb->row_count) {
         for (int i = 0; i < rb->row_count; i++) {
@@ -4390,8 +4391,8 @@ static void ret_agg_accumulate(ret_agg_entry_t *entry, cbm_return_clause_t *ret,
         if (strcmp(ret->items[ci].func, "COLLECT") == 0) {
             /* collect_counts[ci] is a running per-item tally — never negative. */
             int idx = entry->collect_counts[ci]++;
-            entry->collect_lists[ci] =
-                cbm_realloc_or_abort(entry->collect_lists[ci], (size_t)(idx + SKIP_ONE) * sizeof(char *));
+            entry->collect_lists[ci] = cbm_realloc_or_abort(
+                entry->collect_lists[ci], (size_t)(idx + SKIP_ONE) * sizeof(char *));
             entry->collect_lists[ci][idx] = heap_strdup(raw);
         } else if (ret->items[ci].distinct && strcmp(ret->items[ci].func, "COUNT") == 0) {
             /* COUNT(DISTINCT x): track unique values; emit the set size (#239). */
@@ -4595,8 +4596,7 @@ static void execute_default_projection(cbm_pattern_t *pat0, binding_t *bindings,
         for (int v = 0; v < vc; v++) {
             cbm_node_t *n = binding_get(&bindings[bi], vars[v]);
             vals[(size_t)v * CYP_EDGE_COLS] = n ? n->name : "";
-            vals[((size_t)v * CYP_EDGE_COLS) + SKIP_ONE] =
-                n ? n->qualified_name : "";
+            vals[((size_t)v * CYP_EDGE_COLS) + SKIP_ONE] = n ? n->qualified_name : "";
             vals[((size_t)v * CYP_EDGE_COLS) + PAIR_LEN] = n ? n->label : "";
         }
         rb_add_row(rb, vals);

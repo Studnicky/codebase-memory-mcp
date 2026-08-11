@@ -59,7 +59,7 @@ jobs:
           # The paginated files endpoint remains filename-only for this gate.
           FILES=$(gh api --paginate "repos/$REPO/pulls/$PR/files?per_page=100" --jq '.[].filename')
           printf '%s\n' "$FILES"
-          if printf '%s\n' "$FILES" | grep -qE '^(src/|internal/|install\.(sh|ps1)|scripts/build\.sh|scripts/smoke-test\.sh|scripts/smoke-local\.sh|scripts/smoke-fixture-server\.py|scripts/gen-third-party-notices\.sh|scripts/env\.sh|test-infrastructure/vm/(vm-smoke\.sh|windows-user-path-guard\.ps1)|Makefile\.cbm)'; then
+          if printf '%s\n' "$FILES" | grep -qE '^(src/|internal/|install\.(sh|ps1)|scripts/build\.sh|scripts/smoke-test\.sh|scripts/smoke-local\.sh|scripts/smoke-fixture-server\.py|scripts/gen-third-party-notices\.sh|scripts/env\.sh|scripts/test\.sh|scripts/check-complexity\.py|test-infrastructure/vm/(vm-smoke\.sh|windows-user-path-guard\.ps1)|tests/test_complexity_gate_contract\.sh|complexity\.allow|Makefile\.cbm|\.github/workflows/pr\.yml)'; then
             echo "product=true" >> "$GITHUB_OUTPUT"
           else
             echo "product=false" >> "$GITHUB_OUTPUT"

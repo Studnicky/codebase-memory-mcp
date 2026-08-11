@@ -236,10 +236,17 @@ bash "$ROOT/tests/test_spawn_no_window_contract.sh"
 echo "=== Step 0l: no embedded integration-script text (AV surface) ==="
 bash "$ROOT/tests/test_no_embedded_scripts_contract.sh"
 
-# Skips itself when no built binary and index are present — it gates the graph
-# the product builds of this repo, so a fresh checkout has nothing to measure.
-echo "=== Step 0m: complexity ratchet contract ==="
-bash "$ROOT/tests/test_complexity_gate_contract.sh"
+echo "=== Step 0m: frontend build gate contract ==="
+bash "$ROOT/tests/test_frontend_build_contract.sh"
+
+echo "=== Step 0n: license policy precision contract ==="
+bash "$ROOT/tests/test_license_policy_contract.sh"
+
+echo "=== Step 0o: package metadata coherence contract ==="
+bash "$ROOT/tests/test_package_metadata_contract.sh"
+
+echo "=== Step 0p: memlab cygpath contract ==="
+bash "$ROOT/tests/test_memlab_cygpath_contract.sh"
 
 # Verify compiler supports target arch
 verify_compiler "$CC"
@@ -258,6 +265,13 @@ if [ "${CBM_TEST_SEQUENTIAL:-0}" = "1" ]; then
 else
     make -f Makefile.cbm test-par ${MAKE_ARGS[@]+"${MAKE_ARGS[@]}"}
 fi
+
+# Step 3b: `cbm_realloc_or_abort` must terminate through SIGABRT when growth
+# fails. This stays in the single-purpose foundation runner: after the
+# parallel multi-suite process has created worker threads, forking a child
+# that logs before aborting could inherit a locked logger mutex and deadlock.
+echo "=== Step 3b: allocator-abort regression ==="
+make -f Makefile.cbm test-foundation ${MAKE_ARGS[@]+"${MAKE_ARGS[@]}"}
 
 # Step 4: C++ large-TU index-hang regression guard (#410). Runs the PROD binary
 # in a subprocess with a wall-clock timeout — a hang must fail, not block the run.
@@ -279,6 +293,17 @@ fi
 echo "=== Step 5: parent-death watchdog regression (#406/#407) ==="
 make -j"$NPROC" -f Makefile.cbm cbm TEST_SEAMS=1 ${MAKE_ARGS[@]+"${MAKE_ARGS[@]}"}
 WATCHDOG_BINARY="$ROOT/$BUILD_DIR/codebase-memory-mcp"
+
+echo "=== Step 5a: Nix integration-sidecar contract ==="
+bash "$ROOT/tests/test_nix_sidecar_contract.sh"
+
+# This contract uses the production binary it validates, then indexes the
+# current checkout before exercising clean/new/stale/malformed populations.
+# It is deliberately post-build: a missing binary or index is a hard failure,
+# never a green pre-build skip.
+echo "=== Step 5b: complexity ratchet contract ==="
+CBM_COMPLEXITY_BINARY="$WATCHDOG_BINARY" bash "$ROOT/tests/test_complexity_gate_contract.sh"
+
 CBM_TEST_BINARY="$WATCHDOG_BINARY" bash "$ROOT/tests/test_parent_watchdog.sh"
 
 # Step 5b: worker-mode parent-death watchdog (#845). A supervised index worker

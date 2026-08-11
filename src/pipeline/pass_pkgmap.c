@@ -107,8 +107,8 @@ static void pkg_entries_push(cbm_pkg_entries_t *e, char *pkg_name, char *entry_r
         /* e->cap is a fixed int per cbm_pkg_entries_t's header contract, so the
          * doubling grows in size_t first (no signed-overflow UB) and is
          * range-checked before truncating back into that int field. */
-        size_t new_cap = e->cap == 0 ? (size_t)PKGMAP_INIT_CAP
-                                     : (size_t)e->cap * SKIP_ONE * PAIR_LEN;
+        size_t new_cap =
+            e->cap == 0 ? (size_t)PKGMAP_INIT_CAP : (size_t)e->cap * SKIP_ONE * PAIR_LEN;
         if (new_cap > (size_t)INT_MAX) {
             free(pkg_name);
             free(entry_rel);

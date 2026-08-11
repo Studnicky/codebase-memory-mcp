@@ -13,7 +13,7 @@ Description: |-
   codebase-memory-mcp is a single static binary MCP server that indexes codebases
   at extreme speed and exposes 14 MCP tools for AI coding agents. Full indexes an
   average repository in milliseconds, the Linux kernel (28M LOC) in 3 minutes.
-  Supports 155 languages via vendored tree-sitter grammars. Zero dependencies.
+  Supports 159 languages via vendored tree-sitter grammars. Zero dependencies.
   Plug and play across 11 coding agents including Claude Code, Codex CLI, and Zed.
 Moniker: codebase-memory-mcp
 Tags:

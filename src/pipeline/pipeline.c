@@ -1088,7 +1088,8 @@ static int run_sequential_pipeline(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
                                                        ctx->project_name, ctx->excluded_dirs,
                                                        ctx->excluded_count));
 
-    CBMFileResult **seq_cache = (CBMFileResult **)calloc((size_t)file_count, sizeof(CBMFileResult *));
+    CBMFileResult **seq_cache =
+        (CBMFileResult **)calloc((size_t)file_count, sizeof(CBMFileResult *));
     if (seq_cache) {
         ctx->result_cache = seq_cache;
     }

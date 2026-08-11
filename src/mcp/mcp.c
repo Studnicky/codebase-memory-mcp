@@ -684,11 +684,6 @@ static const tool_def_t TOOLS[] = {
      "required by update\"}},\"additionalProperties\":false,"
      "\"required\":[\"project\"]}"},
 
-    {"ingest_traces", "Ingest traces", "Ingest runtime traces to enhance the knowledge graph",
-     "{\"type\":\"object\",\"properties\":{\"traces\":{\"type\":\"array\",\"items\":{\"type\":"
-     "\"object\",\"properties\":{\"caller\":{\"type\":\"string\"},\"callee\":{\"type\":\"string\"},"
-     "\"count\":{\"type\":\"integer\"}},\"additionalProperties\":false}},\"project\":{\"type\":"
-     "\"string\"}},\"required\":[\"traces\",\"project\"]}"},
 };
 
 static const int TOOL_COUNT = sizeof(TOOLS) / sizeof(TOOLS[0]);
@@ -720,7 +715,6 @@ static const tool_annotation_def_t TOOL_ANNOTATIONS[] = {
     {"check_index_coverage", false, true, true, false},
     {"detect_changes", false, true, true, false},
     {"manage_adr", false, true, false, false},
-    {"ingest_traces", false, false, false, false},
 };
 
 static const tool_annotation_def_t *mcp_tool_annotations(const char *name) {
@@ -2277,9 +2271,11 @@ static void add_git_context_string(yyjson_mut_doc *doc, yyjson_mut_val *obj, con
     }
 }
 
-static void add_git_context_json(yyjson_mut_doc *doc, yyjson_mut_val *obj, const char *root_path) {
+static void add_git_context_json(yyjson_mut_doc *doc, yyjson_mut_val *obj, const char *root_path,
+                                 const cbm_mcp_server_t *srv) {
     cbm_git_context_t ctx = {0};
-    (void)cbm_git_context_resolve(root_path, &ctx);
+    (void)cbm_git_context_resolve_cancellable(root_path,
+                                              srv ? &srv->pipeline_cancel_requested : NULL, &ctx);
 
     yyjson_mut_val *git = yyjson_mut_obj(doc);
     yyjson_mut_obj_add_bool(doc, git, "is_git", ctx.is_git);
@@ -2469,7 +2465,7 @@ static cbm_store_t *resolve_store_fallback_scan(const char *project) {
  * then append a JSON entry to arr. */
 static void build_project_json_entry(yyjson_mut_doc *doc, yyjson_mut_val *arr, const char *dir_path,
                                      const char *name, size_t name_len, int64_t size_bytes,
-                                     bool metadata_only) {
+                                     bool metadata_only, const cbm_mcp_server_t *srv) {
     (void)name_len;
 
     char full_path[CBM_SZ_2K];
@@ -2511,7 +2507,8 @@ static void build_project_json_entry(yyjson_mut_doc *doc, yyjson_mut_val *arr, c
      * index_status call away for the project you actually care about. */
     if (!metadata_only && root_path_buf[0]) {
         cbm_git_context_t gctx = {0};
-        (void)cbm_git_context_resolve(root_path_buf, &gctx);
+        (void)cbm_git_context_resolve_cancellable(
+            root_path_buf, srv ? &srv->pipeline_cancel_requested : NULL, &gctx);
         if (gctx.is_git && gctx.branch) {
             yyjson_mut_obj_add_strcpy(doc, p, "branch", gctx.branch);
         }
@@ -2528,7 +2525,6 @@ static void build_project_json_entry(yyjson_mut_doc *doc, yyjson_mut_val *arr, c
 /* list_projects: scan cache directory for .db files.
  * Each project is a single .db file — no central registry needed. */
 static char *handle_list_projects(cbm_mcp_server_t *srv, const char *args) {
-    (void)srv;
     bool metadata_only = false;
     yyjson_doc *args_doc = args ? yyjson_read(args, strlen(args), 0) : NULL;
     yyjson_val *args_root = args_doc ? yyjson_doc_get_root(args_doc) : NULL;
@@ -2572,7 +2568,7 @@ static char *handle_list_projects(cbm_mcp_server_t *srv, const char *args) {
         if (size_bytes < 0) {
             continue;
         }
-        build_project_json_entry(doc, arr, dir_path, name, len, size_bytes, metadata_only);
+        build_project_json_entry(doc, arr, dir_path, name, len, size_bytes, metadata_only, srv);
     }
     cbm_closedir(d);
 
@@ -2972,8 +2968,7 @@ static char *bm25_search(cbm_store_t *store, const char *project, const char *qu
             }
             cbm_tree_row_begin(&rows);
             cbm_tree_cell_str(&rows, cbm_sql_column_text(stmt, BM25_COL_QN), true);
-            cbm_tree_cell_str(&rows, cbm_sql_column_text(stmt, BM25_COL_LABEL),
-                              false);
+            cbm_tree_cell_str(&rows, cbm_sql_column_text(stmt, BM25_COL_LABEL), false);
             cbm_tree_cell_str(&rows, cbm_sql_column_text(stmt, BM25_COL_FILE), false);
             cbm_tree_cell_str(&rows, lines, false);
             cbm_tree_cell_real(&rows, cbm_sql_column_double(stmt, BM25_COL_RANK), false);
@@ -3023,8 +3018,7 @@ static char *bm25_search(cbm_store_t *store, const char *project, const char *qu
         }
         yyjson_mut_val *row = yyjson_mut_arr(doc);
         yyjson_mut_arr_add_strcpy(doc, row, cbm_sql_column_text(stmt, BM25_COL_QN));
-        yyjson_mut_arr_add_strcpy(doc, row,
-                                  cbm_sql_column_text(stmt, BM25_COL_LABEL));
+        yyjson_mut_arr_add_strcpy(doc, row, cbm_sql_column_text(stmt, BM25_COL_LABEL));
         yyjson_mut_arr_add_strcpy(doc, row, cbm_sql_column_text(stmt, BM25_COL_FILE));
         yyjson_mut_arr_add_strcpy(doc, row, lines);
         yyjson_mut_arr_add_real(doc, row, cbm_sql_column_double(stmt, BM25_COL_RANK));
@@ -3348,8 +3342,8 @@ static void emit_search_results_tree(cbm_sb_t *sb, cbm_search_output_t *out, int
         char lines[CBM_SZ_32];
         sg_lines_str(lines, sizeof(lines), sr->node.start_line, sr->node.end_line);
         char row[CBM_SZ_1K];
-        snprintf(row, sizeof(row), "  %s %s %s %d %d", shortname,
-                 sr->node.label, lines, sr->in_degree, sr->out_degree);
+        snprintf(row, sizeof(row), "  %s %s %s %d %d", shortname, sr->node.label, lines,
+                 sr->in_degree, sr->out_degree);
         cbm_sb_append(sb, row);
         /* Extra property columns (fields param). Routed through the shared
          * cell emitters so values with spaces (signatures, docstrings) are
@@ -3996,7 +3990,6 @@ enum {
     COVERAGE_RANGE_MAX = 128,
 };
 
-
 typedef enum {
     COVERAGE_PATH_OK = 0,
     COVERAGE_PATH_OUTSIDE,
@@ -4438,7 +4431,7 @@ static char *handle_index_status(cbm_mcp_server_t *srv, const char *args) {
             yyjson_mut_obj_add_strcpy(doc, root, "root_path",
                                       proj_info.root_path ? proj_info.root_path : "");
             if (verbose) {
-                add_git_context_json(doc, root, proj_info.root_path);
+                add_git_context_json(doc, root, proj_info.root_path, srv);
             }
             safe_str_free(&proj_info.name);
             safe_str_free(&proj_info.indexed_at);
@@ -7153,8 +7146,8 @@ static void add_skipped_summary(yyjson_mut_doc *doc, yyjson_mut_val *root,
  * note spells out the best-effort framing: absence from this list is NOT a
  * completeness guarantee. */
 static void add_parse_partial_summary(yyjson_mut_doc *doc, yyjson_mut_val *root,
-                                      const cbm_file_error_t *errs, int count,
-                                      cbm_store_t *store, const char *project) {
+                                      const cbm_file_error_t *errs, int count, cbm_store_t *store,
+                                      const char *project) {
     /* Count from the persisted coverage rows, the same source index_status
      * reads, so the two always agree. An incremental run re-extracts only the
      * changed files, so this run's errs[] describes those alone — reporting it
@@ -7824,7 +7817,6 @@ static char *index_run_supervised_path(cbm_mcp_server_t *srv, const char *root_p
 char *cbm_mcp_index_run_supervised_path(const char *root_path) {
     return index_run_supervised_path(NULL, root_path);
 }
-
 
 /* Resolve relative index requests against an explicitly supplied MCP session
  * root, never against the long-lived daemon process cwd. */
@@ -10318,7 +10310,8 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
                     size_t hread = fread(hbuf, SKIP_ONE, (size_t)hsz, hfp);
                     hbuf[hread] = '\0';
                     enum { HUNK_CAP = 4096 };
-                    hunks = cbm_realloc_or_abort(NULL, (size_t)HUNK_CAP * sizeof(cbm_changed_hunk_t));
+                    hunks =
+                        cbm_realloc_or_abort(NULL, (size_t)HUNK_CAP * sizeof(cbm_changed_hunk_t));
                     hunk_count = cbm_parse_hunks(hbuf, hunks, HUNK_CAP);
                     /* A filled buffer means the diff was truncated: the hunks
                      * past the cap are gone, so files captured only partially
@@ -10879,36 +10872,8 @@ static char *handle_manage_adr(cbm_mcp_server_t *srv, const char *args) {
 
 /* ── ingest_traces ────────────────────────────────────────────── */
 
-static char *handle_ingest_traces(cbm_mcp_server_t *srv, const char *args) {
-    (void)srv;
-    /* Parse traces array from JSON args */
-    yyjson_doc *adoc = yyjson_read(args, strlen(args), 0);
-    int trace_count = 0;
-
-    if (adoc) {
-        yyjson_val *aroot = yyjson_doc_get_root(adoc);
-        yyjson_val *traces = yyjson_obj_get(aroot, "traces");
-        if (traces && yyjson_is_arr(traces)) {
-            trace_count = (int)yyjson_arr_size(traces);
-        }
-        yyjson_doc_free(adoc);
-    }
-
-    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-    yyjson_mut_val *root = yyjson_mut_obj(doc);
-    yyjson_mut_doc_set_root(doc, root);
-
-    yyjson_mut_obj_add_str(doc, root, "status", "accepted");
-    yyjson_mut_obj_add_int(doc, root, "traces_received", trace_count);
-    yyjson_mut_obj_add_str(doc, root, "note",
-                           "Runtime edge creation from traces not yet implemented");
-
-    char *json = yy_doc_to_str(doc);
-    yyjson_mut_doc_free(doc);
-
-    char *result = cbm_mcp_text_result(json, false);
-    free(json);
-    return result;
+static char *handle_ingest_traces(void) {
+    return cbm_mcp_text_result("ingest_traces is not supported", true);
 }
 
 /* ── Tool dispatch ────────────────────────────────────────────── */
@@ -10969,7 +10934,7 @@ static char *dispatch_tool(cbm_mcp_server_t *srv, const char *tool_name, const c
         return handle_manage_adr(srv, args_json);
     }
     if (strcmp(tool_name, "ingest_traces") == 0) {
-        return handle_ingest_traces(srv, args_json);
+        return handle_ingest_traces();
     }
     char msg[CBM_SZ_256];
     snprintf(msg, sizeof(msg), "unknown tool: %s", tool_name);

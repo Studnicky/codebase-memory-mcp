@@ -9,7 +9,6 @@
 #include <store/store.h>
 #include <foundation/constants.h>
 #include <cbm.h>
-#include <sqlite3.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -1226,11 +1225,9 @@ TEST(store_integrity_corrupt_bad_path) {
      * This matches the real corruption where node IDs ended up in root_path. */
     cbm_store_t *s = cbm_store_open_memory();
     ASSERT_NOT_NULL(s);
-    sqlite3 *db = cbm_store_get_db(s);
-    sqlite3_exec(db,
-                 "INSERT INTO projects (name, indexed_at, root_path) "
-                 "VALUES ('some-project', '2024-01-01', '826');",
-                 NULL, NULL, NULL);
+    ASSERT_EQ(cbm_store_exec(s, "INSERT INTO projects (name, indexed_at, root_path) "
+                               "VALUES ('some-project', '2024-01-01', '826');"),
+              CBM_STORE_OK);
     ASSERT_FALSE(cbm_store_check_integrity(s));
     cbm_store_close(s);
     PASS();
@@ -1252,14 +1249,13 @@ TEST(store_integrity_corrupt_too_many_rows) {
     /* Simulate corruption: >5 rows in projects table */
     cbm_store_t *s = cbm_store_open_memory();
     ASSERT_NOT_NULL(s);
-    sqlite3 *db = cbm_store_get_db(s);
     for (int i = 0; i < 10; i++) {
         char sql[256];
         snprintf(sql, sizeof(sql),
                  "INSERT INTO projects (name, indexed_at, root_path) "
                  "VALUES ('proj-%d', '2024-01-01', '/tmp/%d');",
                  i, i);
-        sqlite3_exec(db, sql, NULL, NULL, NULL);
+        ASSERT_EQ(cbm_store_exec(s, sql), CBM_STORE_OK);
     }
     ASSERT_FALSE(cbm_store_check_integrity(s));
     cbm_store_close(s);
@@ -1323,7 +1319,9 @@ TEST(store_node_empty_strings) {
     cbm_node_t found = {0};
     int rc = cbm_store_find_node_by_qn(s, "test", "", &found);
     ASSERT_EQ(rc, CBM_STORE_OK);
-    ASSERT_STR_EQ(found.name, "");
+    /* Empty source identifiers normalize to the canonical missing-name value.
+     * A literal "{}" remains an ordinary name; only empty text is absence. */
+    ASSERT_NULL(found.name);
     ASSERT_STR_EQ(found.label, "");
     cbm_node_free_fields(&found);
 

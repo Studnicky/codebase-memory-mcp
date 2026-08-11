@@ -2,6 +2,7 @@
 #define CBM_GIT_CONTEXT_H
 
 #include <stdbool.h>
+#include <stdatomic.h>
 
 typedef struct {
     bool is_git;
@@ -20,6 +21,10 @@ typedef struct {
 } cbm_git_context_t;
 
 int cbm_git_context_resolve(const char *path, cbm_git_context_t *out);
+/* Resolve Git metadata while observing an optional request-cancellation flag.
+ * Cancellation stops and reaps the contained Git child before returning. */
+int cbm_git_context_resolve_cancellable(const char *path, const atomic_int *cancel_requested,
+                                        cbm_git_context_t *out);
 void cbm_git_context_free(cbm_git_context_t *ctx);
 char *cbm_git_context_branch_qn(const char *project_name, const cbm_git_context_t *ctx);
 int cbm_git_context_props_json(const cbm_git_context_t *ctx, char *buf, int buf_size);

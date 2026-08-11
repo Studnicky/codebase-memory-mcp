@@ -339,6 +339,59 @@ TEST(sem_corpus_add_null_doc) {
     PASS();
 }
 
+#ifdef CBM_ENABLE_TEST_SEAMS
+static int assert_direct_doc_array_failure_is_recoverable(int successful_allocations) {
+    cbm_sem_corpus_t *c = cbm_sem_corpus_new();
+    const char *tokens[] = {"direct"};
+    ASSERT_NOT_NULL(c);
+    cbm_sem_corpus_fail_doc_array_alloc_after_for_test(successful_allocations);
+    cbm_sem_corpus_add_doc(c, tokens, 1);
+    ASSERT_EQ(cbm_sem_corpus_doc_count(c), 0);
+    cbm_sem_corpus_add_doc(c, tokens, 1);
+    ASSERT_EQ(cbm_sem_corpus_doc_count(c), 1);
+    ASSERT_TRUE(cbm_sem_corpus_token_count(c) > 0);
+    cbm_sem_corpus_free(c);
+    return 0;
+}
+
+static int assert_batch_doc_array_failure_is_recoverable(int successful_allocations) {
+    cbm_sem_corpus_t *c = cbm_sem_corpus_new();
+    char *tokens[] = {"batch"};
+    int counts[] = {1};
+    ASSERT_NOT_NULL(c);
+    cbm_sem_corpus_fail_doc_array_alloc_after_for_test(successful_allocations);
+    cbm_sem_corpus_add_docs_batch(c, tokens, counts, 1, 1);
+    ASSERT_EQ(cbm_sem_corpus_doc_count(c), 0);
+    cbm_sem_corpus_add_docs_batch(c, tokens, counts, 1, 1);
+    ASSERT_EQ(cbm_sem_corpus_doc_count(c), 1);
+    ASSERT_TRUE(cbm_sem_corpus_token_count(c) > 0);
+    cbm_sem_corpus_free(c);
+    return 0;
+}
+
+TEST(sem_corpus_doc_array_growth_failures_are_transactional) {
+    ASSERT_EQ(assert_direct_doc_array_failure_is_recoverable(0), 0);
+    ASSERT_EQ(assert_direct_doc_array_failure_is_recoverable(1), 0);
+    ASSERT_EQ(assert_batch_doc_array_failure_is_recoverable(0), 0);
+    ASSERT_EQ(assert_batch_doc_array_failure_is_recoverable(1), 0);
+    PASS();
+}
+#endif
+
+TEST(sem_corpus_doc_array_growth_boundary_succeeds) {
+    enum { DOC_ARRAY_INITIAL_CAPACITY = 64 };
+    cbm_sem_corpus_t *c = cbm_sem_corpus_new();
+    const char *tokens[] = {"boundary"};
+    ASSERT_NOT_NULL(c);
+    for (int i = 0; i < DOC_ARRAY_INITIAL_CAPACITY + 1; i++) {
+        cbm_sem_corpus_add_doc(c, tokens, 1);
+    }
+    ASSERT_EQ(cbm_sem_corpus_doc_count(c), DOC_ARRAY_INITIAL_CAPACITY + 1);
+    ASSERT_TRUE(cbm_sem_corpus_idf(c, "boundary") < 0.01F);
+    cbm_sem_corpus_free(c);
+    PASS();
+}
+
 TEST(sem_corpus_free_null) {
     cbm_sem_corpus_free(NULL); /* should not crash */
     PASS();
@@ -505,6 +558,10 @@ SUITE(semantic) {
     RUN_TEST(sem_corpus_add_one_doc);
     RUN_TEST(sem_corpus_idf);
     RUN_TEST(sem_corpus_add_null_doc);
+#ifdef CBM_ENABLE_TEST_SEAMS
+    RUN_TEST(sem_corpus_doc_array_growth_failures_are_transactional);
+#endif
+    RUN_TEST(sem_corpus_doc_array_growth_boundary_succeeds);
     RUN_TEST(sem_corpus_free_null);
     RUN_TEST(sem_get_config_defaults);
 }

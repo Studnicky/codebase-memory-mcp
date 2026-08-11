@@ -154,7 +154,8 @@ int cbm_delta_snapshot_inbound(cbm_store_t *store, const char *project, const ch
             /* Absent properties must stay absent so the "{}" default below
              * still applies; "" is not a JSON object and would be replayed as
              * a malformed property set. */
-            const char *props = cbm_sql_column_is_null(stmt, 3) ? NULL : cbm_sql_column_text(stmt, 3);
+            const char *props =
+                cbm_sql_column_is_null(stmt, 3) ? NULL : cbm_sql_column_text(stmt, 3);
             cbm_delta_saved_edge_t *e = &items[count];
             e->source_qn = strdup(sq ? sq : "");
             e->target_qn = strdup(tq ? tq : "");

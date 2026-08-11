@@ -35,9 +35,9 @@ typedef struct cbm_sql_stmt cbm_sql_stmt_t;
 /* Outcome of advancing a statement. A caller that handles ROW and DONE and
  * ignores ERROR is a compile-time-visible omission, not a silent one. */
 typedef enum {
-    CBM_SQL_ROW = 0,  /* a row is available; read it with cbm_sql_column_* */
-    CBM_SQL_DONE,     /* the statement finished normally */
-    CBM_SQL_ERROR,    /* the statement failed; see cbm_sql_errmsg */
+    CBM_SQL_ROW = 0, /* a row is available; read it with cbm_sql_column_* */
+    CBM_SQL_DONE,    /* the statement finished normally */
+    CBM_SQL_ERROR,   /* the statement failed; see cbm_sql_errmsg */
 } cbm_sql_step_t;
 
 /* The connection behind a store. NULL when the store is not open. */
@@ -118,9 +118,10 @@ typedef struct {
     size_t (*usable_size)(void *block);
 } cbm_sql_allocator_t;
 
-/* Bind `alloc` as sqlite's allocator. MUST run before the first connection is
- * opened — sqlite refuses the change once it has initialised, and this returns
- * false in that case rather than leaving the caller to read a status code. */
+/* Bind `alloc` as sqlite's allocator exactly once. MUST run before the first
+ * connection is opened — SQLite refuses the change once it has initialised.
+ * Invalid, late, or repeated attempts return false and never change callbacks
+ * already serving a live connection. */
 bool cbm_sql_bind_allocator(const cbm_sql_allocator_t *alloc);
 
 #endif /* CBM_STORE_SQL_H */

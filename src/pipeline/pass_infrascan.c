@@ -988,8 +988,8 @@ static void tf_extract_second_quoted(const char *trimmed, int consumed, char *ou
 }
 
 /* Try to parse a simple "keyword ident" block (variable, output, provider). */
-static bool tf_try_simple_block(const char *trimmed, const char *keyword, char *names, size_t name_sz,
-                                int *count, int max_count) {
+static bool tf_try_simple_block(const char *trimmed, const char *keyword, char *names,
+                                size_t name_sz, int *count, int max_count) {
     char ident[CBM_SZ_128];
     int consumed = tf_extract_ident(trimmed, keyword, ident, sizeof(ident));
     if (consumed <= 0 || *count >= max_count) {

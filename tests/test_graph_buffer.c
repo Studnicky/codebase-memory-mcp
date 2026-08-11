@@ -1181,6 +1181,126 @@ TEST(gbuf_flush_verify_store_data) {
     PASS();
 }
 
+TEST(gbuf_dump_preflight_failure_preserves_buffer_and_output) {
+    char directory[] = "/tmp/cbm_gbuf_dump_atomic_XXXXXX";
+    ASSERT_NOT_NULL(cbm_mkdtemp(directory));
+    char db_path[512];
+    ASSERT_GT(snprintf(db_path, sizeof(db_path), "%s/graph.db", directory), 0);
+
+    cbm_gbuf_t *gb = cbm_gbuf_new("proj", directory);
+    int64_t first = cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "Function", "first", "proj::first", "a.c", 1, 2, "{}"));
+    int64_t second = cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "Function", "second", "proj::second", "b.c", 1, 2, "{}"));
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(first), .target = cbm_node_id(second)},
+        "CALLS", "{}"));
+    const uint8_t vector[] = {1, 2, 3, 4};
+    ASSERT_EQ(cbm_gbuf_store_vector(gb, cbm_node_id(first), vector, (int)sizeof(vector)), 0);
+
+    /* Mapping, node array, edge array, and url-path array succeed;
+     * the local-name parallel array fails. No output path or buffer state publishes. */
+    cbm_gbuf_fail_allocation_after_for_test(4);
+    ASSERT_EQ(cbm_gbuf_dump_to_sqlite(gb, db_path), CBM_NOT_FOUND);
+    cbm_gbuf_fail_allocation_after_for_test(-1);
+    ASSERT_FALSE(cbm_file_exists(db_path));
+    ASSERT_NOT_NULL(cbm_gbuf_find_by_qn(gb, "proj::first"));
+    ASSERT_EQ(cbm_gbuf_edge_count(gb), 1);
+
+    /* All node and edge preflight allocations succeed; vector remap-copy fails. */
+    cbm_gbuf_fail_allocation_after_for_test(7);
+    ASSERT_EQ(cbm_gbuf_dump_to_sqlite(gb, db_path), CBM_NOT_FOUND);
+    cbm_gbuf_fail_allocation_after_for_test(-1);
+    ASSERT_FALSE(cbm_file_exists(db_path));
+
+    ASSERT_EQ(cbm_gbuf_dump_to_sqlite(gb, db_path), 0);
+    cbm_store_t *store = cbm_store_open_path(db_path);
+    ASSERT_NOT_NULL(store);
+    ASSERT_EQ(cbm_store_count_nodes(store, "proj"), 2);
+    ASSERT_EQ(cbm_store_count_edges(store, "proj"), 1);
+    cbm_store_close(store);
+    cbm_gbuf_free(gb);
+    th_rmtree(directory);
+    PASS();
+}
+
+TEST(gbuf_flush_preflight_failure_preserves_store) {
+    cbm_store_t *store = cbm_store_open_memory();
+    ASSERT_NOT_NULL(store);
+    ASSERT_EQ(cbm_store_upsert_project(store, "proj", "/tmp/repo"), CBM_STORE_OK);
+    cbm_node_t existing = {
+        .project = "proj",
+        .label = "Function",
+        .name = "existing",
+        .qualified_name = "proj::existing",
+        .file_path = "existing.c",
+        .start_line = 1,
+        .end_line = 2,
+        .properties_json = "{}",
+    };
+    ASSERT_GT(cbm_store_upsert_node(store, &existing), 0);
+
+    cbm_gbuf_t *gb = cbm_gbuf_new("proj", "/tmp/repo");
+    int64_t first = cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "Function", "first", "proj::first", "a.c", 1, 2, "{}"));
+    int64_t second = cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "Function", "second", "proj::second", "b.c", 1, 2, "{}"));
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(first), .target = cbm_node_id(second)},
+        "CALLS", "{}"));
+
+    /* Remap and property-array allocations succeed; property serialization fails. */
+    cbm_gbuf_fail_allocation_after_for_test(2);
+    ASSERT_EQ(cbm_gbuf_flush_to_store(gb, store), CBM_NOT_FOUND);
+    cbm_gbuf_fail_allocation_after_for_test(-1);
+    ASSERT_EQ(cbm_store_count_nodes(store, "proj"), 1);
+    ASSERT_EQ(cbm_store_count_edges(store, "proj"), 0);
+    ASSERT_NOT_NULL(cbm_gbuf_find_by_qn(gb, "proj::first"));
+
+    ASSERT_EQ(cbm_gbuf_flush_to_store(gb, store), 0);
+    ASSERT_EQ(cbm_store_count_nodes(store, "proj"), 2);
+    ASSERT_EQ(cbm_store_count_edges(store, "proj"), 1);
+    cbm_gbuf_free(gb);
+    cbm_store_close(store);
+    PASS();
+}
+
+TEST(gbuf_flush_store_failure_rolls_back) {
+    cbm_store_t *store = cbm_store_open_memory();
+    ASSERT_NOT_NULL(store);
+    ASSERT_EQ(cbm_store_upsert_project(store, "proj", "/tmp/repo"), CBM_STORE_OK);
+    cbm_node_t existing = {
+        .project = "proj",
+        .label = "Function",
+        .name = "existing",
+        .qualified_name = "proj::existing",
+        .file_path = "existing.c",
+        .start_line = 1,
+        .end_line = 2,
+        .properties_json = "{}",
+    };
+    ASSERT_GT(cbm_store_upsert_node(store, &existing), 0);
+
+    cbm_gbuf_t *gb = cbm_gbuf_new("proj", "/tmp/repo");
+    cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "Function", "new", "proj::new", "new.c", 1, 2, "{}"));
+    ASSERT_EQ(cbm_store_exec(store,
+                             "CREATE TRIGGER abort_gbuf_node_insert BEFORE INSERT ON nodes "
+                             "BEGIN SELECT RAISE(ABORT, 'injected node failure'); END;"),
+              CBM_STORE_OK);
+
+    ASSERT_EQ(cbm_gbuf_flush_to_store(gb, store), CBM_NOT_FOUND);
+    ASSERT_EQ(cbm_store_count_nodes(store, "proj"), 1);
+    ASSERT_EQ(cbm_store_count_edges(store, "proj"), 0);
+    ASSERT_EQ(cbm_store_exec(store, "DROP TRIGGER abort_gbuf_node_insert;"), CBM_STORE_OK);
+
+    ASSERT_EQ(cbm_gbuf_flush_to_store(gb, store), 0);
+    ASSERT_EQ(cbm_store_count_nodes(store, "proj"), 1);
+    cbm_gbuf_free(gb);
+    cbm_store_close(store);
+    PASS();
+}
+
 TEST(gbuf_merge_into_store_preserves) {
     /* First, flush initial data via flush_to_store */
     cbm_gbuf_t *gb1 = cbm_gbuf_new("proj", "/tmp/repo");
@@ -1217,6 +1337,46 @@ TEST(gbuf_merge_into_store_preserves) {
     cbm_store_close(store);
     cbm_gbuf_free(gb1);
     cbm_gbuf_free(gb2);
+    PASS();
+}
+
+TEST(gbuf_merge_preflight_failure_preserves_store) {
+    cbm_store_t *store = cbm_store_open_memory();
+    ASSERT_NOT_NULL(store);
+    ASSERT_EQ(cbm_store_upsert_project(store, "proj", "/tmp/repo"), CBM_STORE_OK);
+    cbm_node_t existing = {
+        .project = "proj",
+        .label = "Function",
+        .name = "existing",
+        .qualified_name = "proj::existing",
+        .file_path = "existing.c",
+        .start_line = 1,
+        .end_line = 2,
+        .properties_json = "{}",
+    };
+    ASSERT_GT(cbm_store_upsert_node(store, &existing), 0);
+
+    cbm_gbuf_t *gb = cbm_gbuf_new("proj", "/tmp/repo");
+    int64_t first = cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "Function", "first", "proj::first", "a.c", 1, 2, "{}"));
+    int64_t second = cbm_node_id_value(
+        cbm_gbuf_upsert_node(gb, "Function", "second", "proj::second", "b.c", 1, 2, "{}"));
+    cbm_edge_id_value(cbm_gbuf_insert_edge(
+        gb, (cbm_edge_endpoints_t){.source = cbm_node_id(first), .target = cbm_node_id(second)},
+        "CALLS", "{}"));
+
+    cbm_gbuf_fail_allocation_after_for_test(2);
+    ASSERT_EQ(cbm_gbuf_merge_into_store(gb, store), CBM_NOT_FOUND);
+    cbm_gbuf_fail_allocation_after_for_test(-1);
+    ASSERT_EQ(cbm_store_count_nodes(store, "proj"), 1);
+    ASSERT_EQ(cbm_store_count_edges(store, "proj"), 0);
+    ASSERT_NOT_NULL(cbm_gbuf_find_by_qn(gb, "proj::second"));
+
+    ASSERT_EQ(cbm_gbuf_merge_into_store(gb, store), 0);
+    ASSERT_EQ(cbm_store_count_nodes(store, "proj"), 3);
+    ASSERT_EQ(cbm_store_count_edges(store, "proj"), 1);
+    cbm_gbuf_free(gb);
+    cbm_store_close(store);
     PASS();
 }
 
@@ -1430,7 +1590,11 @@ SUITE(graph_buffer) {
     /* Flush/merge-into-store tests */
     RUN_TEST(gbuf_flush_to_store_null);
     RUN_TEST(gbuf_flush_verify_store_data);
+    RUN_TEST(gbuf_dump_preflight_failure_preserves_buffer_and_output);
+    RUN_TEST(gbuf_flush_preflight_failure_preserves_store);
+    RUN_TEST(gbuf_flush_store_failure_rolls_back);
     RUN_TEST(gbuf_merge_into_store_preserves);
+    RUN_TEST(gbuf_merge_preflight_failure_preserves_store);
     RUN_TEST(gbuf_store_round_trip_preserves_missing_and_literal_empty_object_names);
     RUN_TEST(gbuf_flush_skips_orphan_edges);
 

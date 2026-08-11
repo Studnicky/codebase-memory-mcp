@@ -463,6 +463,56 @@ static void http_appendf(char *buf, size_t bufsz, int *pos, const char *fmt, ...
     }
 }
 
+enum {
+    UI_JSON_FAILURE_NONE = 0,
+    UI_JSON_FAILURE_CONSTRUCTION = 1,
+    UI_JSON_FAILURE_SERIALIZATION = 2,
+};
+
+static atomic_int g_ui_json_failure_stage = UI_JSON_FAILURE_NONE;
+
+/* Test-only fault injection keeps allocation and serialization error paths
+ * observable without changing production request behavior. */
+void cbm_http_server_set_json_failure_for_testing(int stage);
+void cbm_http_server_set_json_failure_for_testing(int stage) {
+    if (stage != UI_JSON_FAILURE_CONSTRUCTION && stage != UI_JSON_FAILURE_SERIALIZATION) {
+        stage = UI_JSON_FAILURE_NONE;
+    }
+    atomic_store(&g_ui_json_failure_stage, stage);
+}
+
+static yyjson_mut_doc *ui_json_doc_new(void) {
+    if (atomic_load(&g_ui_json_failure_stage) == UI_JSON_FAILURE_CONSTRUCTION) {
+        return NULL;
+    }
+    return yyjson_mut_doc_new(NULL);
+}
+
+static char *ui_json_write(const yyjson_mut_doc *doc, size_t *length) {
+    if (atomic_load(&g_ui_json_failure_stage) == UI_JSON_FAILURE_SERIALIZATION) {
+        return NULL;
+    }
+    return yyjson_mut_write(doc, YYJSON_WRITE_NOFLAG, length);
+}
+
+static void ui_reply_json_failure(cbm_http_conn_t *c) {
+    static const char body[] = "{\"error\":\"response unavailable\"}";
+    cbm_http_reply_buf(c, 500, g_cors_json, body, sizeof(body) - 1U);
+}
+
+static bool ui_reply_json_document(cbm_http_conn_t *c, yyjson_mut_doc *doc) {
+    size_t length = 0U;
+    char *body = doc ? ui_json_write(doc, &length) : NULL;
+    yyjson_mut_doc_free(doc);
+    if (!body) {
+        ui_reply_json_failure(c);
+        return false;
+    }
+    cbm_http_reply_buf(c, 200, g_cors_json, body, length);
+    free(body);
+    return true;
+}
+
 /* GET /api/logs?lines=N — returns last N log lines */
 static void handle_logs(cbm_http_conn_t *c, const cbm_http_req_t *req) {
     char lines_str[16] = {0};
@@ -546,8 +596,13 @@ static void handle_logs(cbm_http_conn_t *c, const cbm_http_req_t *req) {
 
 /* GET /api/processes — list codebase-memory-mcp processes via ps */
 static void handle_processes(cbm_http_conn_t *c) {
-    char buf[8192];
-    int pos = 0;
+    yyjson_mut_doc *doc = ui_json_doc_new();
+    yyjson_mut_val *root = doc ? yyjson_mut_obj(doc) : NULL;
+    yyjson_mut_val *processes = doc ? yyjson_mut_arr(doc) : NULL;
+    bool ok = doc && root && processes;
+    if (ok) {
+        yyjson_mut_doc_set_root(doc, root);
+    }
 
 #ifdef _WIN32
     /* Windows: GetProcessMemoryInfo + GetProcessTimes */
@@ -566,10 +621,12 @@ static void handle_processes(cbm_http_conn_t *c) {
         user_s = (double)u.QuadPart / 1e7;
         sys_s = (double)k.QuadPart / 1e7;
     }
-    http_appendf(buf, sizeof(buf), &pos,
-                 "{\"self_pid\":%d,\"self_rss_mb\":%.1f,"
-                 "\"self_user_cpu_s\":%.1f,\"self_sys_cpu_s\":%.1f,\"processes\":[]}",
-                 (int)_getpid(), (double)rss_bytes / (1024.0 * 1024.0), user_s, sys_s);
+    ok = ok && yyjson_mut_obj_add_int(doc, root, "self_pid", (int)_getpid()) &&
+         yyjson_mut_obj_add_real(doc, root, "self_rss_mb",
+                                 (double)rss_bytes / (1024.0 * 1024.0)) &&
+         yyjson_mut_obj_add_real(doc, root, "self_user_cpu_s", user_s) &&
+         yyjson_mut_obj_add_real(doc, root, "self_sys_cpu_s", sys_s) &&
+         yyjson_mut_obj_add_val(doc, root, "processes", processes);
 #else
     struct rusage ru;
     getrusage(RUSAGE_SELF, &ru);
@@ -577,20 +634,21 @@ static void handle_processes(cbm_http_conn_t *c) {
 #ifdef __APPLE__
     rss_kb /= 1024;
 #endif
-    http_appendf(buf, sizeof(buf), &pos,
-                 "{\"self_pid\":%d,\"self_rss_mb\":%.1f,"
-                 "\"self_user_cpu_s\":%.1f,\"self_sys_cpu_s\":%.1f,\"processes\":[",
-                 (int)getpid(), (double)rss_kb / 1024.0,
-                 (double)ru.ru_utime.tv_sec + (double)ru.ru_utime.tv_usec / 1e6,
-                 (double)ru.ru_stime.tv_sec + (double)ru.ru_stime.tv_usec / 1e6);
+    ok = ok && yyjson_mut_obj_add_int(doc, root, "self_pid", (int)getpid()) &&
+         yyjson_mut_obj_add_real(doc, root, "self_rss_mb", (double)rss_kb / 1024.0) &&
+         yyjson_mut_obj_add_real(doc, root, "self_user_cpu_s",
+                                 (double)ru.ru_utime.tv_sec +
+                                     (double)ru.ru_utime.tv_usec / 1e6) &&
+         yyjson_mut_obj_add_real(doc, root, "self_sys_cpu_s",
+                                 (double)ru.ru_stime.tv_sec +
+                                     (double)ru.ru_stime.tv_usec / 1e6);
 
     FILE *fp = popen("LC_ALL=C ps -eo pid,pcpu,rss,etime,comm 2>/dev/null"
                      " | grep '[c]odebase-memory-mcp'",
                      "r");
-    int proc_count = 0;
     if (fp) {
         char line[1024];
-        while (fgets(line, sizeof(line), fp)) {
+        while (ok && fgets(line, sizeof(line), fp)) {
             int pid = 0;
             float cpu = 0;
             long rss = 0;
@@ -598,36 +656,39 @@ static void handle_processes(cbm_http_conn_t *c) {
             char comm[256] = {0};
 
             if (sscanf(line, "%d %f %ld %63s %255s", &pid, &cpu, &rss, elapsed, comm) >= 4) {
-                if (proc_count > 0)
-                    buf[pos++] = ',';
-                http_appendf(buf, sizeof(buf), &pos,
-                             "{\"pid\":%d,\"cpu\":%.1f,\"rss_mb\":%.1f,"
-                             "\"elapsed\":\"%s\",\"command\":\"%s\",\"is_self\":%s}",
-                             pid, (double)cpu, (double)rss / 1024.0, elapsed, comm,
-                             pid == (int)getpid() ? "true" : "false");
-                if (pos >= (int)sizeof(buf)) {
-                    pos = (int)sizeof(buf) - 1;
+                yyjson_mut_val *process = yyjson_mut_obj(doc);
+                ok = ok && process && yyjson_mut_obj_add_int(doc, process, "pid", pid) &&
+                     yyjson_mut_obj_add_real(doc, process, "cpu", (double)cpu) &&
+                     yyjson_mut_obj_add_real(doc, process, "rss_mb", (double)rss / 1024.0) &&
+                     yyjson_mut_obj_add_strcpy(doc, process, "elapsed", elapsed) &&
+                     yyjson_mut_obj_add_strcpy(doc, process, "command", comm) &&
+                     yyjson_mut_obj_add_bool(doc, process, "is_self", pid == (int)getpid()) &&
+                     yyjson_mut_arr_add_val(processes, process);
+                if (!ok) {
+                    break;
                 }
-                proc_count++;
             }
         }
         pclose(fp);
     }
-    http_appendf(buf, sizeof(buf), &pos, "]}");
+    ok = ok && yyjson_mut_obj_add_val(doc, root, "processes", processes);
 #endif
 
-    cbm_http_replyf(c, 200, g_cors_json, "%s", buf);
+    if (!ok) {
+        yyjson_mut_doc_free(doc);
+        ui_reply_json_failure(c);
+        return;
+    }
+    (void)ui_reply_json_document(c, doc);
 }
 
 /* ── Directory browser ────────────────────────────────────────── */
 
 #include <dirent.h>
 
-static void append_roots_json(char *buf, size_t bufsz, int *pos) {
-    http_appendf(buf, bufsz, pos, ",\"roots\":[");
+static bool append_roots_json(yyjson_mut_doc *doc, yyjson_mut_val *roots) {
 #ifdef _WIN32
     DWORD drives = GetLogicalDrives();
-    int count = 0;
     for (int i = 0; i < 26; i++) {
         if (!(drives & (1u << i))) {
             continue;
@@ -640,17 +701,16 @@ static void append_roots_json(char *buf, size_t bufsz, int *pos) {
         if (!cbm_is_dir(root)) {
             continue;
         }
-        if (count++ > 0) {
-            /* Once a wide listing saturates buf, http_appendf has already
-             * pinned *pos to bufsz, so this separator goes through it too. */
-            http_appendf(buf, bufsz, pos, ",");
+        if (!yyjson_mut_arr_add_strcpy(doc, roots, root)) {
+            return false;
         }
-        http_appendf(buf, bufsz, pos, "\"%c:/\"", 'A' + i);
     }
 #else
-    http_appendf(buf, bufsz, pos, "\"/\"");
+    if (!yyjson_mut_arr_add_str(doc, roots, "/")) {
+        return false;
+    }
 #endif
-    http_appendf(buf, bufsz, pos, "]");
+    return true;
 }
 
 /* GET /api/browse?path=/some/dir — list subdirectories for file picker */
@@ -682,14 +742,19 @@ static void handle_browse(cbm_http_conn_t *c, const cbm_http_req_t *req) {
         return;
     }
 
-    /* Build JSON response */
-    char buf[32768];
-    int pos = 0;
-    http_appendf(buf, sizeof(buf), &pos, "{\"path\":\"%s\",\"dirs\":[", path);
+    yyjson_mut_doc *doc = ui_json_doc_new();
+    yyjson_mut_val *root = doc ? yyjson_mut_obj(doc) : NULL;
+    yyjson_mut_val *dirs = doc ? yyjson_mut_arr(doc) : NULL;
+    yyjson_mut_val *roots = doc ? yyjson_mut_arr(doc) : NULL;
+    bool ok = doc && root && dirs && roots;
+    if (ok) {
+        yyjson_mut_doc_set_root(doc, root);
+        ok = yyjson_mut_obj_add_strcpy(doc, root, "path", path);
+    }
 
     struct dirent *ent;
     int count = 0;
-    while ((ent = readdir(dir)) != NULL) {
+    while (ok && (ent = readdir(dir)) != NULL) {
         /* Skip hidden dirs and . / .. */
         if (ent->d_name[0] == '.')
             continue;
@@ -700,17 +765,7 @@ static void handle_browse(cbm_http_conn_t *c, const cbm_http_req_t *req) {
         if (!cbm_is_dir(full))
             continue;
 
-        if (count > 0)
-            buf[pos++] = ',';
-        /* Escape directory name to prevent XSS (e.g., names with quotes/angle brackets) */
-        {
-            char esc[512];
-            cbm_json_escape(esc, (int)sizeof(esc), ent->d_name);
-            http_appendf(buf, sizeof(buf), &pos, "\"%s\"", esc);
-        }
-        if (pos >= (int)sizeof(buf)) {
-            pos = (int)sizeof(buf) - 1;
-        }
+        ok = yyjson_mut_arr_add_strcpy(doc, dirs, ent->d_name);
         count++;
 
         if (count >= 200)
@@ -735,14 +790,15 @@ static void handle_browse(cbm_http_conn_t *c, const cbm_http_req_t *req) {
         snprintf(parent, sizeof(parent), "/");
     }
 
-    {
-        char esc_parent[2048];
-        cbm_json_escape(esc_parent, (int)sizeof(esc_parent), parent);
-        http_appendf(buf, sizeof(buf), &pos, "],\"parent\":\"%s\"", esc_parent);
-        append_roots_json(buf, sizeof(buf), &pos);
-        http_appendf(buf, sizeof(buf), &pos, "}");
+    ok = ok && yyjson_mut_obj_add_val(doc, root, "dirs", dirs) &&
+         yyjson_mut_obj_add_strcpy(doc, root, "parent", parent) &&
+         append_roots_json(doc, roots) && yyjson_mut_obj_add_val(doc, root, "roots", roots);
+    if (!ok) {
+        yyjson_mut_doc_free(doc);
+        ui_reply_json_failure(c);
+        return;
     }
-    cbm_http_replyf(c, 200, g_cors_json, "%s", buf);
+    (void)ui_reply_json_document(c, doc);
 }
 
 /* ── ADR endpoints ────────────────────────────────────────────── */

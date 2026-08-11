@@ -11,6 +11,7 @@
 #include "test_framework.h"
 #include "suites.h"
 #include "test_helpers.h"
+#include <store/sql.h>
 #include <store/store.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,6 +20,20 @@
 
 static void clear_mmap_env(void) {
     cbm_unsetenv("CBM_SQLITE_MMAP_SIZE");
+}
+
+static int store_mutation_generation(cbm_store_t *store, int *out) {
+    cbm_sql_stmt_t *stmt = NULL;
+    if (!cbm_sql_prepare(cbm_store_sql(store),
+                         "SELECT v FROM store_meta WHERE k='mutation_gen';", &stmt)) {
+        return CBM_STORE_ERR;
+    }
+    if (cbm_sql_step(stmt) != CBM_SQL_ROW) {
+        (void)cbm_sql_finalize(stmt);
+        return CBM_STORE_ERR;
+    }
+    *out = cbm_sql_column_int(stmt, 0);
+    return cbm_sql_finalize(stmt) ? CBM_STORE_OK : CBM_STORE_ERR;
 }
 
 TEST(mmap_size_default_when_unset) {
@@ -125,11 +140,17 @@ TEST(store_generation_tracks_mutations) {
     cbm_store_t *a = cbm_store_open_memory();
     ASSERT(a != NULL);
     ASSERT_EQ(cbm_store_upsert_project(a, "p", "/tmp/p"), CBM_STORE_OK);
+    int mutation_before = 0;
+    ASSERT_EQ(store_mutation_generation(a, &mutation_before), CBM_STORE_OK);
+    ASSERT_EQ(mutation_before, 1);
     ASSERT_EQ(cbm_store_generation(a, g1, sizeof(g1)), CBM_STORE_OK);
     ASSERT(strncmp(g1, "u", 1) == 0); /* seeded, not legacy */
     ASSERT_EQ(cbm_store_generation(a, g2, sizeof(g2)), CBM_STORE_OK);
     ASSERT(strcmp(g1, g2) == 0); /* reads are stable */
     ASSERT_EQ(cbm_store_upsert_project(a, "p", "/tmp/p"), CBM_STORE_OK);
+    int mutation_after = 0;
+    ASSERT_EQ(store_mutation_generation(a, &mutation_after), CBM_STORE_OK);
+    ASSERT_EQ(mutation_after, mutation_before + 1);
     ASSERT_EQ(cbm_store_generation(a, g3, sizeof(g3)), CBM_STORE_OK);
     ASSERT(strcmp(g1, g3) != 0); /* index run bumps */
 
@@ -141,6 +162,56 @@ TEST(store_generation_tracks_mutations) {
     ASSERT(strcmp(g1, gb) != 0); /* distinct DBs never alias (random uid) */
     cbm_store_close(a);
     cbm_store_close(b);
+    PASS();
+}
+
+TEST(store_project_upsert_rolls_back_on_generation_failure) {
+    cbm_store_t *store = cbm_store_open_memory();
+    ASSERT_NOT_NULL(store);
+    ASSERT_EQ(cbm_store_upsert_project(store, "p", "/old"), CBM_STORE_OK);
+
+    int generation_before = 0;
+    ASSERT_EQ(store_mutation_generation(store, &generation_before), CBM_STORE_OK);
+    ASSERT(cbm_sql_exec(cbm_store_sql(store),
+                        "CREATE TRIGGER deny_generation_update "
+                        "BEFORE UPDATE OF v ON store_meta "
+                        "WHEN OLD.k='mutation_gen' "
+                        "BEGIN SELECT RAISE(ABORT, 'generation denied'); END;"));
+
+    ASSERT_EQ(cbm_store_upsert_project(store, "p", "/new"), CBM_STORE_ERR);
+    ASSERT(strstr(cbm_store_error(store), "generation denied") != NULL);
+
+    cbm_project_t project = {0};
+    ASSERT_EQ(cbm_store_get_project(store, "p", &project), CBM_STORE_OK);
+    ASSERT_STR_EQ(project.root_path, "/old");
+    cbm_project_free_fields(&project);
+
+    int generation_after = 0;
+    ASSERT_EQ(store_mutation_generation(store, &generation_after), CBM_STORE_OK);
+    ASSERT_EQ(generation_after, generation_before);
+    ASSERT(cbm_sql_exec(cbm_store_sql(store), "DROP TRIGGER deny_generation_update;"));
+    cbm_store_close(store);
+    PASS();
+}
+
+TEST(store_project_upsert_stays_inside_caller_transaction) {
+    cbm_store_t *store = cbm_store_open_memory();
+    ASSERT_NOT_NULL(store);
+    ASSERT_EQ(cbm_store_begin(store), CBM_STORE_OK);
+    ASSERT_EQ(cbm_store_upsert_project(store, "p", "/tmp/p"), CBM_STORE_OK);
+
+    int generation = 0;
+    ASSERT_EQ(store_mutation_generation(store, &generation), CBM_STORE_OK);
+    ASSERT_EQ(generation, 1);
+    ASSERT_EQ(cbm_store_rollback(store), CBM_STORE_OK);
+
+    cbm_project_t project = {0};
+    ASSERT_EQ(cbm_store_get_project(store, "p", &project), CBM_STORE_NOT_FOUND);
+    char observed_generation[32];
+    ASSERT_EQ(cbm_store_generation(store, observed_generation, sizeof(observed_generation)),
+              CBM_STORE_OK);
+    ASSERT_STR_EQ(observed_generation, "legacy");
+    cbm_store_close(store);
     PASS();
 }
 
@@ -237,6 +308,8 @@ TEST(corrupt_page_scan_returns_error_not_truncation) {
 SUITE(store_pragmas) {
     RUN_TEST(journal_size_limit_bounds_wal_issue1083);
     RUN_TEST(store_generation_tracks_mutations);
+    RUN_TEST(store_project_upsert_rolls_back_on_generation_failure);
+    RUN_TEST(store_project_upsert_stays_inside_caller_transaction);
     RUN_TEST(corrupt_page_scan_returns_error_not_truncation);
     RUN_TEST(mmap_size_default_when_unset);
     RUN_TEST(mmap_size_zero_disables_mmap);

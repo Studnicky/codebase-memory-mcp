@@ -977,8 +977,8 @@ cbm_fuzzy_result_t cbm_registry_fuzzy_resolve(const cbm_registry_t *r, const cha
     char **fptr = arr->items;
 
     if (have_imports) {
-        fcount = filter_import_reachable(arr->items, arr->count, import_map_vals,
-                                         import_map_count, filtered, CBM_SZ_256);
+        fcount = filter_import_reachable(arr->items, arr->count, import_map_vals, import_map_count,
+                                         filtered, CBM_SZ_256);
         fptr = filtered;
     }
 

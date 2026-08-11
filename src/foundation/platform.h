@@ -103,12 +103,12 @@ static inline void safe_buf_free_impl(void **buf, size_t *count) {
  * Usage: safe_grow(arr, count, cap, growth_factor)
  * After the call, arr is the new buffer — never NULL, see
  * cbm_realloc_or_abort. */
-#define safe_grow(arr, n, cap, factor)                                          \
-    do {                                                                        \
-        if ((size_t)(n) >= (size_t)(cap)) {                                     \
-            (cap) *= (factor);                                                  \
+#define safe_grow(arr, n, cap, factor)                                           \
+    do {                                                                         \
+        if ((size_t)(n) >= (size_t)(cap)) {                                      \
+            (cap) *= (factor);                                                   \
             (arr) = cbm_realloc_or_abort((arr), (size_t)(cap) * sizeof(*(arr))); \
-        }                                                                       \
+        }                                                                        \
     } while (0)
 
 /* ── Memory mapping ────────────────────────────────────────────── */

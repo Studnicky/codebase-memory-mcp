@@ -22,6 +22,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#ifdef CBM_ENABLE_TEST_SEAMS
+void cbm_store_query_force_fallback_for_test(bool enabled);
+#endif
+
 static void tsc_cleanup_db(const char *db_path) {
     char sidecar[512];
     unlink(db_path);
@@ -266,6 +270,60 @@ TEST(cached_count_queries_release_delete_mode_reader_lock) {
     PASS();
 }
 
+#ifdef CBM_ENABLE_TEST_SEAMS
+TEST(query_open_fails_closed_when_live_wal_is_unreadable) {
+    char *td = th_mktempdir("cbm_query_wal");
+    ASSERT_NOT_NULL(td);
+    char db_path[512];
+    char wal_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/query.db", td);
+    snprintf(wal_path, sizeof(wal_path), "%s-wal", db_path);
+
+    cbm_store_t *writer = cbm_store_open_path(db_path);
+    ASSERT_NOT_NULL(writer);
+    ASSERT_EQ(cbm_store_upsert_project(writer, "stable", "/tmp/stable"), CBM_STORE_OK);
+    ASSERT_EQ(cbm_store_checkpoint(writer), CBM_STORE_OK);
+
+    /* Pin the checkpointed snapshot so the later sentinel remains only in
+     * the WAL after the writer closes. */
+    sqlite3 *pinning_reader = NULL;
+    sqlite3_stmt *snapshot = NULL;
+    ASSERT_EQ(sqlite3_open_v2(db_path, &pinning_reader, SQLITE_OPEN_READONLY, NULL), SQLITE_OK);
+    ASSERT_EQ(sqlite3_exec(pinning_reader, "BEGIN;", NULL, NULL, NULL), SQLITE_OK);
+    ASSERT_EQ(sqlite3_prepare_v2(pinning_reader, "SELECT name FROM projects;", -1, &snapshot,
+                                 NULL),
+              SQLITE_OK);
+    ASSERT_EQ(sqlite3_step(snapshot), SQLITE_ROW);
+
+    ASSERT_EQ(cbm_store_upsert_project(writer, "wal_only", "/tmp/wal_only"), CBM_STORE_OK);
+    cbm_store_close(writer);
+    writer = NULL;
+
+    struct stat wal_stat = {0};
+    ASSERT_EQ(stat(wal_path, &wal_stat), 0);
+    ASSERT_TRUE(wal_stat.st_size > 0);
+
+    /* Simulate the ordinary read-only probe failing after the WAL is present.
+     * The production fallback is the same branch used by read-only filesystems. */
+    cbm_store_query_force_fallback_for_test(true);
+    cbm_store_t *query = cbm_store_open_path_query(db_path);
+    cbm_store_query_force_fallback_for_test(false);
+
+    /* immutable=1 would open the checkpointed main DB and hide wal_only.
+     * The query open rejects that stale result instead. */
+    ASSERT_NULL(query);
+
+    ASSERT_EQ(sqlite3_finalize(snapshot), SQLITE_OK);
+    snapshot = NULL;
+    ASSERT_EQ(sqlite3_exec(pinning_reader, "COMMIT;", NULL, NULL, NULL), SQLITE_OK);
+    ASSERT_EQ(sqlite3_close(pinning_reader), SQLITE_OK);
+    pinning_reader = NULL;
+    tsc_cleanup_db(db_path);
+    ASSERT_EQ(rmdir(td), 0);
+    PASS();
+}
+#endif
+
 TEST(cached_node_lookups_release_delete_mode_reader_lock) {
     char db_path[256];
     snprintf(db_path, sizeof(db_path), "%s/cbm_test_lookup_lock_%d.db", cbm_tmpdir(),
@@ -432,6 +490,9 @@ SUITE(store_checkpoint) {
     RUN_TEST(seal_for_atomic_publish_makes_main_file_self_contained);
     RUN_TEST(seal_for_atomic_publish_fails_closed_while_reader_pins_wal);
     RUN_TEST(cached_count_queries_release_delete_mode_reader_lock);
+#ifdef CBM_ENABLE_TEST_SEAMS
+    RUN_TEST(query_open_fails_closed_when_live_wal_is_unreadable);
+#endif
     RUN_TEST(cached_node_lookups_release_delete_mode_reader_lock);
     RUN_TEST(dump_install_ignores_stale_wal_sidecar);
     RUN_TEST(remove_db_sidecars_rejects_truncated_suffix_path);

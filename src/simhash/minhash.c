@@ -302,14 +302,27 @@ bool cbm_minhash_from_hex(const char *hex, cbm_minhash_t *out) {
     if ((int)len != CBM_MINHASH_HEX_LEN) {
         return false;
     }
+    cbm_minhash_t decoded;
     for (int i = 0; i < CBM_MINHASH_K; i++) {
-        char chunk[HEX_CHARS_PER_U32 + SKIP_ONE];
-        ptrdiff_t offset = (ptrdiff_t)i * HEX_CHARS_PER_U32;
-        memcpy(chunk, hex + offset, HEX_CHARS_PER_U32);
-        chunk[HEX_CHARS_PER_U32] = '\0';
-        unsigned long val = strtoul(chunk, NULL, HEX_BASE);
-        out->values[i] = (uint32_t)val;
+        uint32_t value = 0;
+        for (int digit = 0; digit < HEX_CHARS_PER_U32; digit++) {
+            char ch = hex[(i * HEX_CHARS_PER_U32) + digit];
+            uint32_t nibble;
+            if (ch >= '0' && ch <= '9') {
+                nibble = (uint32_t)(ch - '0');
+            } else if (ch >= 'a' && ch <= 'f') {
+                nibble = (uint32_t)(ch - 'a') + 10U;
+            } else if (ch >= 'A' && ch <= 'F') {
+                nibble = (uint32_t)(ch - 'A') + 10U;
+            } else {
+                return false;
+            }
+            value = (value << 4) | nibble;
+        }
+        decoded.values[i] = value;
     }
+
+    *out = decoded;
     return true;
 }
 

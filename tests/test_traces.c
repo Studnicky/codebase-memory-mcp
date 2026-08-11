@@ -6,7 +6,9 @@
  */
 #include "test_framework.h"
 #include "suites.h"
+#include <foundation/compat_thread.h>
 #include <traces/traces.h>
+#include <stdatomic.h>
 #include <string.h>
 
 /* ── TestExtractServiceName ─────────────────────────────────────── */
@@ -103,6 +105,108 @@ TEST(traces_extract_http_info_url_full) {
     ASSERT(ok);
     ASSERT_STR_EQ(info.path, "/api/items");
     ASSERT_EQ(info.duration_ns, 100000000);
+    PASS();
+}
+
+TEST(traces_extract_http_info_url_full_results_stay_distinct) {
+    cbm_trace_attr_t first_attrs[] = {
+        {.key = "http.method", .string_value = "GET"},
+        {.key = "url.full", .string_value = "https://example.com/accounts?active=true"},
+    };
+    cbm_trace_attr_t second_attrs[] = {
+        {.key = "http.method", .string_value = "GET"},
+        {.key = "url.full", .string_value = "https://example.com/orders?limit=10"},
+    };
+    cbm_trace_span_t first_span = {.kind = 2, .attributes = first_attrs, .attr_count = 2};
+    cbm_trace_span_t second_span = {.kind = 2, .attributes = second_attrs, .attr_count = 2};
+    cbm_http_span_info_t first;
+    cbm_http_span_info_t second;
+
+    ASSERT(cbm_extract_http_info(&first_span, "svc", &first));
+    ASSERT(cbm_extract_http_info(&second_span, "svc", &second));
+    ASSERT_TRUE(first.path == first.url_path);
+    ASSERT_TRUE(second.path == second.url_path);
+    ASSERT_STR_EQ(first.path, "/accounts");
+    ASSERT_STR_EQ(second.path, "/orders");
+    ASSERT_TRUE(first.path != second.path);
+    PASS();
+}
+
+typedef struct {
+    const char *url;
+    const char *expected_path;
+    atomic_int *ready;
+    atomic_bool *go;
+    cbm_http_span_info_t info;
+    bool succeeded;
+} trace_url_extract_worker_t;
+
+static void *trace_url_extract_worker_run(void *opaque) {
+    trace_url_extract_worker_t *worker = opaque;
+    cbm_trace_attr_t attrs[] = {
+        {.key = "http.method", .string_value = "GET"},
+        {.key = "url.full", .string_value = worker->url},
+    };
+    cbm_trace_span_t span = {.kind = 2, .attributes = attrs, .attr_count = 2};
+
+    atomic_fetch_add_explicit(worker->ready, 1, memory_order_release);
+    while (!atomic_load_explicit(worker->go, memory_order_acquire)) {
+    }
+    worker->succeeded = cbm_extract_http_info(&span, "svc", &worker->info) &&
+                        strcmp(worker->info.path, worker->expected_path) == 0;
+    return NULL;
+}
+
+TEST(traces_extract_http_info_url_full_concurrent_results_stay_distinct) {
+    static const char *const urls[] = {
+        "https://example.com/alpha?one=1",
+        "https://example.com/bravo?two=2",
+        "https://example.com/charlie?three=3",
+        "https://example.com/delta?four=4",
+        "https://example.com/echo?five=5",
+        "https://example.com/foxtrot?six=6",
+        "https://example.com/golf?seven=7",
+        "https://example.com/hotel?eight=8",
+    };
+    static const char *const paths[] = {
+        "/alpha", "/bravo", "/charlie", "/delta", "/echo", "/foxtrot", "/golf", "/hotel",
+    };
+    enum { WORKER_COUNT = (int)(sizeof(urls) / sizeof(urls[0])) };
+    trace_url_extract_worker_t workers[WORKER_COUNT] = {0};
+    cbm_thread_t threads[WORKER_COUNT];
+    atomic_int ready;
+    atomic_bool go;
+    atomic_init(&ready, 0);
+    atomic_init(&go, false);
+
+    int created = 0;
+    for (; created < WORKER_COUNT; created++) {
+        workers[created].url = urls[created];
+        workers[created].expected_path = paths[created];
+        workers[created].ready = &ready;
+        workers[created].go = &go;
+        if (cbm_thread_create(&threads[created], 0, trace_url_extract_worker_run, &workers[created]) !=
+            0) {
+            break;
+        }
+    }
+    bool all_created = created == WORKER_COUNT;
+    while (all_created && atomic_load_explicit(&ready, memory_order_acquire) != WORKER_COUNT) {
+    }
+    atomic_store_explicit(&go, true, memory_order_release);
+
+    bool all_joined = true;
+    for (int i = 0; i < created; i++) {
+        all_joined = cbm_thread_join(&threads[i]) == 0 && all_joined;
+    }
+
+    ASSERT_TRUE(all_created);
+    ASSERT_TRUE(all_joined);
+    for (int i = 0; i < WORKER_COUNT; i++) {
+        ASSERT_TRUE(workers[i].succeeded);
+        ASSERT_TRUE(workers[i].info.path == workers[i].info.url_path);
+        ASSERT_STR_EQ(workers[i].info.path, paths[i]);
+    }
     PASS();
 }
 
@@ -320,6 +424,8 @@ SUITE(traces) {
     RUN_TEST(traces_extract_http_info);
     RUN_TEST(traces_extract_http_info_non_http);
     RUN_TEST(traces_extract_http_info_url_full);
+    RUN_TEST(traces_extract_http_info_url_full_results_stay_distinct);
+    RUN_TEST(traces_extract_http_info_url_full_concurrent_results_stay_distinct);
     RUN_TEST(traces_extract_path_from_url);
     RUN_TEST(traces_extract_path_null_url);
     RUN_TEST(traces_extract_path_empty_url);

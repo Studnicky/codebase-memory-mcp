@@ -735,8 +735,7 @@ static void state_free(project_state_t *s) {
 static bool defer_state_free(cbm_watcher_t *w, project_state_t *s) {
     if (w->pending_free_count >= w->pending_free_cap) {
         size_t new_cap = w->pending_free_cap ? w->pending_free_cap * 2 : 8;
-        project_state_t **tmp =
-            realloc(w->pending_free, new_cap * sizeof(project_state_t *));
+        project_state_t **tmp = realloc(w->pending_free, new_cap * sizeof(project_state_t *));
         if (!tmp) {
             cbm_log_warn("watcher.unwatch.oom", "project", s->project_name);
             return false;

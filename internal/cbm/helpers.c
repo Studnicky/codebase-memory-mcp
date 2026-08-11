@@ -1517,7 +1517,7 @@ char *cbm_fqn_folder(CBMArena *a, const char *project, const char *rel_dir) {
         const char *end_ptr = rel_dir + dir_len;
         while (start < end_ptr) {
             /* start < end_ptr per the loop condition, so the cast is safe. */
-        const char *slash = (const char *)memchr(start, '/', (size_t)(end_ptr - start));
+            const char *slash = (const char *)memchr(start, '/', (size_t)(end_ptr - start));
             const char *part_end = slash ? slash : end_ptr;
             size_t part_len = (size_t)(part_end - start);
             if (part_len > 0) {

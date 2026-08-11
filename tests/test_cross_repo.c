@@ -10,7 +10,6 @@
 #include "pipeline/pass_cross_repo.h"
 #include "pipeline/pipeline_internal.h"
 
-#include <sqlite3/sqlite3.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -158,11 +157,9 @@ static bool cross_repo_exec(const cross_repo_fixture_t *fixture, const char *pro
     if (!store) {
         return false;
     }
-    char *error = NULL;
-    int rc = sqlite3_exec(cbm_store_get_db(store), sql, NULL, NULL, &error);
-    sqlite3_free(error);
+    int rc = cbm_store_exec(store, sql);
     cbm_store_close(store);
-    return rc == SQLITE_OK;
+    return rc == CBM_STORE_OK;
 }
 
 static int cross_repo_count_edges(const cross_repo_fixture_t *fixture, const char *project,
@@ -261,8 +258,7 @@ static bool cross_repo_seed_bounded_scan(const cross_repo_fixture_t *fixture,
                          .qualified_name = "bounded.source.caller",
                          .file_path = "client.c"};
     int64_t caller_id = ok ? cbm_store_upsert_node(source, &caller) : 0;
-    ok = ok && caller_id > 0 &&
-         sqlite3_exec(cbm_store_get_db(source), "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK;
+    ok = ok && caller_id > 0 && cbm_store_begin(source) == CBM_STORE_OK;
     for (int i = 0; ok && i < TEST_SCAN_ROWS; i++) {
         char name[64];
         char qn[96];
@@ -286,9 +282,9 @@ static bool cross_repo_seed_bounded_scan(const cross_repo_fixture_t *fixture,
         ok = route_id > 0 && cbm_store_insert_edge(source, &edge) > 0;
     }
     if (ok) {
-        ok = sqlite3_exec(cbm_store_get_db(source), "COMMIT", NULL, NULL, NULL) == SQLITE_OK;
+        ok = cbm_store_commit(source) == CBM_STORE_OK;
     } else {
-        (void)sqlite3_exec(cbm_store_get_db(source), "ROLLBACK", NULL, NULL, NULL);
+        (void)cbm_store_rollback(source);
     }
 
     cbm_node_t target_route = {.project = target_project,

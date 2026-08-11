@@ -87,8 +87,12 @@ echo "corpus: $(find "$CORPUS" -name '*.py' | wc -l | tr -d ' ') files"
 
 # The Windows binary needs a native path here; an msys /c/... path is not one.
 if command -v cygpath >/dev/null 2>&1 && ! command -v winepath >/dev/null 2>&1; then
-    mkdir -p "$WORK/cache"
-    export CBM_CACHE_DIR="$(cygpath -w "$WORK/cache")"
+    CACHE_DIR_WINDOWS=""
+    if ! CACHE_DIR_WINDOWS="$(cygpath -w "$WORK/cache")" || [ -z "$CACHE_DIR_WINDOWS" ]; then
+        echo "FAIL: could not convert cache directory to a Windows path" >&2
+        exit 1
+    fi
+    export CBM_CACHE_DIR="$CACHE_DIR_WINDOWS"
 else
     export CBM_CACHE_DIR="$WORK/cache"
 fi

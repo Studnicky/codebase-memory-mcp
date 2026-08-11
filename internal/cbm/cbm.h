@@ -375,7 +375,7 @@ typedef struct {
     const char *caller_qn;         // enclosing function QN
     const char *callee_qn;         // resolved target QN (fully qualified)
     const char *strategy;          // "lsp_type_dispatch", "lsp_direct", etc.
-    double confidence;              // 0.90-0.95
+    double confidence;             // 0.90-0.95
     const char *reason;            // diagnostic label for unresolved calls (NULL if resolved)
     CBMResolvedKind kind;          // invocation (CALLS) or explicit callable reference
     uint32_t site_start_byte;      // exact source occurrence; end > start when present

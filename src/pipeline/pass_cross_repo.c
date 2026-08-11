@@ -324,8 +324,7 @@ static int64_t find_route_handler(cbm_store_t *target_store, const char *route_q
     /* Find Route node by QN */
     cbm_sql_stmt_t *s = NULL;
     if (!cbm_sql_prepare(
-            db, "SELECT id FROM nodes WHERE qualified_name = ?1 AND label = 'Route' LIMIT 1",
-            &s)) {
+            db, "SELECT id FROM nodes WHERE qualified_name = ?1 AND label = 'Route' LIMIT 1", &s)) {
         *failed = true;
         return 0;
     }
@@ -906,8 +905,7 @@ static cr_match_result_t match_channels(cbm_store_t *src_store, const char *src_
 
 /* Look up a node's qualified_name by id. Returns true if found and reports SQL
  * failures separately from an ordinary miss. */
-static bool lookup_node_qn(cbm_sql_t *db, int64_t node_id, char *out, size_t out_sz,
-                           bool *failed) {
+static bool lookup_node_qn(cbm_sql_t *db, int64_t node_id, char *out, size_t out_sz, bool *failed) {
     *failed = false;
     out[0] = '\0';
     if (!db) {

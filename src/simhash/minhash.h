@@ -75,8 +75,8 @@ enum { CBM_MINHASH_HEX_BUF = 513 };
 enum { CBM_MINHASH_JSON_OVERHEAD = 10 };
 void cbm_minhash_to_hex(const cbm_minhash_t *fp, char *buf, int bufsize);
 
-/* Decode a hex string back to a MinHash signature.
- * Returns true on success. */
+/* Decode exactly CBM_MINHASH_HEX_LEN ASCII hex digits into a MinHash signature.
+ * Accepts upper- and lower-case digits.  On failure, leaves `out` unchanged. */
 bool cbm_minhash_from_hex(const char *hex, cbm_minhash_t *out);
 
 /* ── LSH index ───────────────────────────────────────────────────── */

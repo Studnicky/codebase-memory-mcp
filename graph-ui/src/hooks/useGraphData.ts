@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { GraphData } from "../lib/types";
 
 export interface LoadProgress {
@@ -45,10 +45,11 @@ export async function fetchLayout(
   maxNodes = GRAPH_RENDER_NODE_LIMIT,
   onProgress?: (progress: LoadProgress) => void,
   graph: GraphVariant = "code",
+  signal?: AbortSignal,
 ): Promise<GraphData> {
   const params = new URLSearchParams({ project, max_nodes: String(maxNodes) });
   if (graph === "missed") params.set("graph", "missed");
-  const res = await fetch(`/api/layout?${params}`);
+  const res = await fetch(`/api/layout?${params}`, { signal });
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({ error: res.statusText }));
@@ -86,45 +87,92 @@ export async function fetchLayout(
 
 const NO_PROGRESS: LoadProgress = { receivedBytes: 0, totalBytes: null };
 
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "AbortError";
+}
+
 export function useGraphData(): UseGraphDataResult {
   const [data, setData] = useState<GraphData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<LoadProgress>(NO_PROGRESS);
+  const request = useRef({ generation: 0, controller: null as AbortController | null });
 
-  const fetchOverview = useCallback(
-    async (project: string, maxNodes?: number, graph: GraphVariant = "code") => {
+  useEffect(() => {
+    return () => {
+      request.current.generation += 1;
+      request.current.controller?.abort();
+      request.current.controller = null;
+    };
+  }, []);
+
+  const load = useCallback(
+    async (requestLayout: (signal: AbortSignal) => Promise<GraphData>) => {
+      request.current.controller?.abort();
+      const controller = new AbortController();
+      const generation = request.current.generation + 1;
+      request.current = { generation, controller };
+      const isCurrent = () =>
+        request.current.generation === generation &&
+        request.current.controller === controller;
+
       setLoading(true);
       setError(null);
       setProgress(NO_PROGRESS);
       try {
-        const result = await fetchLayout(project, maxNodes, setProgress, graph);
-        setData(result);
-      } catch (e) {
-        setError(e instanceof Error ? e.message : "Failed to fetch layout");
+        const result = await requestLayout(controller.signal);
+        if (isCurrent()) setData(result);
+      } catch (cause) {
+        if (isCurrent() && !isAbortError(cause)) {
+          setError(cause instanceof Error ? cause.message : "Failed to fetch layout");
+        }
       } finally {
-        setLoading(false);
+        if (isCurrent()) {
+          setLoading(false);
+          request.current.controller = null;
+        }
       }
     },
     [],
   );
 
+  const fetchOverview = useCallback(
+    async (project: string, maxNodes?: number, graph: GraphVariant = "code") => {
+      await load((signal) =>
+        fetchLayout(
+          project,
+          maxNodes,
+          (nextProgress) => {
+            if (request.current.controller?.signal === signal) {
+              setProgress(nextProgress);
+            }
+          },
+          graph,
+          signal,
+        ),
+      );
+    },
+    [load],
+  );
+
   const fetchDetail = useCallback(
     async (project: string, _centerNode: string) => {
-      setLoading(true);
-      setError(null);
-      setProgress(NO_PROGRESS);
-      try {
+      await load((signal) =>
         /* TODO: detail level with center_node filtering */
-        const result = await fetchLayout(project, undefined, setProgress);
-        setData(result);
-      } catch (e) {
-        setError(e instanceof Error ? e.message : "Failed to fetch layout");
-      } finally {
-        setLoading(false);
-      }
+        fetchLayout(
+          project,
+          undefined,
+          (nextProgress) => {
+            if (request.current.controller?.signal === signal) {
+              setProgress(nextProgress);
+            }
+          },
+          "code",
+          signal,
+        ),
+      );
     },
-    [],
+    [load],
   );
 
   return { data, loading, error, progress, fetchOverview, fetchDetail };

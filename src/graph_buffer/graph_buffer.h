@@ -97,11 +97,11 @@ static inline bool cbm_edge_id_valid(cbm_edge_id_t id) {
 /* ── Node / Edge structs (owned by the buffer) ───────────────────── */
 
 typedef struct {
-    cbm_node_id_t id;           /* temp ID (sequential from 1) */
-    const char *label;          /* pool-owned (interned); freed once by the pool, not here */
-    char *name;                 /* heap-owned, NULL when the source omits a name */
-    char *qualified_name;       /* heap-owned */
-    const char *file_path;      /* pool-owned (interned); freed once by the pool, not here */
+    cbm_node_id_t id;      /* temp ID (sequential from 1) */
+    const char *label;     /* pool-owned (interned); freed once by the pool, not here */
+    char *name;            /* heap-owned, NULL when the source omits a name */
+    char *qualified_name;  /* heap-owned */
+    const char *file_path; /* pool-owned (interned); freed once by the pool, not here */
     int start_line;
     int end_line;
     char *properties_json; /* heap-owned JSON string, "{}" default */
@@ -129,11 +129,11 @@ typedef struct {
 } cbm_gbuf_prop_t;
 
 typedef struct {
-    cbm_edge_id_t id;          /* temp ID */
-    cbm_node_id_t source_id;   /* temp node ID */
-    cbm_node_id_t target_id;   /* temp node ID */
-    const char *type;          /* pool-owned (interned); freed once by the pool, not here */
-    cbm_gbuf_prop_t *props;    /* heap-owned array; each key/text heap-owned */
+    cbm_edge_id_t id;        /* temp ID */
+    cbm_node_id_t source_id; /* temp node ID */
+    cbm_node_id_t target_id; /* temp node ID */
+    const char *type;        /* pool-owned (interned); freed once by the pool, not here */
+    cbm_gbuf_prop_t *props;  /* heap-owned array; each key/text heap-owned */
     int prop_count;
 } cbm_gbuf_edge_t;
 
@@ -319,5 +319,11 @@ int cbm_gbuf_flush_to_store(cbm_gbuf_t *gb, cbm_store_t *store);
  * Upserts nodes, inserts edges. Used for incremental indexing.
  * Returns 0 on success. */
 int cbm_gbuf_merge_into_store(cbm_gbuf_t *gb, cbm_store_t *store);
+
+#ifdef CBM_ENABLE_TEST_SEAMS
+/* Fail the next graph-buffer preflight allocation after the specified number
+ * of successful preflight allocations. Pass -1 to disable the seam. */
+void cbm_gbuf_fail_allocation_after_for_test(int successful_allocations);
+#endif
 
 #endif /* CBM_GRAPH_BUFFER_H */

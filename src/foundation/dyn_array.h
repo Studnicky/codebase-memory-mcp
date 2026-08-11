@@ -60,7 +60,7 @@
  * Prefer cbm_da_push. The cap bound below at least keeps the growth itself
  * defined. */
 #define cbm_da_push_ptr(da)                                                                        \
-    (((da)->count >= (da)->cap && (da)->cap <= INT_MAX / 2                                          \
+    (((da)->count >= (da)->cap && (da)->cap <= INT_MAX / 2                                         \
           ? ((void)((da)->cap = (da)->cap ? (da)->cap * 2 : 8),                                    \
              (void)((da)->items = realloc((da)->items, (size_t)(da)->cap * sizeof(*(da)->items)))) \
           : (void)0),                                                                              \

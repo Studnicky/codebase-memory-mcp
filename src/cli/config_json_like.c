@@ -2748,9 +2748,8 @@ int cbm_json_like_match_object_entry(const char *document, size_t document_lengt
     for (size_t i = 0U; i < field_count; ++i) {
         if (!fields[i].key || fields[i].key[0] == '\0' ||
             fields[i].shape > CBM_JSON_LIKE_VALUE_SINGLE_STRING_ARRAY ||
-            (fields[i].flags &
-             ~(unsigned)(CBM_JSON_LIKE_FIELD_REQUIRED | CBM_JSON_LIKE_FIELD_CAPTURE_STRING)) !=
-                0U ||
+            (fields[i].flags & ~(unsigned)(CBM_JSON_LIKE_FIELD_REQUIRED |
+                                           CBM_JSON_LIKE_FIELD_CAPTURE_STRING)) != 0U ||
             ((fields[i].flags & CBM_JSON_LIKE_FIELD_CAPTURE_STRING) != 0U &&
              fields[i].shape == CBM_JSON_LIKE_VALUE_EMPTY_ARRAY)) {
             return -1;

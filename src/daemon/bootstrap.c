@@ -883,8 +883,8 @@ static bool bootstrap_production_spawn(void *context,
     for (size_t i = 0; i < sizeof(spawn_argv) / sizeof(spawn_argv[0]); i++) {
         memcpy(&spawn_argv[i], &spec->argv[i], sizeof(spawn_argv[i]));
     }
-    int spawn_status = posix_spawn(&daemon, spec->executable_path, &actions, &attributes,
-                                   spawn_argv, environ);
+    int spawn_status =
+        posix_spawn(&daemon, spec->executable_path, &actions, &attributes, spawn_argv, environ);
     (void)posix_spawnattr_destroy(&attributes);
     (void)posix_spawn_file_actions_destroy(&actions);
     if (production) {

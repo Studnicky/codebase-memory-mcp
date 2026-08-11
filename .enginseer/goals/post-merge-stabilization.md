@@ -25,9 +25,9 @@ Bring the merged package to a release-ready state by:
 - Four top-level binaries build with zero visible warnings.
 - Layering reports 61 module edges and 29 external edges with no violations.
 - Complexity reports 30/30 within policy. The PR workflow contains a live post-build check.
-- NULL callable-slot violations are zero. The decoded-null inventory classifies 282 observed sites and ratchets unreviewed growth.
+- NULL callable-slot violations are zero. The decoded-null inventory classifies 280 observed sites and ratchets unreviewed growth.
 - Capacity sweep violations are zero.
-- The latest full parallel validation records 7,439 passing tests, zero failures, and four skips.
+- Focused sanitizer, TSan, UI, package-policy, and platform contracts recorded by the completed cards pass. A20 is running the canonical release venues after its liveness fixes.
 - `internal/cbm/lsp_all.c` compiles under LSP-specific strict test, TSan, and production flags. The checked-in unity census is zero.
 
 ## 3. Execution contract
@@ -65,11 +65,15 @@ Global prohibitions:
 | H5 | Decoded-null classification | Complete | H4 |
 | H6 | `parse_partial` root-ERROR regression | Complete | H5 |
 | H7 | Missing-name identity migration design and implementation | Complete | H6 |
-| A1–A3 | Memory ownership substrate | Pending | H6 and H7 |
-| A4–A8 | Data and API truthfulness | Pending | A1–A3 |
-| A9–A13 | Verification gates | Pending | A4–A8 |
-| A14–A19 | Distribution and UI quality | Pending | A9–A13 |
-| A20 | Release validation | Pending | Every prior card |
+| A1 | Store port and SQLite allocator boundary | Complete | H6 and H7 |
+| A5, A6, A11 | SQLite-adapter integrity | Complete | A1 |
+| A3 | Graph-buffer publication safety | Complete | A5 and A6 |
+| A2 | Semantic allocation safety | Complete | — |
+| A4, A7, A8 | Data and API truthfulness | Complete | A1–A3 |
+| A9, A10, A12 | Independent verification gates | Complete | A4, A7, and A8 |
+| A13 | Decoded-NULL growth ratchet | Complete | H5 |
+| A14–A19 | Distribution and UI quality | Complete | A9, A10, and A12 |
+| A20 | Release validation | In progress | Every prior card |
 
 H6 and H7 run sequentially: the root-ERROR regression establishes parsing evidence before the graph identity migration.
 
@@ -433,15 +437,43 @@ make -f Makefile.cbm test-focused TEST_SUITES='graph_buffer pipeline incremental
 
 ## 6. Retained architecture-review track
 
+### Execution order
+
+1. A1 establishes the `cbm_store_*` port and the SQLite adapter boundary.
+2. A5 and A6 make SQLite-backed reads and mutations truthful; A11 places the
+   allocator-abort contract in the canonical CI venue.
+3. A3 makes graph-buffer publication transactional against that settled store
+   contract. A2 completes the independent semantic allocation-safety work.
+4. A4, A7, and A8 complete API and value-lifetime truthfulness.
+5. A9, A10, and A12 close independent verification gates. A13 is complete.
+6. A14–A19 complete packaging, UI, and platform contracts; A20 validates the
+   release only after every prior card is complete.
+
+SQLite remains an internal adapter. A second backend is introduced only when a
+concrete implementation supplies its transaction, query, migration, and
+indexing requirements.
+
 ### A1 — Make SQLite allocator binding one-shot and transactional
 
-- **Files:** `src/store/sql.c:229–243`; fresh-process store tests.
+**Status: Complete**
+
+- **Files:** `src/store/sql.c:229–243`, `src/store/store.h`, and fresh-process store tests.
 - **Evidence:** active `g_alloc` changes before SQLite accepts the callback table; repeated/late bind can redirect live frees.
-- **Change:** serialize bind, prepare local methods, call `sqlite3_config`, then publish allocator and bound state only on `SQLITE_OK`. Reject or idempotently report subsequent binds. Never call `sqlite3_shutdown` around live stores.
-- **Tests:** first bind succeeds; late/repeated bind fails without changing callbacks; concurrent callers yield one winner; open/use/close survives rejected bind under ASan.
-- **Verify:** `scripts/test.sh --suites store`, then full sanitizer venue.
+- **Architecture boundary:** `cbm_store_*` is the application port. SQLite handles, allocator callbacks, and SQLite-specific configuration remain inside the SQLite adapter in `src/store/`; non-store production code does not include SQLite headers or receive `sqlite3 *`. Remove the unused raw-handle escape hatch `cbm_store_get_db()` rather than preserving it as a future coupling point. Do not add a generic database vtable or a second adapter before a concrete backend requires one.
+- **Change:** serialize bind, prepare local methods, call `sqlite3_config`, then publish allocator and bound state only on `SQLITE_OK`. Reject or idempotently report subsequent binds. Never call `sqlite3_shutdown` around live stores. Keep this lifecycle behind the store port so a future adapter owns its own runtime configuration.
+- **Tests:** first bind succeeds; late/repeated bind fails without changing callbacks; concurrent callers yield one winner; open/use/close survives rejected bind under ASan. Assert no non-store production source depends on `sqlite3` or `cbm_store_get_db`.
+- **Verify:** `make -f Makefile.cbm test-focused TEST_SUITES='platform store_nodes cross_repo mcp'`, a production-source dependency scan for SQLite leakage, then the full sanitizer venue.
+
+**Completion evidence**
+
+- `cbm_sql_bind_allocator` serializes contenders, publishes callbacks only after `sqlite3_config` succeeds, and rejects invalid, late, and repeated binds without changing a live allocator.
+- `cbm_store_get_db()` is removed. Callers use `cbm_store_*` operations or the typed `store/sql.h` façade; the layering check reports SQLite reachability only from `src/store`.
+- The platform suite proves an eight-thread bind race yields one winner, then opens, mutates, and closes a store after a rejected alternate bind without redirecting allocations.
+- The focused ASan/UBSan run passes 285 checks with zero failures and two documented platform-only skips; `git diff --check` passes.
 
 ### A2 — Make semantic paired-array growth transactional
+
+**Status: Complete**
 
 - **Files:** `src/semantic/semantic.c:553–570,707–726`; `tests/test_semantic.c`.
 - **Evidence:** independent reallocations can leave a dangling retained member after one-sided success.
@@ -449,122 +481,285 @@ make -f Makefile.cbm test-focused TEST_SUITES='graph_buffer pipeline incremental
 - **Tests:** deterministic failure of allocation 1 and 2 in both add paths; state remains usable and freeable; boundary growth succeeds.
 - **Verify:** `scripts/test.sh --suites semantic` under ASan/UBSan.
 
+**Completion evidence**
+
+- `corpus_grow_doc_arrays` allocates both replacement arrays, copies the live prefix, then replaces the existing pair and capacity only after both allocations succeed.
+- Both direct and batch document ingestion route through that helper.
+- Deterministic test seams exercise the first and second allocation failure in each path, verify unchanged count plus successful reuse/freeability, and cover the 64-to-128 boundary growth.
+- The strict ASan/UBSan semantic suite passes 36 checks with zero failures; `git diff --check` passes.
+
 ### A3 — Preflight and unwind graph-buffer OOM paths
+
+**Status: Complete**
 
 - **Files:** `src/graph_buffer/graph_buffer.c:1840–2289`; graph-buffer tests.
 - **Evidence:** dump arrays and remaps are written unchecked, including after transaction/index/store mutation begins.
-- **Change:** explicit-status builders with initialized out-params; preflight allocation before destructive work; rollback/abort/unlink on later failure; preserve reusable/freeable graph buffer.
+- **Change:** explicit-status builders with initialized out-params; preflight allocation before destructive work; rollback/abort/unlink on later failure; preserve reusable/freeable graph buffer. Store mutation uses the `cbm_store_*` port and never a SQLite handle.
 - **Tests:** fail every allocation and partial parallel-array step; no output publication, store mutation, index loss, leak, or NULL write.
 - **Verify:** `scripts/test.sh --suites graph_buffer` under sanitizers.
 
+**Completion evidence**
+
+- Dump construction preflights remaps, node and edge arrays, parallel edge payloads, and vector remapping before opening the output writer. It leaves source indexes and vectors unchanged until the writer succeeds.
+- Flush and merge preflight remaps and serialized edge properties, check every store-port result, and roll back the transaction on any later error.
+- Deterministic tests cover partial dump parallel-array allocation, vector remapping, flush and merge serialization failure, and a post-transaction store failure; each preserves existing state and permits a successful retry.
+- The strict ASan/UBSan graph-buffer suite passes 60 checks with zero failures; `git diff --check` passes.
+
 ### A4 — Make `ingest_traces` truthful
+
+**Status: Complete**
 
 - **Files:** `src/mcp/mcp.c:10882–10912`; MCP/incremental tests.
 - **Evidence:** handler returns `accepted` and a count while persisting nothing.
-- **Smallest correct change:** return stable MCP `unsupported` error and align schema/profile exposure. Persistence is acceptable only with a durable store mutation proven by a subsequent graph query.
+- **Smallest correct change:** return stable MCP `unsupported` error and align schema/profile exposure. Future persistence uses the `cbm_store_*` port and is acceptable only with a durable store mutation proven by a subsequent graph query.
 - **Acceptance:** success always means persisted/queryable traces; no test asserts false acceptance.
 - **Verify:** `scripts/test.sh --suites 'mcp incremental'`.
 
+**Completion evidence**
+
+- `ingest_traces` is absent from MCP tool discovery and behavior annotations, so clients are not offered unavailable persistence.
+- Direct legacy calls return `isError: true` with stable `ingest_traces is not supported` text and no acceptance or trace-count fields, independent of argument shape.
+- MCP tests cover valid nonempty, empty, partial, missing-traces, and bad-project calls without a false accepted response.
+- The strict ASan/UBSan MCP suite passes 192 checks with two documented Windows-only skips. The network-backed incremental fixture remains unavailable while GitHub DNS cannot resolve; `git diff --check` passes.
+
 ### A5 — Refuse immutable reads with a nonempty WAL
+
+**Status: Complete**
 
 - **Files:** `src/store/store.c:793–913`; checkpoint/read-only MCP tests.
 - **Evidence:** `immutable=1` ignores committed WAL frames; existing fallback coverage checkpoints first.
 - **Change:** detect `<db>-wal`; if nonempty, fail closed or open a safe merged writable snapshot. Preserve immutable fallback only for absent/empty WAL.
 - **Test:** committed sentinel exists only in WAL; read-only query must error rather than return an older graph; checkpointed case succeeds.
 
+**Completion evidence**
+
+- Query opens use ordinary SQLite read-only mode first, preserving visibility of a readable live WAL.
+- The immutable fallback refuses a nonempty, inaccessible, or unrepresentable WAL sidecar; absent and empty sidecars retain immutable fallback behavior.
+- The deterministic test seam forces the fallback after a committed WAL-only sentinel is established and proves the query open fails instead of reading the stale main database.
+- ASan/UBSan runs pass 8 checkpoint checks and 192 MCP checks, with two documented platform-only skips.
+
 ### A6 — Make mutation generation atomic
+
+**Status: Complete**
 
 - **Files:** `src/store/store.c:1491–1530`; store pragma tests.
 - **Evidence:** generation SQL result is discarded and project upsert can return success with stale cursors.
 - **Change:** checked SQL with recorded error and savepoint compatible with caller transactions; rollback project and generation together.
 - **Test:** injected authorization failure leaves project and generation unchanged; nominal upsert increments once.
 
+**Completion evidence**
+
+- `cbm_store_upsert_project` wraps project, metadata, and generation writes in a savepoint and preserves the original error when it rolls back.
+- A generation-update trigger proves a rejected metadata mutation leaves the existing project root and generation unchanged.
+- Nested-transaction coverage proves a successful upsert remains pending until the caller commits; caller rollback removes both project and metadata changes.
+- The strict ASan/UBSan store-pragmas and store-nodes run passes 76 checks with zero failures.
+
 ### A7 — Give trace URL results caller-owned storage
+
+**Status: Complete**
 
 - **Files:** `src/traces/traces.c:77–120`, `traces.h:54–58`; trace tests.
 - **Evidence:** `url.full` uses one global static buffer and contradicts the lifetime contract.
 - **Change:** store normalized URL path in the output object or caller buffer; update the contract.
 - **Tests:** two sequential outputs remain distinct; concurrent extraction retains per-call paths; TSan clean.
 
+**Completion evidence**
+
+- `cbm_http_span_info_t` owns inline URL-path storage and `path` refers to that result-owned field when derived from `url.full`; borrowed trace attributes remain documented as borrowed.
+- Sequential and eight-thread extraction tests prove separate results retain independent normalized paths.
+- The strict ASan/UBSan and TSan trace suites each pass 32 checks with zero failures or race reports; `git diff --check` passes.
+
 ### A8 — Reject malformed MinHash encodings
+
+**Status: Complete**
 
 - **Files:** `src/simhash/minhash.c:297–314`; simhash tests.
 - **Change:** require exactly 512 hex digits, parse into a temporary, and publish only on complete success.
 - **Tests:** invalid first/middle/final characters, signs, spaces, mixed-case valid input, and unchanged output on failure.
 
+**Completion evidence**
+
+- `cbm_minhash_from_hex` requires exactly 512 ASCII hex digits, decodes into a local signature, and publishes only after complete validation.
+- Tests cover mixed case, malformed first/middle/final positions, signs, spaces, NULL, short, embedded-NUL, and long inputs, verifying byte-exact unchanged caller output for each rejection.
+- The strict ASan/UBSan simhash suite passes 27 checks with zero failures or skips; `git diff --check` passes.
+
 ### A9 — Close the remaining complexity-gate bypass
+
+**Status: Complete**
 
 - **Files:** `.github/workflows/pr.yml:43–66,130–145`; `scripts/test.sh`; complexity contract.
 - **Current state:** PR contains the correct post-build live comparison.
 - **Remaining change:** classify `complexity.allow`, checker, and contract changes as product changes; gate mode treats missing binary/index as failure rather than green skip. Keep the existing post-build live step.
 - **Tests:** each control file triggers product work; missing prerequisite fails; clean/new/stale/malformed/index cases remain covered.
 
+**Completion evidence**
+
+- PR product-change classification includes the complexity checker, allowlist, canonical harness, contract, and workflow controls.
+- The normal checker path remains a live binary/index comparison and fails when its binary or index prerequisite is missing, even when a synthetic query-output seam is supplied.
+- The deterministic contract proves workflow `build → index_repository → checker` order and actively covers clean, new, allowlisted, stale, malformed, empty-index, and missing-binary cases through synthetic query fixtures without an indexer skip.
+- Python and shell syntax checks, the complete complexity contract, and `git diff --check` pass.
+
 ### A10 — Gate Graph UI Vitest in embedded builds
+
+**Status: Complete**
 
 - **Files:** `Makefile.cbm:1109–1113`; Graph UI package/tests; CI contract.
 - **Change:** run one dependency install, then Vitest, then build through a shared frontend prerequisite.
 - **Acceptance:** `cbm-with-ui` fails when a Graph UI test fails.
 - **Verify:** `make -f Makefile.cbm frontend`.
 
+**Completion evidence**
+
+- The shared frontend prerequisite orders one dependency installation, Vitest, and production build; `cbm-with-ui` depends on it before embedding.
+- A fake-npm contract proves the success order and proves a failing test prevents both standalone build and `cbm-with-ui` embedding.
+- The Graph UI declares its direct `@testing-library/dom` test dependency, so a clean install provides the Vitest runtime required by its test files.
+- Clean UI validation passes: 9 Vitest files and 38 tests, then TypeScript/Vite build. `make -f Makefile.cbm frontend`, the frontend contract, shell syntax, and `git diff --check` pass.
+
 ### A11 — Run allocator-abort coverage in canonical CI
+
+**Status: Complete**
 
 - **Files:** `tests/test_platform.c:286–328`; foundation target; `scripts/test.sh`.
 - **Evidence:** the real abort assertion exists only in the isolated single-purpose foundation runner.
 - **Change:** invoke that isolated runner from the canonical default venue; do not enable the abort/fork path inside the multi-suite runner.
 - **Acceptance:** injected realloc failure terminates with SIGABRT in the merge lane.
 
+**Completion evidence**
+
+- `scripts/test.sh` invokes the isolated foundation runner as Step 3b after the multi-suite lane, preserving the single-purpose SIGABRT contract without entering the abort path in the multi-suite process.
+- The foundation-only host excludes SQLite-bound allocator setup while retaining the injected growth-failure assertion; the isolated run passes 295 checks with one documented Windows-only skip.
+- The venue-parity contract explicitly recognizes and requires the LSP unity warning census in the canonical lint workflow.
+- The complete canonical run passes 7,447 checks with zero failures and four documented skips across 138 suites; its production build and final checks pass.
+
 ### A12 — Narrow license exceptions
+
+**Status: Complete**
 
 - **Files:** `scripts/license-policy.json`; license checker/tests.
 - **Evidence:** whole release-script exclusions hide every future finding to suppress one ScanCode JSON false positive.
 - **Change:** suppress only the exact path plus detected JSON license pair, or change the false-positive token shape. Do not globally allow JSON.
 - **Tests:** the known pair passes; GPL/AGPL in the same file fails; unrelated JSON finding fails.
 
+**Completion evidence**
+
+- The policy names the two false positives as exact `(path, detected_license_expression_spdx)` pairs; broad exclusions for the release and smoke scripts are absent.
+- The checker matches the complete pair before evaluating SPDX tokens, retaining all other findings as gate inputs.
+- `tests/test_license_policy_contract.sh` runs in the canonical static sequence and proves both permitted findings pass while GPL, AGPL, and unrelated JSON findings fail.
+
 ### A13 — Ratchet decoded-NULL growth
+
+**Status: Complete**
 
 - **Depends on:** H5 classification.
 - **Files:** `scripts/check-null-discipline.py` and self-tests.
 - **Change:** check in a stable baseline/inventory and fail on growth while preserving the detailed report. Prefer stable path/expression identity; count ratchet is the minimum.
 - **Tests:** equal/below baseline pass, one new synthetic site fails and is named, callable-slot zero behavior stays unchanged.
 
+**Completion evidence**
+
+- `scripts/null-discipline-decoded.inventory.tsv` supplies stable reviewed identities, classifications, and producer/accessor families.
+- The canonical lint script and lint workflow run the normal gate and self-test; unclassified additions fail while reviewed removals remain valid.
+- The current report contains 280 classified decoded-null sites and zero NULL callable slots.
+
 ### A14 — Install the integration sidecar in Nix
+
+**Status: Complete**
 
 - **Files:** `flake.nix`; `assets/cbm-integrations.json`; package tests.
 - **Change:** install the hash-matched JSON beside the executable. Preserve direct Nix make invocation if compiler-wrapper constraints require it.
 - **Tests:** closure contains both files; isolated integration install/uninstall resolves the sidecar; tampering fails hash verification.
 - **Verify:** `nix build .#` plus isolated result-binary smoke.
 
+**Completion evidence**
+
+- The Nix install phase places `cbm-integrations.json` beside `codebase-memory-mcp` in `$out/bin`.
+- `tests/test_nix_sidecar_contract.sh` validates the package layout when Nix is available, then exercises isolated install/uninstall and rejects a mutated sibling sidecar.
+- The contract runs after the production binary is built. Nix is unavailable in this environment, so `nix build .#` remains an environment-specific release validation.
+
 ### A15 — Prevent stale Graph UI responses
+
+**Status: Complete**
 
 - **Files:** `graph-ui/src/hooks/useGraphData.ts`; hook tests.
 - **Change:** AbortSignal plus controller and monotonically increasing request generation; gate progress/data/error/finally writes; abort on replacement/unmount; ignore AbortError.
 - **Tests:** resolve newer request before older and prove only newer state survives; prior signal is aborted.
 
+**Completion evidence**
+
+- `useGraphData` owns the active controller and request generation, aborting replacement and unmount work while admitting state updates only from the current request.
+- Hook tests prove a late older response cannot replace newer data, the replaced request signal is aborted, and unmount aborts active work.
+- The focused Vitest suite passes 6 checks and the TypeScript/Vite production build succeeds.
+
 ### A16 — Emit bounded, valid UI JSON
+
+**Status: Complete**
 
 - **Files:** `src/ui/http_server.c:587–745`; UI/HTTP tests.
 - **Change:** construct process and browse results with yyjson dynamic docs/arrays. Return a JSON 500 on allocation/serialization failure. Do not return truncated 200 bodies.
 - **Tests:** quotes, backslashes, controls, wide listings; every 200 body parses and round-trips values.
 
+**Completion evidence**
+
+- Process and browse responses use yyjson mutable documents with copied runtime strings and reply using the serializer-reported byte length.
+- Construction, append, and write failures return the fixed parseable JSON 500 body; its test seam covers both construction and serialization failure.
+- HTTP tests cover hostile control characters, exact `Content-Length`, both failure paths, and a 200-entry wide listing. The focused strict suite passes 64 checks with one Windows-only skip.
+
 ### A17 — Complete keyboard and assistive semantics
+
+**Status: Complete**
 
 - **Files:** `ResizeHandle.tsx`, `FilterPanel.tsx`, `Sidebar.tsx`; UI tests.
 - **Change:** separator role/focus/orientation/keyboard resizing; pressed or checkbox state on toggles; accessible search label; visible focus.
 - **Tests:** role/name queries, ArrowLeft/ArrowRight behavior, pressed-state changes, and labeled search.
 
+**Completion evidence**
+
+- Panel resizing exposes a labeled, focusable vertical separator and applies 10px ArrowLeft/ArrowRight adjustments with side-aware direction.
+- Filter controls expose checkbox state and visible focus; the sidebar search has an accessible label and visible focus treatment.
+- Accessibility tests use roles and accessible names to verify separator keyboard behavior, toggle state changes, and the labeled search. The focused Vitest suite passes 2 checks and the UI build succeeds.
+
 ### A18 — Make package metadata coherent
+
+**Status: Complete**
 
 - **Files:** `server.json`, `flake.nix`, README/site/package metadata.
 - **Change:** choose one canonical version source and derive/validate all consumers; derive language count from registry/grammar source.
 - **Acceptance:** one version and language count across package and user-facing metadata; checker identifies file/key drift.
 
+**Completion evidence**
+
+- `server.json` is the canonical manifest; the metadata checker validates package surfaces against its version, name, repository, license, description, and grammar-derived language count.
+- Nix, root documentation, and Winget metadata carry the current 0.8.1 version and 159-language public claim.
+- The canonical contract passes the checkout and rejects isolated flake-version and README-language-count drift fixtures.
+
 ### A19 — Fail memlab when `cygpath` fails
+
+**Status: Complete**
 
 - **Files:** `scripts/memlab.sh:88–100`; shell contract.
 - **Change:** assign conversion to a task-specific variable, require successful nonempty output, then export.
 - **Test:** fake failing/empty `cygpath` stops before mkdir/binary launch; successful conversion exports expected path.
 
+**Completion evidence**
+
+- `memlab.sh` accepts only a successful, nonempty Windows cache-path conversion before creating cache state or invoking its driver.
+- The canonical shell contract proves failed and empty conversions stop before side effects, while a valid conversion creates and exports the expected path.
+
 ### A20 — Release validation
+
+**Status: In progress**
+
+**Current evidence**
+
+- `scripts/test.sh` passes with 7,460 tests, zero failures, and four platform-only skips across 138 suites. Its static contracts, allocator-abort host, production build, local sidecar smoke, live complexity comparison, worker watchdogs, and security-string check pass.
+- `scripts/test.sh --tsan` passes with 951 tests, zero failures, and three platform-only skips. The daemon cancellation regression passes in both sanitizer venues.
+- The daemon now propagates request cancellation through Git-context resolution. Literal Git argv runs in a contained process group and its output is accepted only after a quiesced clean terminal result; a blocked `list_projects` Git process is reaped at close while another session remains usable.
+- `make -f Makefile.cbm lint-format` and `git diff --check` pass. The live lint index completes with 280 classified decoded-null sites, zero callable-slot violations, and 30 current complexity allow-list entries.
+
+**Remaining release blockers**
+
+- `scripts/lint.sh` reaches `lint-tidy` and reports 5,561 errors across 44 checks. The largest groups are 4,212 `readability-magic-numbers`, 416 `misc-include-cleaner`, 316 `readability-function-cognitive-complexity`, and 219 `readability-braces-around-statements`; the lint gate is not green.
+- `nix` is unavailable in this environment. The sidecar contract validates installation, removal, and tamper detection using the production binary, but `nix build .#` remains unexecuted.
 
 Run only after every prior card is complete:
 

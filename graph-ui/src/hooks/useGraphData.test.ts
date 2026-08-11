@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import {
   fetchLayout,
   clampNodeBudget,
   GRAPH_RENDER_NODE_LIMIT,
   GRAPH_NODE_BUDGET_STEP,
   GRAPH_NODE_BUDGET_MAX,
+  useGraphData,
 } from "./useGraphData";
 
 describe("fetchLayout", () => {
@@ -92,5 +94,72 @@ describe("clampNodeBudget", () => {
     expect(clampNodeBudget(-500)).toBe(5000);
     expect(clampNodeBudget(99_999_999)).toBe(10_000_000);
     expect(clampNodeBudget(Number.NaN)).toBe(GRAPH_RENDER_NODE_LIMIT);
+  });
+});
+
+describe("useGraphData", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("retains a newer response when an older request resolves afterwards", async () => {
+    const requests: Array<{
+      signal: AbortSignal | null | undefined;
+      resolve: (response: Response) => void;
+    }> = [];
+    const fetchMock = vi.fn(
+      (_input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((resolve) => {
+          requests.push({ signal: init?.signal, resolve });
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const { result } = renderHook(() => useGraphData());
+
+    act(() => {
+      void result.current.fetchOverview("older");
+    });
+    await waitFor(() => expect(requests).toHaveLength(1));
+
+    act(() => {
+      void result.current.fetchOverview("newer");
+    });
+    await waitFor(() => expect(requests).toHaveLength(2));
+    expect(requests[0].signal?.aborted).toBe(true);
+
+    await act(async () => {
+      requests[1].resolve(
+        new Response(JSON.stringify({ nodes: [], edges: [], total_nodes: 2 })),
+      );
+    });
+    await waitFor(() => expect(result.current.data?.total_nodes).toBe(2));
+
+    await act(async () => {
+      requests[0].resolve(
+        new Response(JSON.stringify({ nodes: [], edges: [], total_nodes: 1 })),
+      );
+    });
+    expect(result.current.data?.total_nodes).toBe(2);
+    expect(result.current.loading).toBe(false);
+  });
+
+  it("aborts active work when unmounted", async () => {
+    const requests: AbortSignal[] = [];
+    const fetchMock = vi.fn(
+      (_input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>(() => {
+          if (init?.signal) requests.push(init.signal);
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const { result, unmount } = renderHook(() => useGraphData());
+
+    act(() => {
+      void result.current.fetchOverview("active");
+    });
+    await waitFor(() => expect(requests).toHaveLength(1));
+    unmount();
+
+    expect(requests[0].aborted).toBe(true);
   });
 });

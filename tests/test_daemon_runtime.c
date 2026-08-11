@@ -982,24 +982,25 @@ static void *runtime_application_client_request_thread(void *opaque) {
     return NULL;
 }
 
-static void *runtime_real_application_detect_changes_thread(void *opaque) {
+static void *runtime_real_application_list_projects_thread(void *opaque) {
     runtime_real_application_call_t *call = opaque;
     uint32_t timeout_ms = call->timeout_ms ? call->timeout_ms : RUNTIME_TEST_TIMEOUT_MS;
-    call->status =
-        cbm_daemon_application_client_tool(call->client, "detect_changes", call->arguments,
-                                           &call->response, &call->response_length, timeout_ms);
+    call->status = cbm_daemon_application_client_tool(call->client, "list_projects", "{}",
+                                                       &call->response, &call->response_length,
+                                                       timeout_ms);
     atomic_store_explicit(&call->completed, true, memory_order_release);
     return NULL;
 }
 
-static bool runtime_real_application_ingest_probe(cbm_daemon_runtime_client_t *client) {
+static bool runtime_real_application_session_probe(cbm_daemon_runtime_client_t *client,
+                                                   const char *project) {
     uint8_t *response = NULL;
     uint32_t response_length = 0;
     cbm_daemon_runtime_application_status_t status =
-        cbm_daemon_application_client_tool(client, "ingest_traces", "{\"traces\":[]}", &response,
+        cbm_daemon_application_client_tool(client, "list_projects", "{\"metadata_only\":true}", &response,
                                            &response_length, RUNTIME_TEST_TIMEOUT_MS);
     bool usable = status == CBM_DAEMON_RUNTIME_APPLICATION_OK && response && response_length > 0 &&
-                  strstr((const char *)response, "traces_received");
+                  project && strstr((const char *)response, project);
     free(response);
     return usable;
 }
@@ -3703,7 +3704,7 @@ TEST(daemon_runtime_disconnect_cancels_blocked_non_index_child_and_preserves_oth
                                                   NULL, NULL, RUNTIME_TEST_TIMEOUT_MS) ==
             CBM_DAEMON_RUNTIME_APPLICATION_OK;
     bool second_usable_before =
-        contexts_set && runtime_real_application_ingest_probe(second) &&
+        contexts_set && runtime_real_application_session_probe(second, project) &&
         cbm_daemon_runtime_client_heartbeat(second, RUNTIME_TEST_TIMEOUT_MS);
 
     runtime_real_application_call_t call = {
@@ -3720,7 +3721,7 @@ TEST(daemon_runtime_disconnect_cancels_blocked_non_index_child_and_preserves_oth
         second_usable_before && arguments_written > 0 &&
                 arguments_written < (int)sizeof(call.arguments)
             ? cbm_thread_create(&request_thread, 128U * 1024U,
-                                runtime_real_application_detect_changes_thread, &call)
+                                runtime_real_application_list_projects_thread, &call)
             : -1;
     bool request_thread_started = request_thread_create_rc == 0;
     uint64_t child_process_id = 0;
@@ -3778,7 +3779,7 @@ TEST(daemon_runtime_disconnect_cancels_blocked_non_index_child_and_preserves_oth
     }
 
     bool second_usable_after = second && child_cleanup_complete &&
-                               runtime_real_application_ingest_probe(second) &&
+                               runtime_real_application_session_probe(second, project) &&
                                cbm_daemon_runtime_client_heartbeat(second, RUNTIME_TEST_TIMEOUT_MS);
     bool second_closed = false;
     if (second) {

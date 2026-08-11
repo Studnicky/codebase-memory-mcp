@@ -17,6 +17,10 @@ def main():
         policy = json.load(fh)
     allowed = {x.lower() for x in policy["allowed_spdx_ids"]}
     ignored_paths = tuple(policy.get("ignored_paths", []))
+    ignored_findings = {
+        (finding["path"], finding["detected_license_expression_spdx"])
+        for finding in policy.get("ignored_findings", [])
+    }
     skip_tokens = {"and", "or", "with", ""}
 
     with open(scan_path) as fh:
@@ -32,6 +36,8 @@ def main():
             continue
         expr = f.get("detected_license_expression_spdx")
         if not expr:
+            continue
+        if (path, expr) in ignored_findings:
             continue
         checked += 1
         for tok in re.split(r"[\s()]+", expr):

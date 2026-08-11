@@ -36,7 +36,6 @@ enum {
 #include "foundation/log.h"
 #include "foundation/dyn_array.h"
 #include "foundation/profile.h"
-#include "foundation/mem.h"
 #include "store/sql.h"
 
 #include <stdatomic.h>
@@ -132,6 +131,50 @@ struct cbm_gbuf {
     int dump_token_vec_count;
     int dump_token_vec_cap;
 };
+
+/* A narrow allocation seam covers dump/store preflight buffers only. Production
+ * keeps using the standard allocator directly; tests can exercise every failure
+ * boundary without affecting graph construction or the store adapter. */
+#ifdef CBM_ENABLE_TEST_SEAMS
+static atomic_int g_preflight_allocations_before_failure = ATOMIC_VAR_INIT(-1);
+
+void cbm_gbuf_fail_allocation_after_for_test(int successful_allocations) {
+    atomic_store_explicit(&g_preflight_allocations_before_failure, successful_allocations,
+                          memory_order_relaxed);
+}
+
+static bool gb_preflight_allocation_fails(void) {
+    int remaining =
+        atomic_load_explicit(&g_preflight_allocations_before_failure, memory_order_relaxed);
+    while (remaining >= 0) {
+        if (remaining == 0) {
+            return true;
+        }
+        if (atomic_compare_exchange_weak_explicit(&g_preflight_allocations_before_failure,
+                                                  &remaining, remaining - 1, memory_order_relaxed,
+                                                  memory_order_relaxed)) {
+            return false;
+        }
+    }
+    return false;
+}
+#else
+static bool gb_preflight_allocation_fails(void) {
+    return false;
+}
+#endif
+
+static void *gb_preflight_malloc(size_t size) {
+    return gb_preflight_allocation_fails() ? NULL : malloc(size);
+}
+
+static void *gb_preflight_calloc(size_t count, size_t size) {
+    return gb_preflight_allocation_fails() ? NULL : calloc(count, size);
+}
+
+static void *gb_preflight_realloc(void *ptr, size_t size) {
+    return gb_preflight_allocation_fails() ? NULL : realloc(ptr, size);
+}
 
 /* ── Helpers ─────────────────────────────────────────────────────── */
 
@@ -1136,7 +1179,7 @@ static bool gb_buf_append(char **out, size_t *len, size_t *cap, const char *s) {
         while (*len + n + SKIP_ONE > new_cap) {
             new_cap *= GB_JSON_GROW;
         }
-        char *grown = realloc(*out, new_cap);
+        char *grown = gb_preflight_realloc(*out, new_cap);
         if (!grown) {
             return false;
         }
@@ -1833,14 +1876,6 @@ int cbm_gbuf_merge(cbm_gbuf_t *dst, cbm_gbuf_t *src) {
 
 /* ── Dump / Flush ────────────────────────────────────────────────── */
 
-/* Heap-copy a typed STRING property's value for callers that need an
- * independently-owned buffer (the dump writer holds these past the point
- * where the edge's own props array may be freed). Returns NULL if absent. */
-static char *gb_prop_string_dup(const cbm_gbuf_edge_t *edge, const char *key) {
-    const char *s = cbm_gbuf_edge_prop_string(edge, key);
-    return s ? strdup(s) : NULL;
-}
-
 /* Remap a temp edge ID to its final sequential ID, or 0 if out of range. */
 static int64_t remap_id(const int64_t *temp_to_final, int64_t max_temp_id, int64_t temp_id) {
     return (temp_id < max_temp_id) ? temp_to_final[temp_id] : 0;
@@ -1853,15 +1888,16 @@ static int cmp_dump_vectors_by_id(const void *a, const void *b) {
     return (da > db) - (da < db);
 }
 
-static CBMDumpNode *build_dump_nodes(cbm_gbuf_t *gb, int live_count, int64_t *temp_to_final,
-                                     int64_t max_temp_id, int *out_count,
-                                     cbm_gbuf_node_t ***src_out) {
+static bool build_dump_nodes(cbm_gbuf_t *gb, int live_count, int64_t *temp_to_final,
+                             int64_t max_temp_id, CBMDumpNode **out_nodes, int *out_count) {
+    *out_nodes = NULL;
+    *out_count = 0;
     size_t cap = (size_t)(live_count > 0 ? live_count : SKIP_ONE);
-    CBMDumpNode *dump_nodes = malloc(cap * sizeof(CBMDumpNode));
-    /* Parallel gbuf-node pointers so a streamed partition can free its heavy
-     * properties_json after the rows are persisted. NULL on OOM disables the
-     * per-partition free (the dump still succeeds). */
-    cbm_gbuf_node_t **src = malloc(cap * sizeof(cbm_gbuf_node_t *));
+    CBMDumpNode *dump_nodes = gb_preflight_malloc(cap * sizeof(*dump_nodes));
+    if (!dump_nodes) {
+        free(dump_nodes);
+        return false;
+    }
     int idx = 0;
 
     for (int i = 0; i < gb->nodes.count; i++) {
@@ -1887,23 +1923,29 @@ static CBMDumpNode *build_dump_nodes(cbm_gbuf_t *gb, int live_count, int64_t *te
             .end_line = n->end_line,
             .properties = n->properties_json,
         };
-        if (src) {
-            src[idx] = n;
-        }
         idx++;
     }
 
+    *out_nodes = dump_nodes;
     *out_count = idx;
-    *src_out = src;
-    return dump_nodes;
+    return true;
 }
 
 /* Build dump-ready edge array with remapped IDs. Returns url_paths,
  * local_names, and the serialized properties JSON (heap string arrays owned
  * by the caller) via out params — each parallel to dump_edges[0..*out_count). */
-static CBMDumpEdge *build_dump_edges(cbm_gbuf_t *gb, const int64_t *temp_to_final,
-                                     int64_t max_temp_id, int *out_count, char ***out_url_paths,
-                                     char ***out_local_names, char ***out_props_json) {
+static void free_dump_resources(char **url_paths, char **local_names, char **props_json,
+                                int edge_count, CBMDumpEdge *dump_edges, CBMDumpNode *dump_nodes,
+                                int64_t *temp_to_final);
+
+static bool build_dump_edges(cbm_gbuf_t *gb, const int64_t *temp_to_final, int64_t max_temp_id,
+                             CBMDumpEdge **out_edges, int *out_count, char ***out_url_paths,
+                             char ***out_local_names, char ***out_props_json) {
+    *out_edges = NULL;
+    *out_count = 0;
+    *out_url_paths = NULL;
+    *out_local_names = NULL;
+    *out_props_json = NULL;
     /* Count valid edges (both endpoints resolved) */
     int valid_edges = 0;
     for (int i = 0; i < gb->edges.count; i++) {
@@ -1915,10 +1957,17 @@ static CBMDumpEdge *build_dump_edges(cbm_gbuf_t *gb, const int64_t *temp_to_fina
     }
 
     size_t alloc_count = (size_t)(valid_edges > 0 ? valid_edges : SKIP_ONE);
-    CBMDumpEdge *dump_edges = malloc(alloc_count * sizeof(CBMDumpEdge));
-    char **url_paths = calloc(alloc_count, sizeof(char *));
-    char **local_names = calloc(alloc_count, sizeof(char *));
-    char **props_json = calloc(alloc_count, sizeof(char *));
+    CBMDumpEdge *dump_edges = gb_preflight_malloc(alloc_count * sizeof(*dump_edges));
+    char **url_paths = gb_preflight_calloc(alloc_count, sizeof(*url_paths));
+    char **local_names = gb_preflight_calloc(alloc_count, sizeof(*local_names));
+    char **props_json = gb_preflight_calloc(alloc_count, sizeof(*props_json));
+    if (!dump_edges || !url_paths || !local_names || !props_json) {
+        free(dump_edges);
+        free(url_paths);
+        free(local_names);
+        free(props_json);
+        return false;
+    }
     int idx = 0;
 
     for (int i = 0; i < gb->edges.count; i++) {
@@ -1929,17 +1978,41 @@ static CBMDumpEdge *build_dump_edges(cbm_gbuf_t *gb, const int64_t *temp_to_fina
             continue;
         }
 
-        char *url_path = gb_prop_string_dup(e, "url_path");
+        const char *url_path_value = cbm_gbuf_edge_prop_string(e, "url_path");
+        char *url_path =
+            url_path_value ? gb_preflight_malloc(strlen(url_path_value) + SKIP_ONE) : NULL;
+        if (url_path) {
+            memcpy(url_path, url_path_value, strlen(url_path_value) + SKIP_ONE);
+        }
+        if (url_path_value && !url_path) {
+            free_dump_resources(url_paths, local_names, props_json, idx, dump_edges, NULL, NULL);
+            return false;
+        }
         url_paths[idx] = url_path;
 
         /* IMPORTS only — mirrors the local_name_gen CASE in the edges DDL. */
-        char *local_name = (e->type && strcmp(e->type, "IMPORTS") == 0)
-                               ? gb_prop_string_dup(e, "local_name")
-                               : NULL;
+        const char *local_name_value = (e->type && strcmp(e->type, "IMPORTS") == 0)
+                                           ? cbm_gbuf_edge_prop_string(e, "local_name")
+                                           : NULL;
+        char *local_name =
+            local_name_value ? gb_preflight_malloc(strlen(local_name_value) + SKIP_ONE) : NULL;
+        if (local_name) {
+            memcpy(local_name, local_name_value, strlen(local_name_value) + SKIP_ONE);
+        }
+        if (local_name_value && !local_name) {
+            free_dump_resources(url_paths, local_names, props_json, idx + SKIP_ONE, dump_edges,
+                                NULL, NULL);
+            return false;
+        }
         local_names[idx] = local_name;
 
         char *serialized = gb_serialize_props(e->props, e->prop_count);
-        props_json[idx] = serialized ? serialized : strdup("{}");
+        if (!serialized) {
+            free_dump_resources(url_paths, local_names, props_json, idx + SKIP_ONE, dump_edges,
+                                NULL, NULL);
+            return false;
+        }
+        props_json[idx] = serialized;
 
         dump_edges[idx] = (CBMDumpEdge){
             .id = idx + SKIP_ONE,
@@ -1954,24 +2027,25 @@ static CBMDumpEdge *build_dump_edges(cbm_gbuf_t *gb, const int64_t *temp_to_fina
         idx++;
     }
 
+    *out_edges = dump_edges;
     *out_count = idx;
     *out_url_paths = url_paths;
     *out_local_names = local_names;
     *out_props_json = props_json;
-    return dump_edges;
+    return true;
 }
 
 /* Remap vector node IDs through temp_to_final, sort by ID, deduplicate. */
-static void remap_sort_dedup_vectors(cbm_gbuf_t *gb, const int64_t *temp_to_final,
-                                     int64_t max_temp_id) {
+static void remap_sort_dedup_vectors(CBMDumpVector *vectors, int *count,
+                                     const int64_t *temp_to_final, int64_t max_temp_id) {
     int remapped = 0;
     int dropped = 0;
-    for (int i = 0; i < gb->dump_vector_count; i++) {
-        int64_t old_id = gb->dump_vectors[i].node_id;
+    for (int i = 0; i < *count; i++) {
+        int64_t old_id = vectors[i].node_id;
         int64_t new_id = (old_id > 0 && old_id < max_temp_id) ? temp_to_final[old_id] : 0;
         if (new_id > 0) {
-            gb->dump_vectors[remapped] = gb->dump_vectors[i];
-            gb->dump_vectors[remapped].node_id = new_id;
+            vectors[remapped] = vectors[i];
+            vectors[remapped].node_id = new_id;
             remapped++;
         } else {
             dropped++;
@@ -1984,21 +2058,40 @@ static void remap_sort_dedup_vectors(cbm_gbuf_t *gb, const int64_t *temp_to_fina
         snprintf(d_buf, sizeof(d_buf), "%d", dropped);
         cbm_log_info("dump.vectors.remap", "remapped", r_buf, "dropped", d_buf);
     }
-    gb->dump_vector_count = remapped;
+    *count = remapped;
 
-    if (gb->dump_vector_count >= GB_MIN_FOR_DEDUP) {
-        qsort(gb->dump_vectors, (size_t)gb->dump_vector_count, sizeof(CBMDumpVector),
-              cmp_dump_vectors_by_id);
+    if (*count >= GB_MIN_FOR_DEDUP) {
+        qsort(vectors, (size_t)*count, sizeof(*vectors), cmp_dump_vectors_by_id);
         int deduped = 0;
-        for (int i = 0; i < gb->dump_vector_count; i++) {
-            if (i + GB_DEDUP_LOOKAHEAD < gb->dump_vector_count &&
-                gb->dump_vectors[i].node_id == gb->dump_vectors[i + GB_DEDUP_LOOKAHEAD].node_id) {
+        for (int i = 0; i < *count; i++) {
+            if (i + GB_DEDUP_LOOKAHEAD < *count &&
+                vectors[i].node_id == vectors[i + GB_DEDUP_LOOKAHEAD].node_id) {
                 continue;
             }
-            gb->dump_vectors[deduped++] = gb->dump_vectors[i];
+            vectors[deduped++] = vectors[i];
         }
-        gb->dump_vector_count = deduped;
+        *count = deduped;
     }
+}
+
+static bool build_dump_vectors(const cbm_gbuf_t *gb, const int64_t *temp_to_final,
+                               int64_t max_temp_id, CBMDumpVector **out_vectors, int *out_count) {
+    *out_vectors = NULL;
+    *out_count = 0;
+    if (gb->dump_vector_count == 0) {
+        return true;
+    }
+
+    CBMDumpVector *vectors = gb_preflight_malloc((size_t)gb->dump_vector_count * sizeof(*vectors));
+    if (!vectors) {
+        return false;
+    }
+    memcpy(vectors, gb->dump_vectors, (size_t)gb->dump_vector_count * sizeof(*vectors));
+    int count = gb->dump_vector_count;
+    remap_sort_dedup_vectors(vectors, &count, temp_to_final, max_temp_id);
+    *out_vectors = vectors;
+    *out_count = count;
+    return true;
 }
 
 static void log_dump_summary(int node_count, int edge_count) {
@@ -2013,9 +2106,15 @@ static void free_dump_resources(char **url_paths, char **local_names, char **pro
                                 int edge_count, CBMDumpEdge *dump_edges, CBMDumpNode *dump_nodes,
                                 int64_t *temp_to_final) {
     for (int i = 0; i < edge_count; i++) {
-        free(url_paths[i]);
-        free(local_names[i]);
-        free(props_json[i]);
+        if (url_paths) {
+            free(url_paths[i]);
+        }
+        if (local_names) {
+            free(local_names[i]);
+        }
+        if (props_json) {
+            free(props_json[i]);
+        }
     }
     free(url_paths);
     free(local_names);
@@ -2045,14 +2144,6 @@ static void generate_iso_timestamp(char *buf, size_t buf_size) {
     }
 }
 
-/* Release lookup indexes then remap+sort+dedup vectors for the B-tree writer. */
-static void release_and_remap_vectors(cbm_gbuf_t *gb, const int64_t *temp_to_final,
-                                      int64_t max_temp_id) {
-    CBM_PROF_START(t_vec_remap);
-    remap_sort_dedup_vectors(gb, temp_to_final, max_temp_id);
-    CBM_PROF_END_N("dump", "5_vector_remap_sort", t_vec_remap, gb->dump_vector_count);
-}
-
 int cbm_gbuf_dump_to_sqlite(cbm_gbuf_t *gb, const char *path) {
     if (!gb || !path) {
         return CBM_NOT_FOUND;
@@ -2064,47 +2155,56 @@ int cbm_gbuf_dump_to_sqlite(cbm_gbuf_t *gb, const char *path) {
 
     CBM_PROF_START(t_build_nodes);
     int64_t max_temp_id = gb->next_id;
-    int64_t *temp_to_final = calloc((size_t)max_temp_id, sizeof(int64_t));
+    int64_t *temp_to_final = gb_preflight_calloc((size_t)max_temp_id, sizeof(*temp_to_final));
     if (!temp_to_final) {
         return CBM_NOT_FOUND;
     }
 
     int node_idx = 0;
-    cbm_gbuf_node_t **src_nodes = NULL;
-    CBMDumpNode *dump_nodes =
-        build_dump_nodes(gb, live_count, temp_to_final, max_temp_id, &node_idx, &src_nodes);
+    CBMDumpNode *dump_nodes = NULL;
+    if (!build_dump_nodes(gb, live_count, temp_to_final, max_temp_id, &dump_nodes, &node_idx)) {
+        free(temp_to_final);
+        return CBM_NOT_FOUND;
+    }
     CBM_PROF_END_N("dump", "2_build_dump_nodes", t_build_nodes, node_idx);
 
-    /* Release ALL lookup indexes NOW: nothing between here and finalize reads
-     * them (stream-append uses dump_nodes/src_nodes, build_dump_edges uses
-     * temp_to_final + gb->edges, the vector remap uses temp_to_final). At
-     * kernel scale they are ~3.8 GB (hash buckets + key strings + pointer
-     * arrays); releasing them only AFTER edge building made them coexist with
-     * every dump-side transient array — the dump-phase RSS peak. */
-    CBM_PROF_START(t_release_idx);
-    release_gbuf_indexes(gb);
-    CBM_PROF_END("dump", "4_release_gbuf_indexes", t_release_idx);
+    int edge_idx = 0;
+    char **url_paths = NULL;
+    char **local_names = NULL;
+    char **props_json = NULL;
+    CBMDumpEdge *dump_edges = NULL;
+    CBM_PROF_START(t_build_edges);
+    if (!build_dump_edges(gb, temp_to_final, max_temp_id, &dump_edges, &edge_idx, &url_paths,
+                          &local_names, &props_json)) {
+        free_dump_resources(NULL, NULL, NULL, 0, NULL, dump_nodes, temp_to_final);
+        return CBM_NOT_FOUND;
+    }
+    CBM_PROF_END_N("dump", "3_build_dump_edges", t_build_edges, edge_idx);
+
+    CBMDumpVector *dump_vectors = NULL;
+    int dump_vector_count = 0;
+    CBM_PROF_START(t_vec_remap);
+    if (!build_dump_vectors(gb, temp_to_final, max_temp_id, &dump_vectors, &dump_vector_count)) {
+        CBM_PROF_END_N("dump", "5_vector_remap_sort", t_vec_remap, 0);
+        free_dump_resources(url_paths, local_names, props_json, edge_idx, dump_edges, dump_nodes,
+                            temp_to_final);
+        return CBM_NOT_FOUND;
+    }
+    CBM_PROF_END_N("dump", "5_vector_remap_sort", t_vec_remap, dump_vector_count);
 
     char indexed_at[CBM_SZ_64];
     generate_iso_timestamp(indexed_at, sizeof(indexed_at));
 
-    /* Stream node rows to the DB in partitions. Under memory pressure, free each
-     * partition's heavy properties_json once persisted — the heavy column is
-     * write-once and never read again, so this bounds the dump/finalize peak.
-     * The DB output is identical whether or not freeing engages, so non-pressure
-     * runs (and tests) leave the gbuf intact (the budget>0 guard keeps an
-     * uninitialized budget from ever triggering the free). */
     cbm_db_writer_t *w = cbm_writer_open(path);
     if (!w) {
-        free(src_nodes);
-        free(dump_nodes);
-        free(temp_to_final);
+        free(dump_vectors);
+        free_dump_resources(url_paths, local_names, props_json, edge_idx, dump_edges, dump_nodes,
+                            temp_to_final);
         return CBM_NOT_FOUND;
     }
 
     CBM_PROF_START(t_append);
     enum { DUMP_PARTITION_NODES = 1 << 16 };
-    bool free_heavy = false;
     int rc = 0;
     for (int off = 0; off < node_idx; off += DUMP_PARTITION_NODES) {
         int chunk = node_idx - off;
@@ -2115,192 +2215,197 @@ int cbm_gbuf_dump_to_sqlite(cbm_gbuf_t *gb, const char *path) {
         if (rc != 0) {
             break;
         }
-        free_heavy = free_heavy || (cbm_mem_budget() > 0 && cbm_mem_over_budget());
-        if (free_heavy && src_nodes) {
-            for (int j = off; j < off + chunk; j++) {
-                free(src_nodes[j]->properties_json);
-                src_nodes[j]->properties_json = NULL;
-                dump_nodes[j].properties = NULL;
-            }
-            cbm_mem_collect();
-        }
     }
     CBM_PROF_END_N("dump", "2b_stream_append_nodes", t_append, node_idx);
-
-    int edge_idx = 0;
-    char **url_paths = NULL;
-    char **local_names = NULL;
-    char **props_json = NULL;
-    CBMDumpEdge *dump_edges = NULL;
-    if (rc == 0) {
-        CBM_PROF_START(t_build_edges);
-        dump_edges = build_dump_edges(gb, temp_to_final, max_temp_id, &edge_idx, &url_paths,
-                                      &local_names, &props_json);
-        CBM_PROF_END_N("dump", "3_build_dump_edges", t_build_edges, edge_idx);
-        release_and_remap_vectors(gb, temp_to_final, max_temp_id);
-    }
 
     /* Finalize: nodes-table interior + edges/vectors/metadata/indexes/sqlite_master.
      * Frees w and closes the file; handles a prior append error cleanly. */
     CBM_PROF_START(t_finalize);
     int frc = cbm_writer_finalize(w, gb->project, gb->root_path, indexed_at, dump_nodes, node_idx,
-                                  dump_edges, edge_idx, gb->dump_vectors, gb->dump_vector_count,
+                                  dump_edges, edge_idx, dump_vectors, dump_vector_count,
                                   gb->dump_token_vecs, gb->dump_token_vec_count);
     CBM_PROF_END_N("dump", "6_write_db_finalize", t_finalize, node_idx + edge_idx);
     if (rc == 0) {
         rc = frc;
     }
 
-    log_dump_summary(node_idx, edge_idx);
+    if (rc == 0) {
+        CBM_PROF_START(t_release_idx);
+        release_gbuf_indexes(gb);
+        CBM_PROF_END("dump", "4_release_gbuf_indexes", t_release_idx);
+        free(gb->dump_vectors);
+        gb->dump_vectors = dump_vectors;
+        gb->dump_vector_count = dump_vector_count;
+        gb->dump_vector_cap = dump_vector_count;
+        dump_vectors = NULL;
+        log_dump_summary(node_idx, edge_idx);
+    }
+    free(dump_vectors);
     free_dump_resources(url_paths, local_names, props_json, edge_idx, dump_edges, dump_nodes,
                         temp_to_final);
-    free(src_nodes);
     return rc;
+}
+
+static bool preflight_serialized_edge_properties(const cbm_gbuf_t *gb, char ***out_properties) {
+    *out_properties = NULL;
+    if (gb->edges.count == 0) {
+        return true;
+    }
+    char **properties = gb_preflight_calloc((size_t)gb->edges.count, sizeof(*properties));
+    if (!properties) {
+        return false;
+    }
+    for (int i = 0; i < gb->edges.count; i++) {
+        cbm_gbuf_edge_t *edge = gb->edges.items[i];
+        properties[i] = gb_serialize_props(edge->props, edge->prop_count);
+        if (!properties[i]) {
+            for (int j = 0; j < i; j++) {
+                free(properties[j]);
+            }
+            free(properties);
+            return false;
+        }
+    }
+    *out_properties = properties;
+    return true;
+}
+
+static void free_serialized_edge_properties(char **properties, int count) {
+    if (!properties) {
+        return;
+    }
+    for (int i = 0; i < count; i++) {
+        free(properties[i]);
+    }
+    free(properties);
+}
+
+static int write_gbuf_to_store(cbm_gbuf_t *gb, cbm_store_t *store, int64_t *temp_to_real,
+                               int64_t max_temp_id, char *const *edge_properties) {
+    for (int i = 0; i < gb->nodes.count; i++) {
+        cbm_gbuf_node_t *n = gb->nodes.items[i];
+        if (!n->qualified_name || !cbm_ht_get(gb->node_by_qn, n->qualified_name)) {
+            continue;
+        }
+        cbm_node_t sn = {
+            .project = gb->project,
+            .label = n->label,
+            .name = n->name,
+            .qualified_name = n->qualified_name,
+            .file_path = n->file_path,
+            .start_line = n->start_line,
+            .end_line = n->end_line,
+            .properties_json = n->properties_json,
+        };
+        int64_t real_id = cbm_store_upsert_node(store, &sn);
+        int64_t n_id_v = cbm_node_id_value(n->id);
+        if (real_id <= 0 || n_id_v <= 0 || n_id_v >= max_temp_id) {
+            return CBM_NOT_FOUND;
+        }
+        temp_to_real[n_id_v] = real_id;
+    }
+
+    for (int i = 0; i < gb->edges.count; i++) {
+        cbm_gbuf_edge_t *e = gb->edges.items[i];
+        int64_t e_src_v = cbm_node_id_value(e->source_id);
+        int64_t e_tgt_v = cbm_node_id_value(e->target_id);
+        int64_t real_src = (e_src_v > 0 && e_src_v < max_temp_id) ? temp_to_real[e_src_v] : 0;
+        int64_t real_tgt = (e_tgt_v > 0 && e_tgt_v < max_temp_id) ? temp_to_real[e_tgt_v] : 0;
+        if (real_src == 0 || real_tgt == 0) {
+            continue;
+        }
+        cbm_edge_t se = {
+            .project = gb->project,
+            .source_id = real_src,
+            .target_id = real_tgt,
+            .type = e->type,
+            .properties_json = edge_properties[i],
+        };
+        if (cbm_store_insert_edge(store, &se) <= 0) {
+            return CBM_NOT_FOUND;
+        }
+    }
+    return CBM_STORE_OK;
 }
 
 int cbm_gbuf_flush_to_store(cbm_gbuf_t *gb, cbm_store_t *store) {
     if (!gb || !store) {
         return CBM_NOT_FOUND;
     }
-
-    /* Upsert project */
-    cbm_store_upsert_project(store, gb->project, gb->root_path);
-
-    /* Begin bulk mode */
-    cbm_store_begin_bulk(store);
-    cbm_store_drop_indexes(store);
-    cbm_store_begin(store);
-
-    /* Delete existing project data */
-    cbm_store_delete_edges_by_project(store, gb->project);
-    cbm_store_delete_nodes_by_project(store, gb->project);
-
-    /* Build temp_id → real_id map.
-     * Temp IDs start at 1 and are sequential, but can have gaps from edge inserts.
-     * Use max_id as size. */
     int64_t max_temp_id = gb->next_id;
-    /* max_temp_id is a bounded, non-negative count (next_id starts at 1 and
-     * only increments). */
-    int64_t *temp_to_real = calloc((size_t)max_temp_id, sizeof(int64_t));
-
-    for (int i = 0; i < gb->nodes.count; i++) {
-        cbm_gbuf_node_t *n = gb->nodes.items[i];
-
-        /* Skip if deleted from QN index */
-        if (!n->qualified_name || !cbm_ht_get(gb->node_by_qn, n->qualified_name)) {
-            continue;
-        }
-
-        cbm_node_t sn = {
-            .project = gb->project,
-            .label = n->label,
-            .name = n->name,
-            .qualified_name = n->qualified_name,
-            .file_path = n->file_path,
-            .start_line = n->start_line,
-            .end_line = n->end_line,
-            .properties_json = n->properties_json,
-        };
-        int64_t real_id = cbm_store_upsert_node(store, &sn);
-        int64_t n_id_v = cbm_node_id_value(n->id);
-        if (real_id > 0 && n_id_v < max_temp_id) {
-            temp_to_real[n_id_v] = real_id;
-        }
+    int64_t *temp_to_real = gb_preflight_calloc((size_t)max_temp_id, sizeof(*temp_to_real));
+    char **edge_properties = NULL;
+    if (!temp_to_real || !preflight_serialized_edge_properties(gb, &edge_properties)) {
+        free(temp_to_real);
+        free_serialized_edge_properties(edge_properties, gb->edges.count);
+        return CBM_NOT_FOUND;
     }
 
-    /* Insert all edges with remapped IDs */
-    for (int i = 0; i < gb->edges.count; i++) {
-        cbm_gbuf_edge_t *e = gb->edges.items[i];
-        int64_t e_src_v = cbm_node_id_value(e->source_id);
-        int64_t e_tgt_v = cbm_node_id_value(e->target_id);
-        int64_t real_src = (e_src_v < max_temp_id) ? temp_to_real[e_src_v] : 0;
-        int64_t real_tgt = (e_tgt_v < max_temp_id) ? temp_to_real[e_tgt_v] : 0;
-        if (real_src == 0 || real_tgt == 0) {
-            continue;
-        }
-
-        char *props_json = gb_serialize_props(e->props, e->prop_count);
-        cbm_edge_t se = {
-            .project = gb->project,
-            .source_id = real_src,
-            .target_id = real_tgt,
-            .type = e->type,
-            .properties_json = props_json ? props_json : "{}",
-        };
-        cbm_store_insert_edge(store, &se);
-        free(props_json);
+    int rc = cbm_store_begin_bulk(store);
+    bool bulk_started = rc == CBM_STORE_OK;
+    bool transaction_started = false;
+    if (bulk_started) {
+        rc = cbm_store_begin(store);
+        transaction_started = rc == CBM_STORE_OK;
     }
-
-    cbm_store_commit(store);
-    cbm_store_create_indexes(store);
-    cbm_store_end_bulk(store);
+    if (rc == CBM_STORE_OK) {
+        rc = cbm_store_upsert_project(store, gb->project, gb->root_path);
+    }
+    if (rc == CBM_STORE_OK) {
+        rc = cbm_store_drop_indexes(store);
+    }
+    if (rc == CBM_STORE_OK) {
+        rc = cbm_store_delete_edges_by_project(store, gb->project);
+    }
+    if (rc == CBM_STORE_OK) {
+        rc = cbm_store_delete_nodes_by_project(store, gb->project);
+    }
+    if (rc == CBM_STORE_OK) {
+        rc = write_gbuf_to_store(gb, store, temp_to_real, max_temp_id, edge_properties);
+    }
+    if (rc == CBM_STORE_OK) {
+        rc = cbm_store_create_indexes(store);
+    }
+    if (rc == CBM_STORE_OK) {
+        rc = cbm_store_commit(store);
+    }
+    if (rc != CBM_STORE_OK && transaction_started) {
+        cbm_store_rollback(store);
+    }
+    if (bulk_started && cbm_store_end_bulk(store) != CBM_STORE_OK) {
+        rc = CBM_NOT_FOUND;
+    }
 
     free(temp_to_real);
-    return 0;
+    free_serialized_edge_properties(edge_properties, gb->edges.count);
+    return rc == CBM_STORE_OK ? 0 : CBM_NOT_FOUND;
 }
 
 int cbm_gbuf_merge_into_store(cbm_gbuf_t *gb, cbm_store_t *store) {
     if (!gb || !store) {
         return CBM_NOT_FOUND;
     }
-
-    /* Begin bulk mode — no project wipe */
-    cbm_store_begin(store);
-
-    /* Build temp_id → real_id map */
     int64_t max_temp_id = gb->next_id;
-    /* max_temp_id is a bounded, non-negative count (next_id starts at 1 and
-     * only increments). */
-    int64_t *temp_to_real = calloc((size_t)max_temp_id, sizeof(int64_t));
-
-    for (int i = 0; i < gb->nodes.count; i++) {
-        cbm_gbuf_node_t *n = gb->nodes.items[i];
-
-        if (!n->qualified_name || !cbm_ht_get(gb->node_by_qn, n->qualified_name)) {
-            continue;
-        }
-
-        cbm_node_t sn = {
-            .project = gb->project,
-            .label = n->label,
-            .name = n->name,
-            .qualified_name = n->qualified_name,
-            .file_path = n->file_path,
-            .start_line = n->start_line,
-            .end_line = n->end_line,
-            .properties_json = n->properties_json,
-        };
-        int64_t real_id = cbm_store_upsert_node(store, &sn);
-        int64_t n_id_v = cbm_node_id_value(n->id);
-        if (real_id > 0 && n_id_v < max_temp_id) {
-            temp_to_real[n_id_v] = real_id;
-        }
+    int64_t *temp_to_real = gb_preflight_calloc((size_t)max_temp_id, sizeof(*temp_to_real));
+    char **edge_properties = NULL;
+    if (!temp_to_real || !preflight_serialized_edge_properties(gb, &edge_properties)) {
+        free(temp_to_real);
+        free_serialized_edge_properties(edge_properties, gb->edges.count);
+        return CBM_NOT_FOUND;
     }
 
-    for (int i = 0; i < gb->edges.count; i++) {
-        cbm_gbuf_edge_t *e = gb->edges.items[i];
-        int64_t e_src_v = cbm_node_id_value(e->source_id);
-        int64_t e_tgt_v = cbm_node_id_value(e->target_id);
-        int64_t real_src = (e_src_v < max_temp_id) ? temp_to_real[e_src_v] : 0;
-        int64_t real_tgt = (e_tgt_v < max_temp_id) ? temp_to_real[e_tgt_v] : 0;
-        if (real_src == 0 || real_tgt == 0) {
-            continue;
-        }
-
-        char *props_json = gb_serialize_props(e->props, e->prop_count);
-        cbm_edge_t se = {
-            .project = gb->project,
-            .source_id = real_src,
-            .target_id = real_tgt,
-            .type = e->type,
-            .properties_json = props_json ? props_json : "{}",
-        };
-        cbm_store_insert_edge(store, &se);
-        free(props_json);
+    int rc = cbm_store_begin(store);
+    if (rc == CBM_STORE_OK) {
+        rc = write_gbuf_to_store(gb, store, temp_to_real, max_temp_id, edge_properties);
     }
-
-    cbm_store_commit(store);
+    if (rc == CBM_STORE_OK) {
+        rc = cbm_store_commit(store);
+    }
+    if (rc != CBM_STORE_OK) {
+        cbm_store_rollback(store);
+    }
 
     free(temp_to_real);
-    return 0;
+    free_serialized_edge_properties(edge_properties, gb->edges.count);
+    return rc == CBM_STORE_OK ? 0 : CBM_NOT_FOUND;
 }

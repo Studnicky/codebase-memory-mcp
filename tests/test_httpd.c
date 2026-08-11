@@ -26,6 +26,7 @@
 #include "ui/http_server.h"
 #include <store/store.h>
 #include <watcher/watcher.h>
+#include <yyjson/yyjson.h>
 
 #include <stdio.h>
 #include <stdatomic.h>
@@ -55,6 +56,14 @@ typedef int th_sock_t;
 #define th_sock_shutdown(s) shutdown((s), SHUT_RDWR)
 #define TH_SOCK_BAD (-1)
 #endif
+
+enum {
+    TH_UI_JSON_FAILURE_CONSTRUCTION = 1,
+    TH_UI_JSON_FAILURE_SERIALIZATION = 2,
+};
+
+/* Test seam owned by http_server.c; production callers do not use it. */
+void cbm_http_server_set_json_failure_for_testing(int stage);
 
 static char httpd_log_buf[8192];
 
@@ -196,6 +205,22 @@ static int th_status(const char *resp) {
     if (strncmp(resp, "HTTP/1.1 ", 9) != 0)
         return -1;
     return atoi(resp + 9);
+}
+
+static const char *th_response_body(const char *response) {
+    const char *separator = strstr(response, "\r\n\r\n");
+    return separator ? separator + 4 : NULL;
+}
+
+static bool th_response_length_matches_body(const char *response) {
+    const char *body = th_response_body(response);
+    const char *header = strstr(response, "Content-Length: ");
+    if (!body || !header || header >= body) {
+        return false;
+    }
+    char *end = NULL;
+    unsigned long declared = strtoul(header + strlen("Content-Length: "), &end, 10);
+    return end && end > header && strncmp(end, "\r\n", 2) == 0 && declared == strlen(body);
 }
 
 /* ── Parser unit tests ────────────────────────────────────────── */
@@ -651,6 +676,30 @@ static void th_server_stop(th_server_t *ts) {
     cbm_http_server_stop(ts->srv);
     (void)cbm_thread_join(&ts->tid);
     (void)cbm_http_server_free(ts->srv);
+}
+
+static bool th_browse_failure_returns_bounded_json(int stage) {
+    th_server_t ts;
+    if (th_server_start(&ts) != 0) {
+        return false;
+    }
+    cbm_http_server_set_json_failure_for_testing(stage);
+    char response[1024] = {0};
+    int received = th_http(cbm_http_server_port(ts.srv), "GET /api/browse HTTP/1.1\r\n\r\n",
+                           response, sizeof(response));
+    cbm_http_server_set_json_failure_for_testing(0);
+    th_server_stop(&ts);
+
+    const char *body = th_response_body(response);
+    yyjson_doc *doc = body ? yyjson_read(body, strlen(body), 0) : NULL;
+    yyjson_val *root = doc ? yyjson_doc_get_root(doc) : NULL;
+    yyjson_val *error = root ? yyjson_obj_get(root, "error") : NULL;
+    bool valid = received > 0 && th_status(response) == 500 &&
+                 th_response_length_matches_body(response) && body && strlen(body) < 128U &&
+                 root && yyjson_is_obj(root) && error && yyjson_is_str(error) &&
+                 strcmp(yyjson_get_str(error), "response unavailable") == 0;
+    yyjson_doc_free(doc);
+    return valid;
 }
 
 typedef struct {
@@ -1972,12 +2021,87 @@ TEST(ui_server_rejects_non_loopback_host) {
     PASS();
 }
 
-/* The directory browser formats readdir() entries into a fixed 32 KB response
- * buffer. The per-entry loop is clamped, but the trailing "parent"/"roots"
- * appends were not — once the entries filled the buffer, pos ran past the end
- * and the next size argument wrapped, writing out of bounds. Fill the buffer
- * with many long-named subdirectories and browse it in a forked child so an
- * overflow surfaces as a killing signal (ASan abort) rather than a clean run. */
+TEST(ui_server_browse_json_escapes_runtime_strings) {
+#ifdef _WIN32
+    SKIP_PLATFORM("Windows forbids quotes in directory names");
+#else
+    char *dir = th_mktempdir("cbm_browse_json");
+    ASSERT_NOT_NULL(dir);
+    static const char hostile_name[] = "quote\"-slash\\-newline\n-control\x1f";
+    char child[640];
+    ASSERT(snprintf(child, sizeof(child), "%s/%s", dir, hostile_name) > 0);
+    ASSERT_EQ(th_mkdir_p(child), 0);
+
+    th_server_t ts;
+    ASSERT_EQ(th_server_start(&ts), 0);
+    char request[768];
+    ASSERT(snprintf(request, sizeof(request),
+                    "GET /api/browse?path=%s HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n\r\n", dir,
+                    cbm_http_server_port(ts.srv)) > 0);
+    char response[8192] = {0};
+    int received = th_http(cbm_http_server_port(ts.srv), request, response, sizeof(response));
+    th_server_stop(&ts);
+
+    const char *body = th_response_body(response);
+    yyjson_doc *doc = body ? yyjson_read(body, strlen(body), 0) : NULL;
+    yyjson_val *root = doc ? yyjson_doc_get_root(doc) : NULL;
+    yyjson_val *dirs = root ? yyjson_obj_get(root, "dirs") : NULL;
+    bool found_hostile_name = false;
+    if (dirs && yyjson_is_arr(dirs)) {
+        yyjson_arr_iter iter = yyjson_arr_iter_with(dirs);
+        yyjson_val *entry;
+        while ((entry = yyjson_arr_iter_next(&iter)) != NULL) {
+            if (yyjson_is_str(entry) && strcmp(yyjson_get_str(entry), hostile_name) == 0) {
+                found_hostile_name = true;
+                break;
+            }
+        }
+    }
+    bool parsed = root && yyjson_is_obj(root) && dirs && yyjson_is_arr(dirs) &&
+                  found_hostile_name;
+    yyjson_doc_free(doc);
+    int cleanup = th_rmtree(dir);
+
+    ASSERT_GT(received, 0);
+    ASSERT_EQ(th_status(response), 200);
+    ASSERT_TRUE(th_response_length_matches_body(response));
+    ASSERT_TRUE(parsed);
+    ASSERT_EQ(cleanup, 0);
+    PASS();
+#endif
+}
+
+TEST(ui_server_processes_response_is_valid_json) {
+    th_server_t ts;
+    ASSERT_EQ(th_server_start(&ts), 0);
+    char response[32768] = {0};
+    int received = th_http(cbm_http_server_port(ts.srv), "GET /api/processes HTTP/1.1\r\n\r\n",
+                           response, sizeof(response));
+    th_server_stop(&ts);
+
+    const char *body = th_response_body(response);
+    yyjson_doc *doc = body ? yyjson_read(body, strlen(body), 0) : NULL;
+    yyjson_val *root = doc ? yyjson_doc_get_root(doc) : NULL;
+    yyjson_val *processes = root ? yyjson_obj_get(root, "processes") : NULL;
+    bool parsed = root && yyjson_is_obj(root) && processes && yyjson_is_arr(processes);
+    yyjson_doc_free(doc);
+
+    ASSERT_GT(received, 0);
+    ASSERT_EQ(th_status(response), 200);
+    ASSERT_TRUE(th_response_length_matches_body(response));
+    ASSERT_TRUE(parsed);
+    PASS();
+}
+
+TEST(ui_server_browse_json_failures_return_bounded_json_500) {
+    ASSERT_TRUE(th_browse_failure_returns_bounded_json(TH_UI_JSON_FAILURE_CONSTRUCTION));
+    ASSERT_TRUE(th_browse_failure_returns_bounded_json(TH_UI_JSON_FAILURE_SERIALIZATION));
+    PASS();
+}
+
+/* A wide directory response remains complete JSON rather than a truncated
+ * fixed buffer. Run the oversized fixture in a child so an allocation or
+ * serialization failure is isolated from the rest of the test process. */
 TEST(ui_server_browse_wide_dir_no_overflow) {
 #ifdef _WIN32
     SKIP_PLATFORM("fork crash-isolation is POSIX-only; the clamp is platform-agnostic");
@@ -2007,7 +2131,13 @@ TEST(ui_server_browse_wide_dir_no_overflow) {
                  dir, port);
         char *resp = malloc(262144);
         int n = resp ? th_http(port, req, resp, 262144) : 0;
-        int ok = (n > 0 && strstr(resp, "HTTP/1.1 200") != NULL);
+        const char *body = resp ? th_response_body(resp) : NULL;
+        yyjson_doc *doc = body ? yyjson_read(body, strlen(body), 0) : NULL;
+        yyjson_val *root = doc ? yyjson_doc_get_root(doc) : NULL;
+        yyjson_val *dirs = root ? yyjson_obj_get(root, "dirs") : NULL;
+        int ok = n > 0 && th_status(resp) == 200 && th_response_length_matches_body(resp) && root &&
+                 yyjson_is_obj(root) && dirs && yyjson_is_arr(dirs) && yyjson_arr_size(dirs) == 200U;
+        yyjson_doc_free(doc);
         free(resp);
         th_server_stop(&ts);
         _exit(ok ? 0 : 3);
@@ -2189,6 +2319,9 @@ TEST(ui_server_index_status_long_paths_no_overflow) {
 /* ── Suite ────────────────────────────────────────────────────── */
 
 SUITE(httpd) {
+    RUN_TEST(ui_server_browse_json_escapes_runtime_strings);
+    RUN_TEST(ui_server_processes_response_is_valid_json);
+    RUN_TEST(ui_server_browse_json_failures_return_bounded_json_500);
     RUN_TEST(ui_server_browse_wide_dir_no_overflow);
     RUN_TEST(ui_server_logs_escape_dense_no_overflow);
     RUN_TEST(ui_server_index_status_long_paths_no_overflow);

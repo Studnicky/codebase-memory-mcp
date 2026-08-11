@@ -1,7 +1,9 @@
 #include "git/git_context.h"
 
+#include "foundation/compat.h"
 #include "foundation/compat_fs.h"
 #include "foundation/constants.h"
+#include "foundation/subprocess.h"
 #include "foundation/str_util.h"
 
 #include <ctype.h>
@@ -11,10 +13,24 @@
 #include <string.h>
 #include <sys/stat.h>
 
+#ifdef _WIN32
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
+
 enum {
-    GIT_CMD_MAX = 1024,
     GIT_OUTPUT_MAX = 4096,
 };
+
+static const char *const GIT_SHOW_TOPLEVEL[] = {"rev-parse", "--show-toplevel", NULL};
+static const char *const GIT_GIT_DIR[] = {"rev-parse", "--git-dir", NULL};
+static const char *const GIT_GIT_COMMON_DIR[] = {"rev-parse", "--git-common-dir", NULL};
+static const char *const GIT_HEAD[] = {"rev-parse", "--verify", "HEAD", NULL};
+static const char *const GIT_BRANCH[] = {"symbolic-ref", "--quiet", "--short", "HEAD", NULL};
+static const char *const GIT_ABSOLUTE_COMMON_DIR[] = {
+    "rev-parse", "--path-format=absolute", "--git-common-dir", NULL};
+static const char *const GIT_UPSTREAM_BASE[] = {"merge-base", "HEAD", "@{upstream}", NULL};
 
 static char *git_strdup(const char *s) {
     if (!s) {
@@ -43,45 +59,110 @@ static bool git_validate_repo_path(const char *repo_path) {
     return cbm_validate_shell_path_arg(repo_path);
 }
 
-static int git_capture(const char *repo_path, const char *git_args, char **out) {
+static bool git_capture_output_create(char path[CBM_SZ_4K]) {
+    int n = snprintf(path, CBM_SZ_4K, "%s/cbm-git-context-XXXXXX", cbm_tmpdir());
+    if (n <= 0 || n >= CBM_SZ_4K) {
+        path[0] = '\0';
+        return false;
+    }
+    int descriptor = cbm_mkstemp(path);
+    if (descriptor < 0) {
+        path[0] = '\0';
+        return false;
+    }
+#ifdef _WIN32
+    bool closed = _close(descriptor) == 0;
+#else
+    bool closed = close(descriptor) == 0;
+#endif
+    if (!closed) {
+        (void)cbm_unlink(path);
+        path[0] = '\0';
+    }
+    return closed;
+}
+
+static bool git_capture_cancelled(const atomic_int *cancel_requested) {
+    return cancel_requested &&
+           atomic_load_explicit(cancel_requested, memory_order_acquire) != 0;
+}
+
+static int git_capture(const char *repo_path, const char *const *git_args,
+                       const atomic_int *cancel_requested, char **out) {
     if (!out) {
         return CBM_NOT_FOUND;
     }
     *out = NULL;
-    if (!repo_path || !git_args || !git_validate_repo_path(repo_path)) {
+    if (!repo_path || !git_args || !git_args[0] || !git_validate_repo_path(repo_path) ||
+        git_capture_cancelled(cancel_requested)) {
         return CBM_NOT_FOUND;
     }
 
-    char cmd[GIT_CMD_MAX];
-#ifdef _WIN32
-    const char *null_dev = "NUL";
-#else
-    const char *null_dev = "/dev/null";
-#endif
-    /* Double quotes work for POSIX shells and cmd.exe. cbm_validate_shell_arg()
-     * rejects quote/backslash/substitution metacharacters before interpolation. */
-    int n = snprintf(cmd, sizeof(cmd), "git -C \"%s\" %s 2>%s", repo_path, git_args, null_dev);
-    if (n < 0 || n >= (int)sizeof(cmd)) {
+    const char *argv[8] = {"git", "-C", repo_path, NULL, NULL, NULL, NULL, NULL};
+    size_t index = 3;
+    while (git_args[index - 3]) {
+        if (index + 1 >= sizeof(argv) / sizeof(argv[0])) {
+            return CBM_NOT_FOUND;
+        }
+        argv[index] = git_args[index - 3];
+        index++;
+    }
+
+    char output_path[CBM_SZ_4K] = {0};
+    if (!git_capture_output_create(output_path)) {
         return CBM_NOT_FOUND;
     }
 
-    FILE *fp = cbm_popen(cmd, "r");
-    if (!fp) {
+    cbm_proc_opts_t options = {
+        .bin = argv[0],
+        .argv = argv,
+        .log_file = output_path,
+        .quiet_timeout_ms = 0,
+        .cancel_grace_ms = CBM_SUBPROCESS_DEFAULT_CANCEL_GRACE_MS,
+        .delete_log_on_exit = false,
+    };
+    cbm_subprocess_t *process = NULL;
+    if (cbm_subprocess_spawn(&options, &process) != 0) {
+        (void)cbm_unlink(output_path);
         return CBM_NOT_FOUND;
     }
 
+    cbm_proc_result_t result = {0};
+    for (;;) {
+        if (git_capture_cancelled(cancel_requested)) {
+            (void)cbm_subprocess_request_cancel(process);
+        }
+        cbm_proc_poll_t state = cbm_subprocess_poll(process, &result);
+        if (state == CBM_PROC_POLL_TERMINAL) {
+            break;
+        }
+        if (state == CBM_PROC_POLL_ERROR) {
+            (void)cbm_subprocess_request_cancel(process);
+        }
+        cbm_usleep(10000);
+    }
+    cbm_subprocess_destroy(process);
+
+    bool usable = result.tree_quiesced && !result.supervision_failed &&
+                  !result.cancellation_requested && !git_capture_cancelled(cancel_requested) &&
+                  result.outcome == CBM_PROC_CLEAN;
+    FILE *fp = usable ? cbm_fopen(output_path, "rb") : NULL;
     char buf[GIT_OUTPUT_MAX];
-    if (!fgets(buf, sizeof(buf), fp)) {
-        cbm_pclose(fp);
+    bool captured = false;
+    if (fp) {
+        captured = fgets(buf, sizeof(buf), fp) != NULL;
+        captured = fclose(fp) == 0 && captured;
+    }
+    if (!captured) {
+        (void)cbm_unlink(output_path);
         return CBM_NOT_FOUND;
     }
+
     trim_newlines(buf);
-
-    int rc = cbm_pclose(fp);
-    if (rc != 0 || buf[0] == '\0') {
+    (void)cbm_unlink(output_path);
+    if (buf[0] == '\0') {
         return CBM_NOT_FOUND;
     }
-
     *out = git_strdup(buf);
     return *out ? 0 : CBM_NOT_FOUND;
 }
@@ -239,7 +320,8 @@ void cbm_git_context_free(cbm_git_context_t *ctx) {
     memset(ctx, 0, sizeof(*ctx));
 }
 
-int cbm_git_context_resolve(const char *path, cbm_git_context_t *out) {
+int cbm_git_context_resolve_cancellable(const char *path, const atomic_int *cancel_requested,
+                                        cbm_git_context_t *out) {
     if (!out) {
         return CBM_NOT_FOUND;
     }
@@ -260,23 +342,23 @@ int cbm_git_context_resolve(const char *path, cbm_git_context_t *out) {
         return 0;
     }
 
-    if (git_capture(path, "rev-parse --show-toplevel", &out->worktree_root) != 0) {
+    if (git_capture(path, GIT_SHOW_TOPLEVEL, cancel_requested, &out->worktree_root) != 0) {
         out->is_git = false;
         return 0;
     }
     out->is_git = true;
 
-    if (git_capture(path, "rev-parse --git-dir", &out->git_dir) != 0) {
+    if (git_capture(path, GIT_GIT_DIR, cancel_requested, &out->git_dir) != 0) {
         out->git_dir = git_strdup("");
     }
-    if (git_capture(path, "rev-parse --git-common-dir", &out->git_common_dir) != 0) {
+    if (git_capture(path, GIT_GIT_COMMON_DIR, cancel_requested, &out->git_common_dir) != 0) {
         out->git_common_dir = git_strdup("");
     }
-    if (git_capture(path, "rev-parse --verify HEAD", &out->head_sha) != 0) {
+    if (git_capture(path, GIT_HEAD, cancel_requested, &out->head_sha) != 0) {
         out->head_sha = git_strdup("");
     }
 
-    if (git_capture(path, "symbolic-ref --quiet --short HEAD", &out->branch) != 0) {
+    if (git_capture(path, GIT_BRANCH, cancel_requested, &out->branch) != 0) {
         out->branch = git_strdup("DETACHED");
         out->is_detached = true;
     }
@@ -286,12 +368,12 @@ int cbm_git_context_resolve(const char *path, cbm_git_context_t *out) {
     /* git 2.31+ canonical absolute common-dir (best-effort; NULL on older git,
      * where derive_canonical_root falls back to the relative common-dir). */
     char *abs_common_dir = NULL;
-    (void)git_capture(path, "rev-parse --path-format=absolute --git-common-dir", &abs_common_dir);
+    (void)git_capture(path, GIT_ABSOLUTE_COMMON_DIR, cancel_requested, &abs_common_dir);
     out->canonical_root =
         derive_canonical_root(path, out->worktree_root, out->git_common_dir, abs_common_dir);
     free(abs_common_dir);
     out->branch_slug = slug_from_branch(out->branch, out->is_detached);
-    if (git_capture(path, "merge-base HEAD @{upstream}", &out->base_sha) != 0) {
+    if (git_capture(path, GIT_UPSTREAM_BASE, cancel_requested, &out->base_sha) != 0) {
         out->base_sha = git_strdup("");
     }
 
@@ -302,6 +384,10 @@ int cbm_git_context_resolve(const char *path, cbm_git_context_t *out) {
     }
 
     return 0;
+}
+
+int cbm_git_context_resolve(const char *path, cbm_git_context_t *out) {
+    return cbm_git_context_resolve_cancellable(path, NULL, out);
 }
 
 char *cbm_git_context_branch_qn(const char *project_name, const cbm_git_context_t *ctx) {

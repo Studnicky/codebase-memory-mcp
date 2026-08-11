@@ -1627,8 +1627,7 @@ static void parse_powershell_imports(CBMExtractCtx *ctx) {
                     ts_nstack_push_children(&inner, a, c);
                 }
                 if (last_tok && last_tok[0]) {
-                    CBMImport imp = {.local_name = path_last(a, last_tok),
-                                     .module_path = last_tok};
+                    CBMImport imp = {.local_name = path_last(a, last_tok), .module_path = last_tok};
                     cbm_imports_push(&ctx->result->imports, a, imp);
                 }
             }

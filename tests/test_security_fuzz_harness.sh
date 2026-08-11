@@ -41,6 +41,92 @@ if "$ROOT/scripts/security-fuzz.sh" "$ECHO_ONLY" \
     exit 1
 fi
 
+INTERACTIVE_HANG="$WORKDIR/interactive-hang-mcp"
+cat > "$INTERACTIVE_HANG" <<'EOF'
+#!/usr/bin/env bash
+# Acknowledge every file-driven fuzz case, then hang only when the interactive
+# invalid-index probe dispatches its index_repository request.  The harness
+# must apply its wall-clock process-group timeout to that separate probe too.
+while IFS= read -r line; do
+    if [[ "$line" == *'"name":"index_repository"'* ]]; then
+        sleep 30
+    fi
+    id=$(printf '%s\n' "$line" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p')
+    if [[ -n "$id" ]]; then
+        printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
+    fi
+done
+EOF
+chmod +x "$INTERACTIVE_HANG"
+
+interactive_started=$SECONDS
+if CBM_FUZZ_TIMEOUT_SECONDS=1 \
+    "$ROOT/scripts/security-fuzz.sh" "$INTERACTIVE_HANG" \
+    > "$WORKDIR/interactive-hang.out" 2>&1; then
+    echo "FAIL: security-fuzz accepted an interactive index probe that hangs"
+    exit 1
+fi
+interactive_elapsed=$((SECONDS - interactive_started))
+if (( interactive_elapsed > 10 )); then
+    echo "FAIL: security-fuzz did not bound the interactive probe (${interactive_elapsed}s)"
+    exit 1
+fi
+if ! grep -Fq 'index nonexistent path — timed out (hung for 1s)' \
+    "$WORKDIR/interactive-hang.out"; then
+    echo "FAIL: security-fuzz did not report the interactive probe timeout"
+    cat "$WORKDIR/interactive-hang.out"
+    exit 1
+fi
+
+HANG_ONCE="$WORKDIR/hang-once-mcp"
+cat > "$HANG_ONCE" <<'EOF'
+#!/usr/bin/env bash
+# The first fuzz payload has acknowledgement id 900001.  Leave a child running
+# for that request to verify that the harness kills the entire target group;
+# an escaped child writes the supplied marker after the parent timeout.
+# Acknowledge every other request so the regression finishes promptly.
+while IFS= read -r line; do
+    id=$(printf '%s\n' "$line" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p')
+    if [[ "$line" == *'"id":900001'* ]]; then
+        (sleep 3; printf 'leaked\n' > "$CBM_FUZZ_LEAK_MARKER") &
+        sleep 30
+    fi
+    if [[ -n "$id" ]]; then
+        if [[ "$line" == *'"name":"index_repository"'* ]]; then
+            printf '{"jsonrpc":"2.0","id":%s,"result":{"isError":true}}\n' "$id"
+        else
+            printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
+        fi
+    fi
+done
+EOF
+chmod +x "$HANG_ONCE"
+
+timeout_started=$SECONDS
+LEAK_MARKER="$WORKDIR/leaked-child"
+if CBM_FUZZ_TIMEOUT_SECONDS=1 \
+    CBM_FUZZ_LEAK_MARKER="$LEAK_MARKER" \
+    "$ROOT/scripts/security-fuzz.sh" "$HANG_ONCE" \
+    > "$WORKDIR/hang-once.out" 2>&1; then
+    echo "FAIL: security-fuzz accepted a target that hangs after the first payload"
+    exit 1
+fi
+timeout_elapsed=$((SECONDS - timeout_started))
+if (( timeout_elapsed > 10 )); then
+    echo "FAIL: security-fuzz timeout did not bound a hung target (${timeout_elapsed}s)"
+    exit 1
+fi
+if ! grep -Fq 'timed out (hung for 1s)' "$WORKDIR/hang-once.out"; then
+    echo "FAIL: security-fuzz did not report the hung target timeout"
+    cat "$WORKDIR/hang-once.out"
+    exit 1
+fi
+sleep 3
+if [[ -e "$LEAK_MARKER" ]]; then
+    echo "FAIL: security-fuzz left a child process running after timeout"
+    exit 1
+fi
+
 ENV_PROBE="$WORKDIR/environment-probe-mcp"
 cat > "$ENV_PROBE" <<'EOF'
 #!/usr/bin/env bash
@@ -114,4 +200,4 @@ while IFS=$'\t' read -r child_home_raw child_cache_raw; do
     fi
 done < "$ENV_LOG"
 
-echo "PASS: security fuzz harness requires payload progress and isolates HOME/cache"
+echo "PASS: security fuzz harness requires payload progress, bounds hangs, and isolates HOME/cache"

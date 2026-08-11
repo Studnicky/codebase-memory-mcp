@@ -1,144 +1,151 @@
 #!/usr/bin/env bash
-# Contract: scripts/check-complexity.py must ratchet in BOTH directions and
-# never read "found nothing" as "clean".
-#
-# Requires a built binary and a current index for THIS repo (build/c/
-# codebase-memory-mcp indexed as itself) — this gate is not pure static
-# analysis, unlike check-layering.py, so this test skips rather than fails
-# when that prerequisite is missing (a fresh checkout with no build yet is
-# not a gate regression).
-#
-# The negative probes use --query-output to inject a synthetic population
-# query result instead of re-indexing per case (~30s each). The seam only
-# ever substitutes the DATA for the population query; the sanity check that
-# the graph holds Function nodes at all still hits the real binary, so the
-# probes prove the comparison LOGIC without weakening what a real
-# (flag-less) run does.
+# Contract: scripts/check-complexity.py ratchets in both directions and never
+# reads an empty or unavailable index as a clean graph. Fixtures replace both
+# query responses, so this unit contract needs neither a built binary nor an
+# indexed checkout; pr.yml separately runs the real post-build live gate.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 GATE="$ROOT/scripts/check-complexity.py"
-BINARY="$ROOT/build/c/codebase-memory-mcp"
-[ -x "$BINARY" ] || BINARY="$ROOT/build/c/codebase-memory-mcp.exe"
-
-if [ ! -x "$BINARY" ]; then
-    echo "SKIP: no built binary at build/c/codebase-memory-mcp — build first" >&2
-    exit 0
-fi
-
+# The checker validates that a binary path exists before accepting either test
+# seam. Its own source file is a stable existing path while fixtures prevent
+# any subprocess invocation; the missing-binary probes below cover rejection.
+FIXTURE_BINARY="$GATE"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
-# ---- 0. Live population, captured once, reused by the injection probes ----
-REAL_POP="$WORK/real_pop.txt"
-python3 "$GATE" --binary "$BINARY" --report >/dev/null 2>"$WORK/report_stderr.txt" \
-    || fail "baseline --report failed (index missing? see $WORK/report_stderr.txt)"
+python3 - "$WORK" <<'PY'
+from pathlib import Path
+import sys
 
-# Recover the raw query_graph rows the gate itself would have queried, by
-# asking the same binary/project the gate resolves internally.
-PROJECT="$(python3 - "$GATE" "$ROOT" <<'PY'
-import importlib.util, sys
-spec = importlib.util.spec_from_file_location("gate", sys.argv[1])
-gate = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(gate)
-print(gate.project_key_from_path(sys.argv[2]))
+work = Path(sys.argv[1])
+(work / "sanity.txt").write_text('rows: 1  (cols: c)\n  "1"\ntotal: 1\n')
+(work / "empty-index.txt").write_text('rows: 0  (cols: c)\ntotal: 0\n')
+(work / "clean.txt").write_text(
+    'rows: 0  (cols: qualified_name file_path complexity)\ntotal: 0\n')
+(work / "violation.txt").write_text(
+    'rows: 1  (cols: qualified_name file_path complexity)\n'
+    '  fixture.module.very_complex fixture.c "999"\n'
+    'total: 1\n')
+(work / "allowed.allow").write_text('fixture.c:very_complex\n')
+(work / "stale.allow").write_text('fixture.c:removed_complexity\n')
+(work / "malformed.allow").write_text('not-a-valid-allow-entry\n')
 PY
-)"
-"$BINARY" cli query_graph --project "$PROJECT" --query \
-    "MATCH (n:Function) WHERE n.complexity > 60 AND NOT n.file_path CONTAINS 'tools/tree-sitter' AND NOT n.file_path CONTAINS 'generated' RETURN n.qualified_name, n.file_path, n.complexity ORDER BY n.complexity DESC" \
-    2>/dev/null > "$REAL_POP"
-grep -q "^rows:" "$REAL_POP" || fail "could not capture the live population (is the repo indexed?)"
 
-# ---- 1. Clean tree passes ----
-if ! python3 "$GATE" --binary "$BINARY" >/dev/null 2>"$WORK/clean_stderr.txt"; then
-    fail "clean tree did not exit 0 (see $WORK/clean_stderr.txt)"
-fi
-echo "PASS: clean tree exits 0"
+SANITY="$WORK/sanity.txt"
+EMPTY_INDEX="$WORK/empty-index.txt"
+CLEAN="$WORK/clean.txt"
+VIOLATION="$WORK/violation.txt"
+EMPTY_ALLOW="$WORK/empty.allow"
+ALLOWED="$WORK/allowed.allow"
+STALE="$WORK/stale.allow"
+MALFORMED="$WORK/malformed.allow"
 
-# ---- 2. New violation: a function over threshold absent from the allow-list ----
-python3 - "$REAL_POP" "$WORK/injected.txt" <<'PY'
-import re, sys
-lines = open(sys.argv[1]).read().splitlines()
-m = re.match(r"^rows:\s*(\d+)\s*\(cols:(.*)\)\s*$", lines[0])
-n, cols = int(m.group(1)), m.group(2)
-body = lines[1:1 + n]
-body.append('  fake-project.fake_module.fake_over_threshold_fn fake_module.c "999"')
-n2 = n + 1
-out = [f"rows: {n2}  (cols:{cols})"] + body + [f"total: {n2}"]
-open(sys.argv[2], "w").write("\n".join(out) + "\n")
+# The changes job must route every file that can weaken this gate through the
+# post-build PR smoke leg. Pull the exact ERE from the workflow and exercise
+# it rather than keeping a second classifier in this contract.
+PRODUCT_PATTERN="$(sed -n "s/.*grep -qE '\\(.*\\)'; then/\\1/p" .github/workflows/pr.yml)"
+[ -n "$PRODUCT_PATTERN" ] || fail "could not extract product-change pattern from .github/workflows/pr.yml"
+for control in \
+    complexity.allow \
+    scripts/check-complexity.py \
+    scripts/test.sh \
+    tests/test_complexity_gate_contract.sh \
+    .github/workflows/pr.yml; do
+    printf '%s\n' "$control" | grep -qE "$PRODUCT_PATTERN" \
+        || fail "product-change classifier does not route $control through pr-smoke"
+done
+echo "PASS: every complexity-gate control triggers product PR smoke"
+
+# The real, flag-less gate stays after the Ubuntu production build and current
+# repository index command. The fixture seams above are absent from this step.
+python3 - "$ROOT/.github/workflows/pr.yml" <<'PY' || fail "workflow does not run the live complexity gate after build and index"
+import sys
+
+workflow = open(sys.argv[1], encoding="utf-8").read()
+build = workflow.index('scripts/build.sh CC=gcc CXX=g++')
+index = workflow.index('cli index_repository --repo-path "$(pwd)" --mode full')
+gate = workflow.index('python3 scripts/check-complexity.py --binary "$BIN"')
+if not build < index < gate:
+    raise SystemExit('complexity gate is not ordered after build and index')
 PY
-if python3 "$GATE" --binary "$BINARY" --query-output "$WORK/injected.txt" \
-        >"$WORK/new_violation_out.txt" 2>&1; then
-    fail "a function over threshold not in the allow-list did not fail the gate"
-fi
-grep -q "fake_module.c:fake_over_threshold_fn" "$WORK/new_violation_out.txt" \
-    || fail "new-violation failure did not name the offending function"
-echo "PASS: new violation over threshold, absent from allow-list, fails the gate"
+echo "PASS: PR workflow indexes the post-build live binary before complexity comparison"
 
-# ---- 3. Stale entry: allow-list line survives after its function drops out
-#         of the over-threshold population (deleted, or fixed below 60 —
-#         both look identical to the gate: the row is simply gone) ----
-python3 - "$REAL_POP" "$WORK/one_dropped.txt" <<'PY'
-import re, sys
-lines = open(sys.argv[1]).read().splitlines()
-m = re.match(r"^rows:\s*(\d+)\s*\(cols:(.*)\)\s*$", lines[0])
-n, cols = int(m.group(1)), m.group(2)
-body = lines[1:1 + n]
-before = len(body)
-body = [l for l in body if "cs_eval_expr_type" not in l]
-if len(body) != before - 1:
-    sys.exit("fixture error: expected to drop exactly one row (cs_eval_expr_type)")
-n2 = len(body)
-out = [f"rows: {n2}  (cols:{cols})"] + body + [f"total: {n2}"]
-open(sys.argv[2], "w").write("\n".join(out) + "\n")
-PY
-if python3 "$GATE" --binary "$BINARY" --query-output "$WORK/one_dropped.txt" \
-        >"$WORK/stale_out.txt" 2>&1; then
-    fail "an allow-list entry whose function dropped below threshold did not fail the gate"
-fi
-grep -q "STALE" "$WORK/stale_out.txt" || fail "stale-entry failure did not report STALE"
-grep -q "cs_lsp.c:cs_eval_expr_type" "$WORK/stale_out.txt" \
-    || fail "stale-entry failure did not name the surviving-but-unneeded line"
-echo "PASS: allow-list entry outliving its function (deleted OR fixed below threshold) fails the gate"
-
-# ---- 4. Deleting a still-over-threshold line from the real allow-list fails ----
-cp "$ROOT/complexity.allow" "$WORK/complexity.allow.orig"
-grep -v ":c_eval_expr_type_inner" "$ROOT/complexity.allow" > "$WORK/complexity.allow.trimmed"
-if python3 "$GATE" --binary "$BINARY" --allow "$WORK/complexity.allow.trimmed" \
-        >"$WORK/deleted_line_out.txt" 2>&1; then
-    fail "deleting a still-over-threshold allow-list line did not fail the gate"
-fi
-grep -q "c_lsp.c:c_eval_expr_type_inner" "$WORK/deleted_line_out.txt" \
-    || fail "deleted-line failure did not name the now-unlisted function"
-echo "PASS: deleting a still-over-threshold allow-list line fails the gate"
-
-# ---- 5. A malformed allow-list line fails, not a silent skip ----
-cp "$ROOT/complexity.allow" "$WORK/complexity.allow.malformed"
-echo "this-line-has-no-colon-separator" >> "$WORK/complexity.allow.malformed"
-if python3 "$GATE" --binary "$BINARY" --allow "$WORK/complexity.allow.malformed" \
-        >"$WORK/malformed_out.txt" 2>&1; then
-    fail "a malformed allow-list line did not fail the gate"
-fi
-grep -q "MALFORMED" "$WORK/malformed_out.txt" || fail "malformed-line failure did not report MALFORMED"
-echo "PASS: a malformed allow-list line fails the gate rather than being silently skipped"
-
-# ---- 6. Missing binary fails loudly, never exits 0 on 'nothing to check' ----
-if python3 "$GATE" --binary "$WORK/no-such-binary" >"$WORK/missing_binary_out.txt" 2>&1; then
+# Missing binary is always fatal, including when both fixture seams are set.
+if python3 "$GATE" --binary "$WORK/no-such-binary" \
+        --sanity-query-output "$SANITY" --query-output "$CLEAN" \
+        >"$WORK/missing-binary.out" 2>&1; then
     fail "a missing binary did not fail the gate"
 fi
-grep -q "MISSING" "$WORK/missing_binary_out.txt" || fail "missing-binary failure did not report MISSING"
-echo "PASS: a missing binary fails the gate loudly"
+grep -q "MISSING" "$WORK/missing-binary.out" \
+    || fail "missing-binary failure did not report MISSING"
+echo "PASS: missing binary fails before either fixture seam can bypass it"
 
-# ---- 7. Missing/empty index fails loudly, never exits 0 on 'nothing to check' ----
-if python3 "$GATE" --binary "$BINARY" --project "definitely-not-an-indexed-project-xyz" \
-        >"$WORK/missing_index_out.txt" 2>&1; then
-    fail "a missing/unindexed project did not fail the gate"
+# Clean graph: the Function-node sanity result is nonzero and no function
+# exceeds the threshold, so an empty allow-list passes.
+if ! python3 "$GATE" --binary "$FIXTURE_BINARY" \
+        --sanity-query-output "$SANITY" --query-output "$CLEAN" \
+        --allow "$EMPTY_ALLOW" >"$WORK/clean.out" 2>&1; then
+    fail "clean fixture did not pass the gate"
 fi
-grep -q "MISSING" "$WORK/missing_index_out.txt" || fail "missing-index failure did not report MISSING"
-echo "PASS: a missing/unindexed project fails the gate loudly rather than reading empty as clean"
+grep -q "OK: 0 function(s)" "$WORK/clean.out" \
+    || fail "clean fixture did not report the successful comparison"
+echo "PASS: clean population passes"
 
-echo "PASS: complexity gate contract — ratchets both directions, malformed lines are hard errors, empty is never clean"
+# New violation: an over-threshold function without an allow-list entry fails.
+if python3 "$GATE" --binary "$FIXTURE_BINARY" \
+        --sanity-query-output "$SANITY" --query-output "$VIOLATION" \
+        --allow "$EMPTY_ALLOW" >"$WORK/new.out" 2>&1; then
+    fail "unauthorized over-threshold function did not fail the gate"
+fi
+grep -q "fixture.c:very_complex" "$WORK/new.out" \
+    || fail "new-violation failure did not name the function"
+echo "PASS: unauthorized new violation fails"
+
+# The exact same population succeeds when its one allowed exception is present.
+if ! python3 "$GATE" --binary "$FIXTURE_BINARY" \
+        --sanity-query-output "$SANITY" --query-output "$VIOLATION" \
+        --allow "$ALLOWED" >"$WORK/allowed.out" 2>&1; then
+    fail "allow-listed population did not pass the gate"
+fi
+grep -q "OK: 1 function(s)" "$WORK/allowed.out" \
+    || fail "allow-listed population did not report successful comparison"
+echo "PASS: matching allow-list entry passes"
+
+# A permission with no corresponding over-threshold row is stale and fails.
+if python3 "$GATE" --binary "$FIXTURE_BINARY" \
+        --sanity-query-output "$SANITY" --query-output "$CLEAN" \
+        --allow "$STALE" >"$WORK/stale.out" 2>&1; then
+    fail "stale allow-list entry did not fail the gate"
+fi
+grep -q "STALE" "$WORK/stale.out" || fail "stale failure did not report STALE"
+grep -q "fixture.c:removed_complexity" "$WORK/stale.out" \
+    || fail "stale failure did not name the entry"
+echo "PASS: stale allow-list entry fails"
+
+# A malformed entry is a hard error even when the population is otherwise clean.
+if python3 "$GATE" --binary "$FIXTURE_BINARY" \
+        --sanity-query-output "$SANITY" --query-output "$CLEAN" \
+        --allow "$MALFORMED" >"$WORK/malformed.out" 2>&1; then
+    fail "malformed allow-list entry did not fail the gate"
+fi
+grep -q "MALFORMED" "$WORK/malformed.out" \
+    || fail "malformed failure did not report MALFORMED"
+echo "PASS: malformed allow-list entry fails"
+
+# Empty Function-node sanity output models an absent or empty index. It must
+# fail before the clean population can be mistaken for a clean graph.
+if python3 "$GATE" --binary "$FIXTURE_BINARY" \
+        --sanity-query-output "$EMPTY_INDEX" --query-output "$CLEAN" \
+        --allow "$EMPTY_ALLOW" >"$WORK/empty-index.out" 2>&1; then
+    fail "empty index did not fail the gate"
+fi
+grep -q "MISSING" "$WORK/empty-index.out" \
+    || fail "empty-index failure did not report MISSING"
+echo "PASS: empty or missing index fails rather than reading clean"
+
+echo "PASS: complexity gate contract — clean, new, allowed, stale, malformed, and empty-index cases covered"

@@ -11,6 +11,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "foundation/constants.h"
+
 /* ── Attribute key-value pair ─────────────────────────────────────── */
 
 typedef struct {
@@ -44,6 +46,7 @@ typedef struct {
     const char *status_code;
     int span_kind;
     int64_t duration_ns;
+    char url_path[CBM_SZ_1K];
 } cbm_http_span_info_t;
 
 /* ── Helper functions ─────────────────────────────────────────────── */
@@ -52,8 +55,9 @@ typedef struct {
 const char *cbm_extract_service_name(const cbm_trace_resource_t *r);
 
 /* Extract HTTP info from a span. Returns true if HTTP span, false otherwise.
- * Fills out with method, path, status, duration. Caller owns string pointers
- * (they point to data within the span's attribute strings — NOT heap-allocated). */
+ * Direct attribute values borrow the span and remain valid while its attributes
+ * remain valid. A path derived from url.full is stored in out->url_path and
+ * out->path points to that result-owned storage until out is modified. */
 bool cbm_extract_http_info(const cbm_trace_span_t *span, const char *service_name,
                            cbm_http_span_info_t *out);
 
