@@ -10,7 +10,18 @@
 #include <stdlib.h>
 #include <string.h>
 
-enum { PRIVATE_FILE_LOCK_PAYLOAD_CAP = 4096 };
+enum {
+    PRIVATE_FILE_LOCK_PAYLOAD_CAP = 4096,
+    PRIVATE_FILE_LOCK_INITIALIZATION_COUNT = 1,
+    PRIVATE_FILE_LOCK_REQUIRED_LINK_COUNT = 1,
+    PRIVATE_FILE_LOCK_INVALID_FD = -1,
+    PRIVATE_FILE_LOCK_OPERATION_FAILED = -1,
+    PRIVATE_FILE_LOCK_MILLISECONDS_PER_SECOND = 1000U,
+    PRIVATE_FILE_LOCK_NANOSECONDS_PER_MILLISECOND = 1000000U,
+    PRIVATE_FILE_LOCK_PERMISSION_BITS = 07777,
+    PRIVATE_FILE_LOCK_DIRECTORY_MODE = 0700,
+    PRIVATE_FILE_LOCK_FILE_MODE = 0600,
+};
 
 #ifndef _WIN32
 
@@ -55,7 +66,7 @@ struct cbm_private_fork_condition {
 static pthread_once_t private_atfork_once = PTHREAD_ONCE_INIT;
 static pthread_mutex_t private_fork_mutex = PTHREAD_MUTEX_INITIALIZER;
 static cbm_private_file_lock_t *private_tracked_locks;
-static int private_atfork_status = -1;
+static int private_atfork_status = PRIVATE_FILE_LOCK_OPERATION_FAILED;
 
 static void private_atfork_prepare(void) {
     (void)pthread_mutex_lock(&private_fork_mutex);
@@ -72,7 +83,7 @@ static void private_atfork_child(void) {
             /* Never LOCK_UN in the child: its descriptor references the same
              * flock description as the parent's still-live descriptor. */
             (void)close(lock->fd);
-            lock->fd = -1;
+            lock->fd = PRIVATE_FILE_LOCK_INVALID_FD;
         }
         lock = lock->next_tracked;
     }
@@ -99,7 +110,8 @@ void cbm_private_file_lock_fork_guard_leave(void) {
 }
 
 cbm_private_fork_condition_t *cbm_private_fork_condition_new(void) {
-    cbm_private_fork_condition_t *condition = calloc(1, sizeof(*condition));
+    cbm_private_fork_condition_t *condition =
+        calloc(PRIVATE_FILE_LOCK_INITIALIZATION_COUNT, sizeof(*condition));
     pthread_condattr_t attributes;
     if (!condition || pthread_condattr_init(&attributes) != 0) {
         free(condition);
@@ -148,13 +160,15 @@ cbm_private_fork_wait_status_t cbm_private_fork_condition_wait_until_while_guard
 #ifdef __APPLE__
         uint64_t now_ms = cbm_now_ms();
         uint64_t remaining_ms = deadline_ms > now_ms ? deadline_ms - now_ms : 0;
-        timeout.tv_sec = (time_t)(remaining_ms / 1000U);
-        timeout.tv_nsec = (long)((remaining_ms % 1000U) * 1000000U);
+        timeout.tv_sec = (time_t)(remaining_ms / PRIVATE_FILE_LOCK_MILLISECONDS_PER_SECOND);
+        timeout.tv_nsec = (long)((remaining_ms % PRIVATE_FILE_LOCK_MILLISECONDS_PER_SECOND) *
+                                 PRIVATE_FILE_LOCK_NANOSECONDS_PER_MILLISECOND);
         status =
             pthread_cond_timedwait_relative_np(&condition->value, &private_fork_mutex, &timeout);
 #else
-        timeout.tv_sec = (time_t)(deadline_ms / 1000U);
-        timeout.tv_nsec = (long)((deadline_ms % 1000U) * 1000000U);
+        timeout.tv_sec = (time_t)(deadline_ms / PRIVATE_FILE_LOCK_MILLISECONDS_PER_SECOND);
+        timeout.tv_nsec = (long)((deadline_ms % PRIVATE_FILE_LOCK_MILLISECONDS_PER_SECOND) *
+                                 PRIVATE_FILE_LOCK_NANOSECONDS_PER_MILLISECOND);
         status = pthread_cond_timedwait(&condition->value, &private_fork_mutex, &timeout);
 #endif
     }
@@ -178,7 +192,10 @@ static bool private_directory_revalidate(const cbm_private_lock_directory_t *dir
            by_handle.st_dev == directory->device && by_handle.st_ino == directory->inode &&
            by_path.st_dev == directory->device && by_path.st_ino == directory->inode &&
            by_handle.st_uid == geteuid() && by_path.st_uid == geteuid() &&
-           (by_handle.st_mode & 07777) == 0700 && (by_path.st_mode & 07777) == 0700 &&
+           (by_handle.st_mode & PRIVATE_FILE_LOCK_PERMISSION_BITS) ==
+               PRIVATE_FILE_LOCK_DIRECTORY_MODE &&
+           (by_path.st_mode & PRIVATE_FILE_LOCK_PERMISSION_BITS) ==
+               PRIVATE_FILE_LOCK_DIRECTORY_MODE &&
            cbm_macos_extended_acl_fd_is_empty(directory->fd);
 }
 
@@ -206,12 +223,15 @@ static bool private_file_revalidate(const cbm_private_lock_directory_t *director
     struct stat by_handle;
     struct stat by_path;
     return private_directory_revalidate(directory) && fstat(fd, &by_handle) == 0 &&
-           S_ISREG(by_handle.st_mode) && by_handle.st_uid == geteuid() && by_handle.st_nlink == 1 &&
-           (by_handle.st_mode & 07777) == 0600 &&
+           S_ISREG(by_handle.st_mode) && by_handle.st_uid == geteuid() &&
+           by_handle.st_nlink == PRIVATE_FILE_LOCK_REQUIRED_LINK_COUNT &&
+           (by_handle.st_mode & PRIVATE_FILE_LOCK_PERMISSION_BITS) == PRIVATE_FILE_LOCK_FILE_MODE &&
            fstatat(directory->fd, base_name, &by_path, AT_SYMLINK_NOFOLLOW) == 0 &&
-           S_ISREG(by_path.st_mode) && by_path.st_uid == geteuid() && by_path.st_nlink == 1 &&
-           (by_path.st_mode & 07777) == 0600 && by_path.st_dev == by_handle.st_dev &&
-           by_path.st_ino == by_handle.st_ino && cbm_macos_extended_acl_fd_is_empty(fd) &&
+           S_ISREG(by_path.st_mode) && by_path.st_uid == geteuid() &&
+           by_path.st_nlink == PRIVATE_FILE_LOCK_REQUIRED_LINK_COUNT &&
+           (by_path.st_mode & PRIVATE_FILE_LOCK_PERMISSION_BITS) == PRIVATE_FILE_LOCK_FILE_MODE &&
+           by_path.st_dev == by_handle.st_dev && by_path.st_ino == by_handle.st_ino &&
+           cbm_macos_extended_acl_fd_is_empty(fd) &&
            (!expected ||
             (expected->st_dev == by_handle.st_dev && expected->st_ino == by_handle.st_ino));
 }
@@ -223,6 +243,21 @@ static cbm_private_file_lock_status_t private_open_failure_status(
         return CBM_PRIVATE_FILE_LOCK_UNSAFE;
     }
     return errno == ENOENT ? CBM_PRIVATE_FILE_LOCK_IO : CBM_PRIVATE_FILE_LOCK_UNSAFE;
+}
+
+static int private_lock_file_open(const cbm_private_lock_directory_t *directory,
+                                  const char *base_name, bool *created_out) {
+    int flags = O_RDWR | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK;
+    int fd =
+        openat(directory->fd, base_name, flags | O_CREAT | O_EXCL, PRIVATE_FILE_LOCK_FILE_MODE);
+    if (fd >= 0) {
+        *created_out = true;
+        return fd;
+    }
+    if (errno == EEXIST) {
+        return openat(directory->fd, base_name, flags);
+    }
+    return PRIVATE_FILE_LOCK_INVALID_FD;
 }
 
 static int private_flock_set(int fd, int operation) {
@@ -238,7 +273,7 @@ static int private_release_unlock(cbm_private_file_lock_t *lock) {
     if (lock->test_fail_unlock_once) {
         lock->test_fail_unlock_once = false;
         errno = EIO;
-        return -1;
+        return PRIVATE_FILE_LOCK_OPERATION_FAILED;
     }
     return private_flock_set(lock->fd, LOCK_UN);
 }
@@ -249,14 +284,14 @@ static int private_release_close(cbm_private_file_lock_t *lock, bool *attempted_
     if (lock->test_fail_close_once) {
         lock->test_fail_close_once = false;
         errno = EIO;
-        return -1;
+        return PRIVATE_FILE_LOCK_OPERATION_FAILED;
     }
     *attempted_out = true;
     if (lock->test_fail_close_after_consuming_once) {
         lock->test_fail_close_after_consuming_once = false;
         (void)close(lock->fd);
         errno = EIO;
-        return -1;
+        return PRIVATE_FILE_LOCK_OPERATION_FAILED;
     }
     return close(lock->fd);
 }
@@ -274,12 +309,15 @@ cbm_private_file_lock_status_t cbm_private_lock_directory_adopt_posix(
     struct stat by_path;
     if (fstat(directory_fd, &status) != 0 || lstat(stable_path, &by_path) != 0 ||
         !S_ISDIR(status.st_mode) || !S_ISDIR(by_path.st_mode) || status.st_uid != geteuid() ||
-        by_path.st_uid != geteuid() || (status.st_mode & 07777) != 0700 ||
-        (by_path.st_mode & 07777) != 0700 || status.st_dev != by_path.st_dev ||
-        status.st_ino != by_path.st_ino || !cbm_macos_extended_acl_fd_is_empty(directory_fd)) {
+        by_path.st_uid != geteuid() ||
+        (status.st_mode & PRIVATE_FILE_LOCK_PERMISSION_BITS) != PRIVATE_FILE_LOCK_DIRECTORY_MODE ||
+        (by_path.st_mode & PRIVATE_FILE_LOCK_PERMISSION_BITS) != PRIVATE_FILE_LOCK_DIRECTORY_MODE ||
+        status.st_dev != by_path.st_dev || status.st_ino != by_path.st_ino ||
+        !cbm_macos_extended_acl_fd_is_empty(directory_fd)) {
         return CBM_PRIVATE_FILE_LOCK_UNSAFE;
     }
-    cbm_private_lock_directory_t *directory = calloc(1, sizeof(*directory));
+    cbm_private_lock_directory_t *directory =
+        calloc(PRIVATE_FILE_LOCK_INITIALIZATION_COUNT, sizeof(*directory));
     if (directory) {
         directory->path = strdup(stable_path);
     }
@@ -312,14 +350,8 @@ cbm_private_file_lock_status_t cbm_private_file_lock_try_acquire(
         return CBM_PRIVATE_FILE_LOCK_IO;
     }
 
-    int flags = O_RDWR | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK;
     bool created = false;
-    int fd = openat(directory->fd, base_name, flags | O_CREAT | O_EXCL, 0600);
-    if (fd >= 0) {
-        created = true;
-    } else if (errno == EEXIST) {
-        fd = openat(directory->fd, base_name, flags);
-    }
+    int fd = private_lock_file_open(directory, base_name, &created);
     if (fd < 0) {
         cbm_private_file_lock_status_t status = private_open_failure_status(directory, base_name);
         cbm_private_file_lock_fork_guard_leave();
@@ -329,7 +361,7 @@ cbm_private_file_lock_status_t cbm_private_file_lock_try_acquire(
     struct stat initial;
     bool initial_ok = private_fd_set_cloexec(fd) && fstat(fd, &initial) == 0;
     if (initial_ok && created) {
-        initial_ok = fchmod(fd, 0600) == 0 && fstat(fd, &initial) == 0;
+        initial_ok = fchmod(fd, PRIVATE_FILE_LOCK_FILE_MODE) == 0 && fstat(fd, &initial) == 0;
     }
     if (!initial_ok || !private_file_revalidate(directory, base_name, fd, &initial)) {
         (void)close(fd);
@@ -337,7 +369,7 @@ cbm_private_file_lock_status_t cbm_private_file_lock_try_acquire(
         return CBM_PRIVATE_FILE_LOCK_UNSAFE;
     }
 
-    cbm_private_file_lock_t *lock = calloc(1, sizeof(*lock));
+    cbm_private_file_lock_t *lock = calloc(PRIVATE_FILE_LOCK_INITIALIZATION_COUNT, sizeof(*lock));
     if (!lock) {
         (void)close(fd);
         cbm_private_file_lock_fork_guard_leave();
@@ -393,11 +425,12 @@ static bool private_lock_is_tracked(const cbm_private_file_lock_t *lock) {
 
 static bool private_payload_fd_valid(const cbm_private_file_lock_t *lock, struct stat *status_out) {
     struct stat status;
-    bool valid = lock && lock->fd >= 0 && !lock->unlocked && lock->owner_pid == getpid() &&
-                 private_lock_is_tracked(lock) && fstat(lock->fd, &status) == 0 &&
-                 S_ISREG(status.st_mode) && status.st_uid == geteuid() && status.st_nlink == 1 &&
-                 (status.st_mode & 07777) == 0600 && status.st_size >= 0 &&
-                 cbm_macos_extended_acl_fd_is_empty(lock->fd);
+    bool valid =
+        lock && lock->fd >= 0 && !lock->unlocked && lock->owner_pid == getpid() &&
+        private_lock_is_tracked(lock) && fstat(lock->fd, &status) == 0 && S_ISREG(status.st_mode) &&
+        status.st_uid == geteuid() && status.st_nlink == PRIVATE_FILE_LOCK_REQUIRED_LINK_COUNT &&
+        (status.st_mode & PRIVATE_FILE_LOCK_PERMISSION_BITS) == PRIVATE_FILE_LOCK_FILE_MODE &&
+        status.st_size >= 0 && cbm_macos_extended_acl_fd_is_empty(lock->fd);
     if (valid && status_out) {
         *status_out = status;
     }
@@ -517,7 +550,7 @@ cbm_private_file_lock_status_t cbm_private_file_lock_release(cbm_private_file_lo
         cbm_private_file_lock_fork_guard_leave();
         return CBM_PRIVATE_FILE_LOCK_IO;
     }
-    lock->fd = -1;
+    lock->fd = PRIVATE_FILE_LOCK_INVALID_FD;
     *cursor = lock->next_tracked;
     cbm_private_file_lock_fork_guard_leave();
     *lock_io = NULL;
@@ -602,7 +635,7 @@ bool cbm_private_file_lock_fail_close_after_consuming_for_test(cbm_private_file_
 }
 
 int cbm_private_file_lock_native_fd_for_test(const cbm_private_file_lock_t *lock) {
-    return lock ? lock->fd : -1;
+    return lock ? lock->fd : PRIVATE_FILE_LOCK_INVALID_FD;
 }
 
 #else

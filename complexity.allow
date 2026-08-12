@@ -27,10 +27,7 @@ internal/cbm/lsp/c_lsp.c:c_resolve_calls_in_node_inner         # 172
 internal/cbm/lsp/py_lsp.c:py_eval_expr_type_uncached           # 148
 internal/cbm/lsp/c_lsp.c:c_process_statement                   # 143
 internal/cbm/lsp/go_lsp.c:go_eval_expr_type                    # 122
-internal/cbm/extract_defs.c:cbm_resolve_func_name               # 112
 internal/cbm/lsp/rust_lsp.c:cbm_rust_build_local_registry       # 106
-internal/cbm/extract_defs.c:extract_class_def                   # 96
-src/mcp/mcp.c:handle_get_architecture                            # 90
 internal/cbm/lsp/kotlin_lsp.c:kt_repair_bodyless_interface_methods # 89
 internal/cbm/lsp/go_lsp.c:resolve_calls_in_node_inner            # 85
 internal/cbm/extract_imports.c:cbm_extract_imports               # 83
@@ -46,8 +43,4 @@ internal/cbm/lsp/py_lsp.c:py_process_statement                   # 66
 internal/cbm/lsp/php_lsp.c:apply_phpdoc_class_tags               # 65
 internal/cbm/lsp/rust_lsp.c:rust_resolve_calls_in_node           # 65
 internal/cbm/lsp/ts_lsp.c:ts_eval_expr_type                      # 65
-internal/cbm/cbm.c:cbm_extract_file_ex                           # 62
-internal/cbm/extract_defs.c:extract_base_classes                 # 62
-src/pipeline/pipeline_incremental.c:run_closure_delta             # 61
 internal/cbm/lsp/cs_lsp.c:cs_eval_expr_type                      # 61
-internal/cbm/extract_calls.c:extract_callee_lang_specific         # 61

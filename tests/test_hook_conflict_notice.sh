@@ -5,22 +5,8 @@
 # silence in-session. Requires a TEST_SEAMS=1 binary (scripts/test.sh step 5
 # builds one): CBM_TEST_HOOK_CLIENT_BUILD forces the client fingerprint.
 #
-# STATUS: LOCAL-ONLY, NOT WIRED INTO scripts/test.sh (see the Step 5d comment
-# there). WHY: on every CI leg this test's forced client/daemon build mismatch
-# produces no cohort conflict, so the notice under test is never triggered and
-# the assertion fails for a reason unrelated to the fix.
-# WHAT WAS TRIED (2026-08-05, PR #1441):
-#   - hardened the probe loop to wait for the asserted state with a bounded
-#     backstop instead of a single post-start probe (cohort join is async);
-#   - asserted the seam's presence in the binary up front, mirroring
-#     tests/test_worker_watchdog.sh - the seam IS present on CI;
-#   - replaced a `seq`-derived fingerprint with a length-checked literal, in
-#     case `seq` was absent on a leg - it was not the cause;
-#   - dumped stdout, the forced fingerprint, and `daemon status` on expiry:
-#     the daemon is active on a DIFFERENT build fingerprint, yet the forced
-#     client still joins without a conflict, which does not happen locally.
-# The remaining suspect is the cohort admission path behaving differently under
-# the CI environment; that is recorded as a follow-up rather than papered over.
+# The canonical test gate runs this test with the seam-enabled production
+# binary built during Step 5.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

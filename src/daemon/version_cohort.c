@@ -25,8 +25,10 @@
 #endif
 
 enum {
+    VERSION_COHORT_SINGLE_OBJECT = 1U,
     VERSION_COHORT_RETRY_US = 1000,
     VERSION_COHORT_CLEANUP_TIMEOUT_MS = 500,
+    VERSION_COHORT_JITTER_MULTIPLIER = 2654435761ULL,
     VERSION_COHORT_RECORD_MAGIC_SIZE = 8,
     VERSION_COHORT_RECORD_VERSION_OFFSET = VERSION_COHORT_RECORD_MAGIC_SIZE,
     VERSION_COHORT_RECORD_BUILD_OFFSET =
@@ -40,6 +42,20 @@ enum {
     VERSION_COHORT_RECORD_SIZE = VERSION_COHORT_RECORD_FEATURE_OFFSET + 4,
     VERSION_COHORT_LOG_CAP = 1024 * 1024,
     VERSION_COHORT_PATH_CAP = 4096,
+    VERSION_COHORT_LENGTH_TEXT_CAP = 16,
+    VERSION_COHORT_U32_BYTE_COUNT = sizeof(uint32_t),
+    VERSION_COHORT_U32_LOW_BYTE_MASK = UINT8_MAX,
+    VERSION_COHORT_U32_BYTE_0 = 0,
+    VERSION_COHORT_U32_BYTE_1 = 1,
+    VERSION_COHORT_U32_BYTE_2 = 2,
+    VERSION_COHORT_U32_BYTE_3 = 3,
+    VERSION_COHORT_U32_SHIFT_0 = 0,
+    VERSION_COHORT_U32_SHIFT_1 = 8,
+    VERSION_COHORT_U32_SHIFT_2 = 16,
+    VERSION_COHORT_U32_SHIFT_3 = 24,
+    VERSION_COHORT_STRING_TERMINATOR_BYTES = 1U,
+    VERSION_COHORT_IPC_PROBE_ABSENT = 0,
+    VERSION_COHORT_IPC_PROBE_ACTIVE = 1,
 };
 
 static const unsigned char VERSION_COHORT_RECORD_MAGIC[VERSION_COHORT_RECORD_MAGIC_SIZE] = {
@@ -91,7 +107,7 @@ static uint64_t version_cohort_deadline_after(uint32_t timeout_ms) {
  * window — starving an EX acquisition until one side's budget expires. A
  * per-process, time-scattered jitter decorrelates the schedules. */
 static void version_cohort_retry_sleep(void) {
-    uint64_t mix = (cbm_now_ms() + version_cohort_current_pid()) * 2654435761ULL;
+    uint64_t mix = (cbm_now_ms() + version_cohort_current_pid()) * VERSION_COHORT_JITTER_MULTIPLIER;
     cbm_usleep((VERSION_COHORT_RETRY_US / 2U) + (uint32_t)(mix % VERSION_COHORT_RETRY_US));
 }
 
@@ -163,23 +179,31 @@ static bool version_cohort_identity_valid(const cbm_daemon_build_identity_t *ide
         }
         cache_length++;
     }
-    if (cache_length != CBM_DAEMON_BUILD_FINGERPRINT_SIZE - 1U || cache[cache_length] != '\0') {
+    if (cache_length !=
+            CBM_DAEMON_BUILD_FINGERPRINT_SIZE - VERSION_COHORT_STRING_TERMINATOR_BYTES ||
+        cache[cache_length] != '\0') {
         return false;
     }
     cbm_daemon_conflict_t comparison;
     return cbm_daemon_hello_compare(identity, identity, &comparison) == CBM_DAEMON_HELLO_COMPATIBLE;
 }
 
-static void version_cohort_u32_encode(unsigned char out[4], uint32_t value) {
-    out[0] = (unsigned char)(value & 0xffU);
-    out[1] = (unsigned char)((value >> 8) & 0xffU);
-    out[2] = (unsigned char)((value >> 16) & 0xffU);
-    out[3] = (unsigned char)((value >> 24) & 0xffU);
+static void version_cohort_u32_encode(unsigned char out[VERSION_COHORT_U32_BYTE_COUNT],
+                                      uint32_t value) {
+    out[VERSION_COHORT_U32_BYTE_0] = (unsigned char)(value & VERSION_COHORT_U32_LOW_BYTE_MASK);
+    out[VERSION_COHORT_U32_BYTE_1] =
+        (unsigned char)((value >> VERSION_COHORT_U32_SHIFT_1) & VERSION_COHORT_U32_LOW_BYTE_MASK);
+    out[VERSION_COHORT_U32_BYTE_2] =
+        (unsigned char)((value >> VERSION_COHORT_U32_SHIFT_2) & VERSION_COHORT_U32_LOW_BYTE_MASK);
+    out[VERSION_COHORT_U32_BYTE_3] =
+        (unsigned char)((value >> VERSION_COHORT_U32_SHIFT_3) & VERSION_COHORT_U32_LOW_BYTE_MASK);
 }
 
-static uint32_t version_cohort_u32_decode(const unsigned char in[4]) {
-    return (uint32_t)in[0] | ((uint32_t)in[1] << 8) | ((uint32_t)in[2] << 16) |
-           ((uint32_t)in[3] << 24);
+static uint32_t version_cohort_u32_decode(const unsigned char in[VERSION_COHORT_U32_BYTE_COUNT]) {
+    return ((uint32_t)in[VERSION_COHORT_U32_BYTE_0] << VERSION_COHORT_U32_SHIFT_0) |
+           ((uint32_t)in[VERSION_COHORT_U32_BYTE_1] << VERSION_COHORT_U32_SHIFT_1) |
+           ((uint32_t)in[VERSION_COHORT_U32_BYTE_2] << VERSION_COHORT_U32_SHIFT_2) |
+           ((uint32_t)in[VERSION_COHORT_U32_BYTE_3] << VERSION_COHORT_U32_SHIFT_3);
 }
 
 static bool version_cohort_record_encode(const cbm_daemon_build_identity_t *identity,
@@ -269,7 +293,7 @@ static cbm_version_cohort_lease_t *version_cohort_lease_new(cbm_version_cohort_m
     if (!manager) {
         return NULL;
     }
-    cbm_version_cohort_lease_t *lease = calloc(1, sizeof(*lease));
+    cbm_version_cohort_lease_t *lease = calloc(VERSION_COHORT_SINGLE_OBJECT, sizeof(*lease));
     if (!lease) {
         return NULL;
     }
@@ -387,7 +411,7 @@ cbm_version_cohort_manager_t *cbm_version_cohort_manager_new(
         }
         return NULL;
     }
-    cbm_version_cohort_manager_t *manager = calloc(1, sizeof(*manager));
+    cbm_version_cohort_manager_t *manager = calloc(VERSION_COHORT_SINGLE_OBJECT, sizeof(*manager));
     if (!manager) {
         cbm_private_lock_directory_close(directory);
         return NULL;
@@ -414,6 +438,107 @@ static cbm_version_cohort_status_t version_cohort_claim_new(
     return version_cohort_status_from_lock(
         version_cohort_lock_until(lease->manager, VERSION_COHORT_LIFETIME_FILE,
                                   CBM_PRIVATE_FILE_LOCK_SH, deadline_ms, &lease->lifetime));
+}
+
+static cbm_version_cohort_status_t version_cohort_claim_unheld(
+    cbm_version_cohort_lease_t *lease, const cbm_daemon_build_identity_t *identity,
+    uint64_t deadline_ms) {
+    cbm_log_info("version_cohort.claimed_unheld", "build",
+                 identity->build_fingerprint ? identity->build_fingerprint : "<null>");
+    return version_cohort_claim_new(lease, identity, deadline_ms);
+}
+
+static bool version_cohort_read_active_identity(
+    cbm_version_cohort_lease_t *lease, cbm_daemon_build_identity_t *active,
+    char active_version[CBM_DAEMON_VERSION_TEXT_SIZE],
+    char active_build[CBM_DAEMON_BUILD_FINGERPRINT_SIZE],
+    char active_cache[CBM_DAEMON_BUILD_FINGERPRINT_SIZE]) {
+    unsigned char record[VERSION_COHORT_RECORD_SIZE];
+    size_t record_length = 0;
+    cbm_private_file_lock_status_t payload_status =
+        cbm_private_file_lock_payload_read(lease->lifetime, record, sizeof(record), &record_length);
+    bool decoded = payload_status == CBM_PRIVATE_FILE_LOCK_OK &&
+                   version_cohort_record_decode(record, record_length, active, active_version,
+                                                active_build, active_cache);
+    if (decoded) {
+        return true;
+    }
+    char len_text[VERSION_COHORT_LENGTH_TEXT_CAP];
+    (void)snprintf(len_text, sizeof(len_text), "%zu", record_length);
+    cbm_log_warn("version_cohort.record_undecodable", "payload_status",
+                 payload_status == CBM_PRIVATE_FILE_LOCK_OK ? "read_ok" : "read_failed", "bytes",
+                 len_text);
+    return false;
+}
+
+static cbm_daemon_hello_status_t version_cohort_compare_active_identity(
+    const cbm_daemon_build_identity_t *active, const cbm_daemon_build_identity_t *requested,
+    cbm_daemon_conflict_t *conflict_out) {
+    cbm_daemon_hello_status_t comparison =
+        cbm_daemon_hello_compare(active, requested, conflict_out);
+    if (comparison == CBM_DAEMON_HELLO_INVALID) {
+        cbm_log_warn("version_cohort.active_identity_invalid", "version",
+                     active->semantic_version ? active->semantic_version : "<null>", "build",
+                     active->build_fingerprint ? active->build_fingerprint : "<null>", "cache",
+                     active->cache_fingerprint ? active->cache_fingerprint : "<null>");
+        return comparison;
+    }
+    const char *active_cache = active->cache_fingerprint ? active->cache_fingerprint : "";
+    const char *requested_cache = requested->cache_fingerprint ? requested->cache_fingerprint : "";
+    if (comparison == CBM_DAEMON_HELLO_COMPATIBLE && strcmp(active_cache, requested_cache) != 0) {
+        comparison = CBM_DAEMON_HELLO_CACHE_CONFLICT;
+        conflict_out->status = comparison;
+        (void)snprintf(conflict_out->active_cache_fingerprint,
+                       sizeof(conflict_out->active_cache_fingerprint), "%s", active_cache);
+        (void)snprintf(conflict_out->requested_cache_fingerprint,
+                       sizeof(conflict_out->requested_cache_fingerprint), "%s", requested_cache);
+    }
+    return comparison;
+}
+
+static cbm_version_cohort_status_t version_cohort_replace_conflicting_claim(
+    cbm_version_cohort_lease_t *lease, const cbm_daemon_build_identity_t *identity,
+    uint64_t deadline_ms) {
+    if (cbm_private_file_lock_release(&lease->lifetime) != CBM_PRIVATE_FILE_LOCK_OK) {
+        return CBM_VERSION_COHORT_IO;
+    }
+    cbm_private_file_lock_status_t lock_status =
+        cbm_private_file_lock_try_acquire(lease->manager->directory, VERSION_COHORT_LIFETIME_FILE,
+                                          CBM_PRIVATE_FILE_LOCK_EX, &lease->lifetime);
+    cbm_version_cohort_status_t status = version_cohort_status_from_lock(lock_status);
+    if (status == CBM_VERSION_COHORT_OK) {
+        return version_cohort_claim_new(lease, identity, deadline_ms);
+    }
+    return status == CBM_VERSION_COHORT_BUSY ? CBM_VERSION_COHORT_CONFLICT : status;
+}
+
+static cbm_version_cohort_status_t version_cohort_join_existing(
+    cbm_version_cohort_lease_t *lease, const cbm_daemon_build_identity_t *identity,
+    uint64_t deadline_ms, cbm_daemon_conflict_t *conflict_out) {
+    cbm_private_file_lock_status_t lock_status =
+        cbm_private_file_lock_try_acquire(lease->manager->directory, VERSION_COHORT_LIFETIME_FILE,
+                                          CBM_PRIVATE_FILE_LOCK_SH, &lease->lifetime);
+    cbm_version_cohort_status_t status = version_cohort_status_from_lock(lock_status);
+    if (status != CBM_VERSION_COHORT_OK) {
+        return status;
+    }
+    char active_version[CBM_DAEMON_VERSION_TEXT_SIZE];
+    char active_build[CBM_DAEMON_BUILD_FINGERPRINT_SIZE];
+    char active_cache[CBM_DAEMON_BUILD_FINGERPRINT_SIZE];
+    cbm_daemon_build_identity_t active;
+    if (!version_cohort_read_active_identity(lease, &active, active_version, active_build,
+                                             active_cache)) {
+        return CBM_VERSION_COHORT_UNSAFE;
+    }
+    cbm_daemon_hello_status_t comparison =
+        version_cohort_compare_active_identity(&active, identity, conflict_out);
+    if (comparison == CBM_DAEMON_HELLO_COMPATIBLE) {
+        return CBM_VERSION_COHORT_OK;
+    }
+    if (comparison == CBM_DAEMON_HELLO_INVALID) {
+        return CBM_VERSION_COHORT_UNSAFE;
+    }
+    return version_cohort_replace_conflicting_claim(lease, identity, deadline_ms);
 }
 
 cbm_version_cohort_status_t cbm_version_cohort_acquire(cbm_version_cohort_manager_t *manager,
@@ -459,95 +584,9 @@ cbm_version_cohort_status_t cbm_version_cohort_acquire(cbm_version_cohort_manage
                                           CBM_PRIVATE_FILE_LOCK_EX, &lease->lifetime);
     cbm_version_cohort_status_t status = version_cohort_status_from_lock(lock_status);
     if (status == CBM_VERSION_COHORT_OK) {
-        /* No live holder: this participant CLAIMS the cohort and NO identity
-         * comparison happens — a mismatched build is admitted, not refused.
-         * That is correct when nothing is running, and it is the only path by
-         * which a mismatched client can join. Name it: "was the lifetime lock
-         * held?" is exactly what separates a local run (conflict raised) from
-         * a CI run (client admitted), and it was not observable in any log. */
-        cbm_log_info("version_cohort.claimed_unheld", "build",
-                     identity->build_fingerprint ? identity->build_fingerprint : "<null>");
-        status = version_cohort_claim_new(lease, identity, deadline_ms);
+        status = version_cohort_claim_unheld(lease, identity, deadline_ms);
     } else if (status == CBM_VERSION_COHORT_BUSY) {
-        lock_status =
-            cbm_private_file_lock_try_acquire(manager->directory, VERSION_COHORT_LIFETIME_FILE,
-                                              CBM_PRIVATE_FILE_LOCK_SH, &lease->lifetime);
-        status = version_cohort_status_from_lock(lock_status);
-        if (status == CBM_VERSION_COHORT_OK) {
-            unsigned char record[VERSION_COHORT_RECORD_SIZE];
-            size_t record_length = 0;
-            char active_version[CBM_DAEMON_VERSION_TEXT_SIZE];
-            char active_build[CBM_DAEMON_BUILD_FINGERPRINT_SIZE];
-            char active_cache[CBM_DAEMON_BUILD_FINGERPRINT_SIZE];
-            cbm_daemon_build_identity_t active;
-            cbm_private_file_lock_status_t payload_status = cbm_private_file_lock_payload_read(
-                lease->lifetime, record, sizeof(record), &record_length);
-            bool decoded = payload_status == CBM_PRIVATE_FILE_LOCK_OK &&
-                           version_cohort_record_decode(record, record_length, &active,
-                                                        active_version, active_build, active_cache);
-            if (!decoded) {
-                /* The active lifetime record could not be read/decoded from a
-                 * peer holder - names whether the cross-process payload was
-                 * unreadable vs present-but-malformed (a Windows lock-payload
-                 * visibility question the unix flock path does not hit). */
-                char len_text[16];
-                (void)snprintf(len_text, sizeof(len_text), "%zu", record_length);
-                cbm_log_warn("version_cohort.record_undecodable", "payload_status",
-                             payload_status == CBM_PRIVATE_FILE_LOCK_OK ? "read_ok" : "read_failed",
-                             "bytes", len_text);
-                status = CBM_VERSION_COHORT_UNSAFE;
-            } else {
-                cbm_daemon_hello_status_t comparison =
-                    cbm_daemon_hello_compare(&active, identity, conflict_out);
-                if (comparison == CBM_DAEMON_HELLO_INVALID) {
-                    /* The record decoded but hello_compare rejected an identity
-                     * field as invalid (empty version/fingerprint/cache). Name
-                     * the decoded active values so the malformed field on the
-                     * Windows cross-process read path is visible. */
-                    cbm_log_warn(
-                        "version_cohort.active_identity_invalid", "version",
-                        active.semantic_version ? active.semantic_version : "<null>", "build",
-                        active.build_fingerprint ? active.build_fingerprint : "<null>", "cache",
-                        active.cache_fingerprint ? active.cache_fingerprint : "<null>");
-                }
-                const char *active_cache_fingerprint =
-                    active.cache_fingerprint ? active.cache_fingerprint : "";
-                const char *requested_cache_fingerprint =
-                    identity->cache_fingerprint ? identity->cache_fingerprint : "";
-                if (comparison == CBM_DAEMON_HELLO_COMPATIBLE &&
-                    strcmp(active_cache_fingerprint, requested_cache_fingerprint) != 0) {
-                    comparison = CBM_DAEMON_HELLO_CACHE_CONFLICT;
-                    conflict_out->status = comparison;
-                    (void)snprintf(conflict_out->active_cache_fingerprint,
-                                   sizeof(conflict_out->active_cache_fingerprint), "%s",
-                                   active_cache_fingerprint);
-                    (void)snprintf(conflict_out->requested_cache_fingerprint,
-                                   sizeof(conflict_out->requested_cache_fingerprint), "%s",
-                                   requested_cache_fingerprint);
-                }
-                if (comparison == CBM_DAEMON_HELLO_COMPATIBLE) {
-                    status = CBM_VERSION_COHORT_OK;
-                } else if (comparison == CBM_DAEMON_HELLO_INVALID) {
-                    status = CBM_VERSION_COHORT_UNSAFE;
-                } else {
-                    cbm_private_file_lock_status_t release_status =
-                        cbm_private_file_lock_release(&lease->lifetime);
-                    if (release_status != CBM_PRIVATE_FILE_LOCK_OK) {
-                        status = CBM_VERSION_COHORT_IO;
-                    } else {
-                        lock_status = cbm_private_file_lock_try_acquire(
-                            manager->directory, VERSION_COHORT_LIFETIME_FILE,
-                            CBM_PRIVATE_FILE_LOCK_EX, &lease->lifetime);
-                        status = version_cohort_status_from_lock(lock_status);
-                        if (status == CBM_VERSION_COHORT_OK) {
-                            status = version_cohort_claim_new(lease, identity, deadline_ms);
-                        } else if (status == CBM_VERSION_COHORT_BUSY) {
-                            status = CBM_VERSION_COHORT_CONFLICT;
-                        }
-                    }
-                }
-            }
-        }
+        status = version_cohort_join_existing(lease, identity, deadline_ms, conflict_out);
     }
 
     if (status != CBM_VERSION_COHORT_OK) {
@@ -717,7 +756,7 @@ cbm_version_cohort_status_t cbm_version_cohort_daemon_claim_acquire(
     if (!manager || !claim_out) {
         return CBM_VERSION_COHORT_UNSAFE;
     }
-    cbm_version_cohort_daemon_claim_t *claim = calloc(1, sizeof(*claim));
+    cbm_version_cohort_daemon_claim_t *claim = calloc(VERSION_COHORT_SINGLE_OBJECT, sizeof(*claim));
     if (!claim || !version_cohort_manager_register(manager)) {
         free(claim);
         return CBM_VERSION_COHORT_IO;
@@ -819,9 +858,9 @@ static cbm_version_cohort_daemon_presence_t version_cohort_active_daemon_presenc
              * but before the marker became available. */
             int lifetime = cbm_daemon_ipc_local_transition_lifetime_probe(endpoint, transition);
             presence = CBM_VERSION_COHORT_DAEMON_UNSAFE;
-            if (lifetime == 0) {
+            if (lifetime == VERSION_COHORT_IPC_PROBE_ABSENT) {
                 presence = CBM_VERSION_COHORT_DAEMON_ABSENT;
-            } else if (lifetime == 1) {
+            } else if (lifetime == VERSION_COHORT_IPC_PROBE_ACTIVE) {
                 presence = CBM_VERSION_COHORT_DAEMON_UNCOORDINATED;
             }
         }
@@ -847,18 +886,16 @@ cbm_version_cohort_daemon_presence_t cbm_version_cohort_daemon_presence(
 
     cbm_version_cohort_daemon_presence_t presence = CBM_VERSION_COHORT_DAEMON_IO;
     cbm_version_cohort_daemon_presence_t claim = cbm_version_cohort_daemon_claim_presence(manager);
-    if (claim == CBM_VERSION_COHORT_DAEMON_COORDINATED) {
-        presence = claim;
-    } else if (claim != CBM_VERSION_COHORT_DAEMON_ABSENT) {
+    if (claim != CBM_VERSION_COHORT_DAEMON_ABSENT) {
         presence = claim;
     } else {
         int lifetime = cbm_daemon_ipc_lifetime_reservation_probe(endpoint);
-        if (lifetime == 0) {
+        if (lifetime == VERSION_COHORT_IPC_PROBE_ABSENT) {
 #ifdef _WIN32
             int legacy = cbm_daemon_ipc_legacy_generation_probe(endpoint);
-            if (legacy == 0) {
+            if (legacy == VERSION_COHORT_IPC_PROBE_ABSENT) {
                 presence = CBM_VERSION_COHORT_DAEMON_ABSENT;
-            } else if (legacy == 1) {
+            } else if (legacy == VERSION_COHORT_IPC_PROBE_ACTIVE) {
                 presence = CBM_VERSION_COHORT_DAEMON_UNCOORDINATED;
             } else {
                 presence = CBM_VERSION_COHORT_DAEMON_UNSAFE;
@@ -866,15 +903,15 @@ cbm_version_cohort_daemon_presence_t cbm_version_cohort_daemon_presence(
 #else
             cbm_daemon_ipc_startup_lock_t *startup = NULL;
             int startup_status = cbm_daemon_ipc_startup_lock_try_acquire(endpoint, &startup);
-            if (startup_status == 0) {
+            if (startup_status == VERSION_COHORT_IPC_PROBE_ABSENT) {
                 presence = CBM_VERSION_COHORT_DAEMON_UNCOORDINATED;
             } else if (startup_status < 0 || !startup) {
                 presence = CBM_VERSION_COHORT_DAEMON_UNSAFE;
             } else {
                 int cleanup = cbm_daemon_ipc_stale_generation_cleanup(endpoint, startup);
-                if (cleanup == 1) {
+                if (cleanup == VERSION_COHORT_IPC_PROBE_ACTIVE) {
                     presence = CBM_VERSION_COHORT_DAEMON_ABSENT;
-                } else if (cleanup == 0) {
+                } else if (cleanup == VERSION_COHORT_IPC_PROBE_ABSENT) {
                     presence = CBM_VERSION_COHORT_DAEMON_UNCOORDINATED;
                 } else {
                     presence = CBM_VERSION_COHORT_DAEMON_UNSAFE;
@@ -882,7 +919,7 @@ cbm_version_cohort_daemon_presence_t cbm_version_cohort_daemon_presence(
             }
             version_cohort_startup_lock_release_complete(&startup);
 #endif
-        } else if (lifetime == 1) {
+        } else if (lifetime == VERSION_COHORT_IPC_PROBE_ACTIVE) {
             presence = version_cohort_active_daemon_presence(manager, NULL, NULL);
         }
     }
@@ -971,7 +1008,8 @@ bool cbm_version_cohort_log_uncoordinated_daemon(const cbm_daemon_build_identity
     (void)snprintf(conflict.active_version, sizeof(conflict.active_version), "%s",
                    "pre-cohort/unknown");
     memset(conflict.active_build_fingerprint, '0', sizeof(conflict.active_build_fingerprint) - 1);
-    conflict.active_build_fingerprint[sizeof(conflict.active_build_fingerprint) - 1] = '\0';
+    conflict.active_build_fingerprint[sizeof(conflict.active_build_fingerprint) -
+                                      VERSION_COHORT_STRING_TERMINATOR_BYTES] = '\0';
     (void)snprintf(conflict.requested_version, sizeof(conflict.requested_version), "%s",
                    requested->semantic_version);
     (void)snprintf(conflict.requested_build_fingerprint,

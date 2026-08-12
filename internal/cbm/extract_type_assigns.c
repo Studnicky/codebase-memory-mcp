@@ -43,6 +43,46 @@ static const char *extract_new_expr_type(CBMArena *a, TSNode rhs, const char *so
     return NULL;
 }
 
+static bool constructor_factory_name(const char *name) {
+    if (!name || !name[0]) {
+        return false;
+    }
+    const char *last = strrchr(name, '.');
+    last = last ? last + SKIP_ONE : name;
+    bool prefixed = (strncmp(last, "New", TYPE_ASSIGN_FACTORY_PREFIX_LEN) == 0 ||
+                     strncmp(last, "new", TYPE_ASSIGN_FACTORY_PREFIX_LEN) == 0) &&
+                    last[TYPE_ASSIGN_FACTORY_PREFIX_LEN];
+    if (!prefixed) {
+        return false;
+    }
+    size_t length = strlen(last);
+    return (length > TYPE_ASSIGN_CLIENT_SUFFIX_LEN &&
+            strcmp(last + length - TYPE_ASSIGN_CLIENT_SUFFIX_LEN, "Client") == 0) ||
+           (length > TYPE_ASSIGN_STUB_SUFFIX_LEN &&
+            strcmp(last + length - TYPE_ASSIGN_STUB_SUFFIX_LEN, "Stub") == 0);
+}
+
+static const char *extract_call_constructor_type(CBMArena *arena, TSNode rhs, const char *source) {
+    TSNode function = ts_node_child_by_field_name(rhs, TS_FIELD("function"));
+    if (ts_node_is_null(function) && ts_node_child_count(rhs) > 0) {
+        function = ts_node_child(rhs, 0);
+    }
+    if (ts_node_is_null(function)) {
+        return NULL;
+    }
+    char *name = cbm_node_text(arena, function, source);
+    if (name && ((name[0] >= 'A' && name[0] <= 'Z') || constructor_factory_name(name))) {
+        return name;
+    }
+    return NULL;
+}
+
+static const char *extract_field_constructor_type(CBMArena *arena, TSNode rhs, const char *source,
+                                                  const char *field, uint32_t field_length) {
+    TSNode type = ts_node_child_by_field_name(rhs, field, field_length);
+    return ts_node_is_null(type) ? NULL : cbm_node_text(arena, type, source);
+}
+
 // Extract class/type name from a constructor expression.
 // e.g., new Foo() -> "Foo", Foo() -> "Foo" (if uppercase), Foo{} -> "Foo"
 static const char *extract_constructor_type(CBMArena *a, TSNode rhs, const char *source,
@@ -54,53 +94,15 @@ static const char *extract_constructor_type(CBMArena *a, TSNode rhs, const char 
     }
 
     if (strcmp(kind, "call") == 0 || strcmp(kind, "call_expression") == 0) {
-        TSNode func = ts_node_child_by_field_name(rhs, TS_FIELD("function"));
-        if (ts_node_is_null(func) && ts_node_child_count(rhs) > 0) {
-            func = ts_node_child(rhs, 0);
-        }
-        if (!ts_node_is_null(func)) {
-            char *fname = cbm_node_text(a, func, source);
-            if (fname && fname[0] >= 'A' && fname[0] <= 'Z') {
-                return fname;
-            }
-            /* Lower-cased package prefix: Go-style `pb.NewFooClient(...)` and
-             * Java-style `fooGrpc.newBlockingStub(...)`. Accept the qualified
-             * name when the last segment matches a typed-stub factory pattern.
-             * Downstream passes can use this to infer the constructed type. */
-            if (fname && fname[0]) {
-                const char *last = strrchr(fname, '.');
-                last = last ? last + SKIP_ONE : fname;
-                bool is_factory = false;
-                if ((strncmp(last, "New", TYPE_ASSIGN_FACTORY_PREFIX_LEN) == 0 ||
-                     strncmp(last, "new", TYPE_ASSIGN_FACTORY_PREFIX_LEN) == 0) &&
-                    last[TYPE_ASSIGN_FACTORY_PREFIX_LEN]) {
-                    size_t llen = strlen(last);
-                    if ((llen > TYPE_ASSIGN_CLIENT_SUFFIX_LEN &&
-                         strcmp(last + llen - TYPE_ASSIGN_CLIENT_SUFFIX_LEN, "Client") == 0) ||
-                        (llen > TYPE_ASSIGN_STUB_SUFFIX_LEN &&
-                         strcmp(last + llen - TYPE_ASSIGN_STUB_SUFFIX_LEN, "Stub") == 0)) {
-                        is_factory = true;
-                    }
-                }
-                if (is_factory) {
-                    return fname;
-                }
-            }
-        }
+        return extract_call_constructor_type(a, rhs, source);
     }
 
     if (strcmp(kind, "composite_literal") == 0) {
-        TSNode type_node = ts_node_child_by_field_name(rhs, TS_FIELD("type"));
-        if (!ts_node_is_null(type_node)) {
-            return cbm_node_text(a, type_node, source);
-        }
+        return extract_field_constructor_type(a, rhs, source, TS_FIELD("type"));
     }
 
     if (lang == CBM_LANG_RUST && strcmp(kind, "struct_expression") == 0) {
-        TSNode name = ts_node_child_by_field_name(rhs, TS_FIELD("name"));
-        if (!ts_node_is_null(name)) {
-            return cbm_node_text(a, name, source);
-        }
+        return extract_field_constructor_type(a, rhs, source, TS_FIELD("name"));
     }
 
     return NULL;

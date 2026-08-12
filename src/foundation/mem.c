@@ -87,6 +87,11 @@ static atomic_int g_was_over;    /* pressure hysteresis */
 
 #define MB_DIVISOR ((size_t)(CBM_SZ_1K * CBM_SZ_1K))
 
+enum {
+    MEM_PAGE_RECLAIM_ON_FREE_ENABLED = 1,
+    MEM_PROBE_TOUCH_VALUE = 1,
+};
+
 /* ── OS fallback for RSS (ASan builds where MI_OVERRIDE=0) ──── */
 
 static size_t os_rss(void) {
@@ -178,18 +183,122 @@ static void mem_option_set_verified(mi_option_t option, long value, const char *
     }
 }
 
+static void mem_complete_allocator_preloading(void) {
+#ifdef _WIN32
+    if (_mi_preloading()) {
+        _mi_auto_process_init();
+        if (_mi_preloading()) {
+            mem_setup_fatal("preloading",
+                            "allocator remained in preloading state after explicit process "
+                            "init: arena creation and purging are disabled, memory would "
+                            "never be returned to the OS");
+        }
+        cbm_log_warn("mem.allocator.preloading_completed", "still_preloading", "false", "detail",
+                     "allocator was still preloading, so arena creation and purging were "
+                     "disabled; process init completed explicitly");
+        return;
+    }
+    cbm_log_info("mem.allocator.preloading", "state", "already_complete");
+#endif
+}
+
+static void mem_log_unowned_classes(const cbm_mem_ownership_audit_t *audit, const char *owned_str) {
+    char classes[CBM_SZ_256];
+    int length = 0;
+    for (int i = 0;
+         i < CBM_MEM_OWNERSHIP_CLASSES && length >= 0 && (size_t)length < sizeof(classes); i++) {
+        if (audit->allocated[i] && !audit->owned[i]) {
+            int written = snprintf(classes + length, sizeof(classes) - (size_t)length, "%s%zu",
+                                   length ? "," : "", audit->probe_bytes[i]);
+            if (written < 0) {
+                break;
+            }
+            length += written;
+        }
+    }
+    cbm_log_warn("mem.allocator.not_owned", "owned_classes", owned_str, "unowned_bytes",
+                 length > 0 ? classes : "?", "detail",
+                 "allocations in these size classes are not allocator-owned: purge and reclaim "
+                 "options do not apply to them and freed pages stay committed");
+}
+
+static void mem_log_ownership_audit(void) {
+    cbm_mem_ownership_audit_t audit;
+    cbm_mem_audit_ownership(&audit);
+    char owned_str[CBM_SZ_32];
+    snprintf(owned_str, sizeof(owned_str), "%d/%d", audit.owned_count, audit.probed_count);
+    if (audit.all_owned) {
+        cbm_log_info("mem.allocator.owned", "classes", "all");
+        return;
+    }
+    if (!CBM_MEM_EXPECT_GLOBAL_OVERRIDE) {
+        cbm_log_info("mem.allocator.bound_populations_only", "owned_classes", owned_str,
+                     "populations", "sqlite,tree_sitter", "detail",
+                     "ordinary malloc is served by the system allocator in this build by "
+                     "design; allocator tuning applies to the bound populations");
+        return;
+    }
+    mem_log_unowned_classes(&audit, owned_str);
+}
+
+static void mem_configure_allocator(void) {
+    mem_complete_allocator_preloading();
+    mem_option_set_verified(mi_option_arena_eager_commit, 0, "arena_eager_commit");
+    mem_option_set_verified(mi_option_purge_decommits, SKIP_ONE, "purge_decommits");
+    mem_option_set_verified(mi_option_purge_delay, 0, "purge_delay");
+    mem_option_set_verified(mi_option_page_reclaim_on_free, MEM_PAGE_RECLAIM_ON_FREE_ENABLED,
+                            "page_reclaim_on_free");
+    mem_log_ownership_audit();
+}
+
+static void mem_log_resolved_budget(const cbm_system_info_t *info, const char *env,
+                                    const cbm_mem_budget_t *resolved, size_t hard_cap_bytes) {
+    if (resolved->invalid) {
+        cbm_log_warn("mem.budget.env.invalid", "value", env, "fallback", "ram_fraction");
+    } else if (resolved->clamped) {
+        char cap_mb[CBM_SZ_32];
+        snprintf(cap_mb, sizeof(cap_mb), "%zu", info->total_ram / MB_DIVISOR);
+        cbm_log_warn("mem.budget.clamped", "requested_mb", env, "cap_mb", cap_mb);
+    }
+    if (resolved->hard_capped) {
+        char cap_bytes[CBM_SZ_32];
+        snprintf(cap_bytes, sizeof(cap_bytes), "%zu", hard_cap_bytes);
+        cbm_log_info("mem.budget.worker_cap", "cap_bytes", cap_bytes);
+    }
+    char budget_mb[CBM_SZ_32];
+    char ram_mb[CBM_SZ_32];
+    snprintf(budget_mb, sizeof(budget_mb), "%zu", g_budget / MB_DIVISOR);
+    snprintf(ram_mb, sizeof(ram_mb), "%zu", info->total_ram / MB_DIVISOR);
+    cbm_log_info("mem.init", "budget_mb", budget_mb, "total_ram_mb", ram_mb, "source",
+                 resolved->source);
+}
+
+static void mem_resolve_init_budget(double ram_fraction, size_t hard_cap_bytes) {
+    cbm_system_info_t info = cbm_system_info();
+    char env_buf[CBM_SZ_32];
+    const char *env = cbm_safe_getenv("CBM_MEM_BUDGET_MB", env_buf, sizeof(env_buf), NULL);
+    cbm_mem_budget_t resolved =
+        cbm_mem_resolve_budget_capped(info.total_ram, ram_fraction, env, hard_cap_bytes);
+    g_budget = resolved.budget;
+    mem_log_resolved_budget(&info, env, &resolved, hard_cap_bytes);
+}
+
 /* ── Public API ────────────────────────────────────────────────── */
 
 #define RAM_FRACTION_DEFAULT 0.5
 #define RAM_FRACTION_16GB 0.25
 #define RAM_FRACTION_32GB 0.35
 #define RAM_BYTES_PER_GB (1024ULL * 1024 * 1024)
+#define RAM_TOTAL_16GB (16ULL * RAM_BYTES_PER_GB)
+#define RAM_TOTAL_32GB (32ULL * RAM_BYTES_PER_GB)
+
+#define MEM_MAP_LAST_BUCKET (CBM_MEM_MAP_BUCKETS - SKIP_ONE)
 
 double cbm_mem_ram_fraction_for_total(size_t total_ram_bytes) {
-    if (total_ram_bytes <= 16ULL * RAM_BYTES_PER_GB) {
+    if (total_ram_bytes <= RAM_TOTAL_16GB) {
         return RAM_FRACTION_16GB;
     }
-    if (total_ram_bytes <= 32ULL * RAM_BYTES_PER_GB) {
+    if (total_ram_bytes <= RAM_TOTAL_32GB) {
         return RAM_FRACTION_32GB;
     }
     return RAM_FRACTION_DEFAULT;
@@ -265,140 +374,8 @@ void cbm_mem_init_with_cap(double ram_fraction, size_t hard_cap_bytes) {
     if (ram_fraction <= 0.0 || ram_fraction > MAX_RAM_FRACTION) {
         ram_fraction = DEFAULT_RAM_FRACTION;
     }
-
-    /* Reduce upfront memory: don't eagerly commit arenas.
-     * Force decommit on purge (MADV_FREE_REUSABLE on macOS) so RSS
-     * drops immediately instead of staying high until memory pressure. */
-#ifdef _WIN32
-    /* Decisive check: is the allocator still "preloading"? If so its arena
-     * machinery — including every purge path — is inert, and completing init
-     * here is what turns the options above from decoration into behaviour. */
-    if (_mi_preloading()) {
-        _mi_auto_process_init();
-        if (_mi_preloading()) {
-            /* Arena creation and every purge path stay disabled while this is
-             * set, so the process would grow until the OS killed it. Refuse. */
-            mem_setup_fatal("preloading",
-                            "allocator remained in preloading state after explicit process "
-                            "init: arena creation and purging are disabled, memory would "
-                            "never be returned to the OS");
-        }
-        cbm_log_warn("mem.allocator.preloading_completed", "still_preloading", "false", "detail",
-                     "allocator was still preloading, so arena creation and purging were "
-                     "disabled; process init completed explicitly");
-    } else {
-        cbm_log_info("mem.allocator.preloading", "state", "already_complete");
-    }
-#endif
-
-    mem_option_set_verified(mi_option_arena_eager_commit, 0, "arena_eager_commit");
-    mem_option_set_verified(mi_option_purge_decommits, SKIP_ONE, "purge_decommits");
-    mem_option_set_verified(mi_option_purge_delay, 0, "purge_delay"); /* immediate */
-    /* v3 (#832): reclaim abandoned pages on ANY thread's free (=1), restoring the
-     * v2 behaviour. mimalloc v3 defaults page_reclaim_on_free=0, so pages a worker
-     * thread abandons at exit are NOT reclaimed when the main thread later frees
-     * their blocks (and mi_collect cannot touch abandoned pages) — RSS then
-     * ratchets across repeated in-process index cycles. The supervised subprocess
-     * is the primary cure (the child returns 100% RSS on exit); this is the
-     * in-process fallback for any path that stays in-process (kill switch,
-     * spawn-fail degrade, embedders). */
-    mem_option_set_verified(mi_option_page_reclaim_on_free, 1, "page_reclaim_on_free");
-
-    /* Every option above is inert unless ordinary malloc actually reaches this
-     * allocator. That silently stopped being true on Windows — mimalloc's
-     * static override is gated on _MSC_VER, which clang/MinGW never defines —
-     * and nothing checked, so a long-lived daemon ratcheted committed memory
-     * for months (#581). Probe it once, out loud: a real malloc asked whether
-     * mimalloc owns it. Anything but true means the tuning here is decoration
-     * and freed pages will not come back.
-     *
-     * ...but "anything but true" only means that where the build actually ASKED
-     * for a global override: prod builds on Windows and Linux. Everywhere else —
-     * macOS, and every test binary on any platform — the override body is
-     * compiled out, so ordinary malloc is SUPPOSED to reach libc and the probe
-     * is answering a question this build never posed. Same measurement,
-     * different meaning per build config, hence the split below. */
-    cbm_mem_ownership_audit_t audit;
-    cbm_mem_audit_ownership(&audit);
-    char owned_str[CBM_SZ_32];
-    snprintf(owned_str, sizeof(owned_str), "%d/%d", audit.owned_count, audit.probed_count);
-    if (!audit.all_owned && !CBM_MEM_EXPECT_GLOBAL_OVERRIDE) {
-        /* Expected: this build never asked mimalloc to replace ordinary malloc,
-         * so ordinary malloc reaching libc is the design, not a fault. Say what
-         * IS allocator-served instead, because the interesting question here is
-         * "are the bound populations bound", not "did the override fire".
-         *
-         * Reported at INFO deliberately. A warning that fires on every run of a
-         * correctly configured build is not a tripwire, it is background noise —
-         * it trained readers to ignore the one line that catches #581, and cost
-         * a user the time to file and self-close #1360. */
-        cbm_log_info("mem.allocator.bound_populations_only", "owned_classes", owned_str,
-                     "populations", "sqlite,tree_sitter", "detail",
-                     "ordinary malloc is served by the system allocator in this build by "
-                     "design; allocator tuning applies to the bound populations");
-    } else if (!audit.all_owned) {
-        /* Name the classes that escaped, because "not owned" is actionable
-         * only if you know WHICH sizes. A class listed here either bypasses
-         * the override or is misclassified by the routing predicate, and both
-         * mean freed pages will not come back. */
-        char classes[CBM_SZ_256];
-        int length = 0;
-        for (int i = 0;
-             i < CBM_MEM_OWNERSHIP_CLASSES && length >= 0 && (size_t)length < sizeof(classes);
-             i++) {
-            if (audit.allocated[i] && !audit.owned[i]) {
-                int written = snprintf(classes + length, sizeof(classes) - (size_t)length, "%s%zu",
-                                       length ? "," : "", audit.probe_bytes[i]);
-                if (written < 0) {
-                    break;
-                }
-                length += written;
-            }
-        }
-        cbm_log_warn("mem.allocator.not_owned", "owned_classes", owned_str, "unowned_bytes",
-                     length > 0 ? classes : "?", "detail",
-                     "allocations in these size classes are not allocator-owned: purge and "
-                     "reclaim options do not apply to them and freed pages stay committed");
-    } else {
-        cbm_log_info("mem.allocator.owned", "classes", "all");
-    }
-
-    /* CBM_MEM_BUDGET_MB env override (memory analogue of CBM_WORKERS).
-     * Lets users cap the budget directly without an enclosing cgroup —
-     * useful on bare-metal hosts where cgroup memory limits are absent
-     * (#363). Explicit override > implicit RAM/cgroup detection. The budget
-     * math (fraction default, override, clamp-to-total) lives in the pure,
-     * testable cbm_mem_resolve_budget(); this path only reads the env and
-     * emits the log/warn lines. */
-    cbm_system_info_t info = cbm_system_info();
-
-    char env_buf[CBM_SZ_32];
-    const char *env = cbm_safe_getenv("CBM_MEM_BUDGET_MB", env_buf, sizeof(env_buf), NULL);
-    cbm_mem_budget_t resolved =
-        cbm_mem_resolve_budget_capped(info.total_ram, ram_fraction, env, hard_cap_bytes);
-    g_budget = resolved.budget;
-
-    /* The resolver is the single source of truth for the parse + clamp; this
-     * path only surfaces its outcome as log lines. */
-    if (resolved.invalid) {
-        cbm_log_warn("mem.budget.env.invalid", "value", env, "fallback", "ram_fraction");
-    } else if (resolved.clamped) {
-        char cap_mb[CBM_SZ_32];
-        snprintf(cap_mb, sizeof(cap_mb), "%zu", info.total_ram / MB_DIVISOR);
-        cbm_log_warn("mem.budget.clamped", "requested_mb", env, "cap_mb", cap_mb);
-    }
-    if (resolved.hard_capped) {
-        char cap_bytes[CBM_SZ_32];
-        snprintf(cap_bytes, sizeof(cap_bytes), "%zu", hard_cap_bytes);
-        cbm_log_info("mem.budget.worker_cap", "cap_bytes", cap_bytes);
-    }
-
-    char budget_mb[CBM_SZ_32];
-    char ram_mb[CBM_SZ_32];
-    snprintf(budget_mb, sizeof(budget_mb), "%zu", g_budget / MB_DIVISOR);
-    snprintf(ram_mb, sizeof(ram_mb), "%zu", info.total_ram / MB_DIVISOR);
-    cbm_log_info("mem.init", "budget_mb", budget_mb, "total_ram_mb", ram_mb, "source",
-                 resolved.source);
+    mem_configure_allocator();
+    mem_resolve_init_budget(ram_fraction, hard_cap_bytes);
 }
 
 void cbm_mem_init(double ram_fraction) {
@@ -500,12 +477,12 @@ size_t cbm_mem_map_bucket_limit(int bucket) {
 }
 
 static int mem_map_bucket_of(size_t block_size) {
-    for (int i = 0; i < CBM_MEM_MAP_BUCKETS - 1; i++) {
+    for (int i = 0; i < MEM_MAP_LAST_BUCKET; i++) {
         if (block_size <= MEM_MAP_BUCKET_LIMITS[i]) {
             return i;
         }
     }
-    return CBM_MEM_MAP_BUCKETS - 1;
+    return MEM_MAP_LAST_BUCKET;
 }
 
 /* Area visitor: visit_blocks=false means one call per area, so `used` (live
@@ -602,7 +579,7 @@ static atomic_size_t g_foreign_pointers = ATOMIC_VAR_INIT(0);
 static atomic_size_t g_owned_pointers = ATOMIC_VAR_INIT(0);
 
 void cbm_mem_record_pointer_ownership(bool owned) {
-    atomic_fetch_add_explicit(owned ? &g_owned_pointers : &g_foreign_pointers, 1,
+    atomic_fetch_add_explicit(owned ? &g_owned_pointers : &g_foreign_pointers, CBM_ALLOC_ONE,
                               memory_order_relaxed);
 }
 
@@ -632,7 +609,7 @@ void cbm_mem_audit_ownership(cbm_mem_ownership_audit_t *out) {
         if (!block) {
             continue;
         }
-        ((char *)block)[0] = 1; /* touch it so it is really backed */
+        ((char *)block)[0] = MEM_PROBE_TOUCH_VALUE; /* touch it so it is really backed */
         out->allocated[i] = true;
         out->probed_count++;
         out->owned[i] = mi_is_in_heap_region(block);
@@ -659,7 +636,7 @@ static int g_mem_phase_count;
 static const char *g_mem_phase_open;
 static size_t g_mem_phase_baseline;
 static cbm_mutex_t g_mem_phase_mutex;
-static atomic_int g_mem_phase_enabled = ATOMIC_VAR_INIT(-1); /* -1 = undecided */
+static atomic_int g_mem_phase_enabled = ATOMIC_VAR_INIT(CBM_NOT_FOUND); /* undecided */
 
 static size_t mem_phase_committed(void) {
     size_t elapsed_ms = 0;
@@ -678,14 +655,14 @@ static size_t mem_phase_committed(void) {
 static bool mem_phase_enabled(void) {
     int state = atomic_load_explicit(&g_mem_phase_enabled, memory_order_acquire);
     if (state >= 0) {
-        return state == 1;
+        return state == CBM_INIT_DONE;
     }
     char buf[CBM_SZ_16];
     bool on = cbm_safe_getenv("CBM_MEM_PHASES", buf, sizeof(buf), NULL) != NULL && buf[0] == '1';
     if (on) {
         cbm_mutex_init(&g_mem_phase_mutex);
     }
-    atomic_store_explicit(&g_mem_phase_enabled, on ? 1 : 0, memory_order_release);
+    atomic_store_explicit(&g_mem_phase_enabled, on ? CBM_INIT_DONE : 0, memory_order_release);
     return on;
 }
 
@@ -696,7 +673,7 @@ void cbm_mem_phase_mark(const char *label) {
     size_t now = mem_phase_committed();
     cbm_mutex_lock(&g_mem_phase_mutex);
     if (g_mem_phase_open) {
-        int slot = -1;
+        int slot = CBM_NOT_FOUND;
         for (int i = 0; i < g_mem_phase_count; i++) {
             if (g_mem_phases[i].label == g_mem_phase_open ||
                 strcmp(g_mem_phases[i].label, g_mem_phase_open) == 0) {
@@ -748,14 +725,14 @@ int cbm_mem_phase_report_json(char *out, size_t size) {
     cbm_mutex_unlock(&g_mem_phase_mutex);
 
     /* Biggest retainer first — insertion sort, count <= MEM_PHASE_SLOTS. */
-    for (int i = 1; i < count; i++) {
+    for (int i = CBM_ALLOC_ONE; i < count; i++) {
         mem_phase_slot_t key = copy[i];
-        int j = i - 1;
+        int j = i - CBM_ALLOC_ONE;
         while (j >= 0 && copy[j].bytes < key.bytes) {
-            copy[j + 1] = copy[j];
+            copy[j + CBM_ALLOC_ONE] = copy[j];
             j--;
         }
-        copy[j + 1] = key;
+        copy[j + CBM_ALLOC_ONE] = key;
     }
 
     int length = 0;
@@ -774,16 +751,16 @@ int cbm_mem_phase_report_json(char *out, size_t size) {
 
 /* ── Windows region census (see mem.h) ─────────────────────────────── */
 
-static atomic_int g_mem_census_enabled = -1;
+static atomic_int g_mem_census_enabled = CBM_NOT_FOUND;
 
 bool cbm_mem_census_enabled(void) {
     int state = atomic_load_explicit(&g_mem_census_enabled, memory_order_acquire);
     if (state >= 0) {
-        return state == 1;
+        return state == CBM_INIT_DONE;
     }
     char buf[CBM_SZ_16];
     bool on = cbm_safe_getenv("CBM_MEM_CENSUS", buf, sizeof(buf), NULL) != NULL && buf[0] == '1';
-    atomic_store_explicit(&g_mem_census_enabled, on ? 1 : 0, memory_order_release);
+    atomic_store_explicit(&g_mem_census_enabled, on ? CBM_INIT_DONE : 0, memory_order_release);
     return on;
 }
 
@@ -885,19 +862,19 @@ static void mem_stats_writer(const char *text, void *arg) {
     }
 }
 
-void cbm_mem_census_log(const char *tag) {
-    if (!cbm_mem_census_enabled()) {
-        return;
+static void mem_census_format_large_map(char *large_map, size_t size,
+                                        const cbm_mem_win_census_t *census) {
+    large_map[0] = '\0';
+    for (unsigned region = 0; region < census->large_tracked; region++) {
+        char one[CBM_SZ_64];
+        (void)snprintf(one, sizeof(one), "%s%p:%zuM", region == 0 ? "" : ",",
+                       census->large_base[region],
+                       census->large_size[region] / ((size_t)CBM_SZ_1K * CBM_SZ_1K));
+        (void)strncat(large_map, one, size - strlen(large_map) - SKIP_ONE);
     }
-    cbm_mem_win_census_t census;
-    /* A false return means the OS-region walk is unavailable (non-Windows), not
-     * that there is nothing to report: the allocation-site half is the whole
-     * point of the cross-platform comparison, so it still runs and the pool
-     * fields simply read zero. */
-    (void)cbm_mem_win_census(&census);
-    /* Kilobytes throughout: the CRT heap measured 0 at megabyte resolution,
-     * which reads as "empty" when it may simply be small — a diagnostic that
-     * rounds its own evidence away is worse than none. */
+}
+
+static void mem_census_log_snapshot(const char *tag, const cbm_mem_win_census_t *census) {
     char priv_kb[CBM_SZ_32];
     char crt_kb[CBM_SZ_32];
     char busy_kb[CBM_SZ_32];
@@ -913,29 +890,23 @@ void cbm_mem_census_log(const char *tag) {
     char pcounts[CBM_SZ_64];
     char large_map[CBM_SZ_256];
     char heaps[CBM_SZ_32];
-    (void)snprintf(priv_kb, sizeof(priv_kb), "%zu", census.committed_private / CBM_SZ_1K);
-    (void)snprintf(crt_kb, sizeof(crt_kb), "%zu", census.crt_heap_committed / CBM_SZ_1K);
-    (void)snprintf(busy_kb, sizeof(busy_kb), "%zu", census.crt_heap_busy / CBM_SZ_1K);
-    (void)snprintf(mapped_kb, sizeof(mapped_kb), "%zu", census.committed_mapped / CBM_SZ_1K);
+    (void)snprintf(priv_kb, sizeof(priv_kb), "%zu", census->committed_private / CBM_SZ_1K);
+    (void)snprintf(crt_kb, sizeof(crt_kb), "%zu", census->crt_heap_committed / CBM_SZ_1K);
+    (void)snprintf(busy_kb, sizeof(busy_kb), "%zu", census->crt_heap_busy / CBM_SZ_1K);
+    (void)snprintf(mapped_kb, sizeof(mapped_kb), "%zu", census->committed_mapped / CBM_SZ_1K);
     (void)snprintf(rss_kb, sizeof(rss_kb), "%zu", cbm_mem_rss() / CBM_SZ_1K);
     (void)snprintf(biggest_kb, sizeof(biggest_kb), "%zu",
-                   census.largest_private_region / CBM_SZ_1K);
-    (void)snprintf(regions, sizeof(regions), "%u", census.regions);
-    (void)snprintf(base, sizeof(base), "%p", census.largest_private_base);
-    (void)snprintf(big_regions, sizeof(big_regions), "%u", census.private_regions_1mb);
-    (void)snprintf(psmall, sizeof(psmall), "%zu", census.private_small_bytes / CBM_SZ_1K);
-    (void)snprintf(pmed, sizeof(pmed), "%zu", census.private_medium_bytes / CBM_SZ_1K);
-    (void)snprintf(plarge, sizeof(plarge), "%zu", census.private_large_bytes / CBM_SZ_1K);
-    (void)snprintf(pcounts, sizeof(pcounts), "%u/%u/%u", census.private_small_count,
-                   census.private_medium_count, census.private_large_count);
-    large_map[0] = '\0';
-    for (unsigned r = 0; r < census.large_tracked; r++) {
-        char one[CBM_SZ_64];
-        (void)snprintf(one, sizeof(one), "%s%p:%zuM", r == 0 ? "" : ",", census.large_base[r],
-                       census.large_size[r] / ((size_t)CBM_SZ_1K * CBM_SZ_1K));
-        (void)strncat(large_map, one, sizeof(large_map) - strlen(large_map) - 1);
-    }
-    (void)snprintf(heaps, sizeof(heaps), "%u", census.heap_walk_ok ? census.crt_heap_count : 0);
+                   census->largest_private_region / CBM_SZ_1K);
+    (void)snprintf(regions, sizeof(regions), "%u", census->regions);
+    (void)snprintf(base, sizeof(base), "%p", census->largest_private_base);
+    (void)snprintf(big_regions, sizeof(big_regions), "%u", census->private_regions_1mb);
+    (void)snprintf(psmall, sizeof(psmall), "%zu", census->private_small_bytes / CBM_SZ_1K);
+    (void)snprintf(pmed, sizeof(pmed), "%zu", census->private_medium_bytes / CBM_SZ_1K);
+    (void)snprintf(plarge, sizeof(plarge), "%zu", census->private_large_bytes / CBM_SZ_1K);
+    (void)snprintf(pcounts, sizeof(pcounts), "%u/%u/%u", census->private_small_count,
+                   census->private_medium_count, census->private_large_count);
+    mem_census_format_large_map(large_map, sizeof(large_map), census);
+    (void)snprintf(heaps, sizeof(heaps), "%u", census->heap_walk_ok ? census->crt_heap_count : 0);
     /* Attribution alongside the pool totals: the census says which pool holds
      * the memory, the profile says which call sites put it there. Emitting
      * both from one place keeps the two views on the same sample. */
@@ -956,6 +927,30 @@ void cbm_mem_census_log(const char *tag) {
                  regions, "big_regions", big_regions, "heaps", heaps, "biggest_base", base,
                  "priv_small_kb", psmall, "priv_med_kb", pmed, "priv_large_kb", plarge,
                  "priv_counts", pcounts, "large_map", large_map);
+}
+
+static void mem_census_log_exit(void) {
+    char stats_path[CBM_SZ_1K];
+    if (cbm_safe_getenv("CBM_MEM_STATS_OUT", stats_path, sizeof(stats_path), NULL) != NULL) {
+        FILE *stats = cbm_fopen(stats_path, "wb");
+        if (stats) {
+            mi_stats_print_out(mem_stats_writer, stats);
+            (void)fclose(stats);
+        }
+    }
+    char phases[CBM_SZ_1K];
+    if (cbm_mem_phase_report_json(phases, sizeof(phases)) > 0) {
+        cbm_log_info("mem.phases", "table", phases);
+    }
+}
+
+void cbm_mem_census_log(const char *tag) {
+    if (!cbm_mem_census_enabled()) {
+        return;
+    }
+    cbm_mem_win_census_t census;
+    (void)cbm_mem_win_census(&census);
+    mem_census_log_snapshot(tag, &census);
     /* The phase table answers WHICH bracketed path the committed bytes stayed
      * in. Emitted once at the end rather than per request: it is cumulative,
      * so only the final table carries the verdict. */
@@ -964,18 +959,7 @@ void cbm_mem_census_log(const char *tag) {
          * the question: if it tracks the request count, each request is
          * getting a fresh thread-heap whose pages are abandoned on exit --
          * invisible to mi_heap_visit, which only sees main and current. */
-        char stats_path[CBM_SZ_1K];
-        if (cbm_safe_getenv("CBM_MEM_STATS_OUT", stats_path, sizeof(stats_path), NULL) != NULL) {
-            FILE *stats = cbm_fopen(stats_path, "wb");
-            if (stats) {
-                mi_stats_print_out(mem_stats_writer, stats);
-                (void)fclose(stats);
-            }
-        }
-        char phases[CBM_SZ_1K];
-        if (cbm_mem_phase_report_json(phases, sizeof(phases)) > 0) {
-            cbm_log_info("mem.phases", "table", phases);
-        }
+        mem_census_log_exit();
     }
 }
 

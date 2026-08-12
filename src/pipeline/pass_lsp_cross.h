@@ -171,12 +171,12 @@ const struct CBMCargoManifest *cbm_pxc_get_rust_manifest(void);
  * the existing cbm_run_X_lsp_cross callee signatures. */
 void cbm_pxc_run_one(CBMLanguage lang, CBMFileResult *r, const char *source, int source_len,
                      const char *module_qn, CBMLSPDef *all_defs, int def_count,
-                     const char **imp_keys, const char **imp_vals, int imp_count);
+                     const char **imp_names, const char **imp_qns, int imp_count);
 
 /* TS / JS / JSX / TSX variant with explicit dialect flags. */
 void cbm_pxc_run_one_ts(CBMFileResult *r, const char *source, int source_len, const char *module_qn,
-                        CBMLSPDef *all_defs, int def_count, const char **imp_keys,
-                        const char **imp_vals, int imp_count, bool js_mode, bool jsx_mode,
+                        CBMLSPDef *all_defs, int def_count, const char **imp_names,
+                        const char **imp_qns, int imp_count, bool js_mode, bool jsx_mode,
                         bool dts_mode);
 
 /* Per-file cross-LSP dispatch shared by the parallel resolve worker AND the

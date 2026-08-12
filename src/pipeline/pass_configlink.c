@@ -487,7 +487,7 @@ static int strategy_key_symbols(cbm_gbuf_t *gb) {
 
     config_entry_list_t config_entries = collect_config_entries(vars, var_count);
     if (config_entries.count == 0) {
-        cbm_da_free(&config_entries);
+        free(config_entries.items);
         return 0;
     }
 
@@ -512,8 +512,8 @@ static int strategy_key_symbols(cbm_gbuf_t *gb) {
 
     ac_free(&ac);
     free_pattern_groups(&groups);
-    cbm_da_free(&code_entries);
-    cbm_da_free(&config_entries);
+    free(code_entries.items);
+    free(config_entries.items);
     return edge_count;
 }
 

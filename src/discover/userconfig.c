@@ -17,7 +17,11 @@
 #include "foundation/sha256.h"
 #include <stdint.h>
 
-enum { MAX_CONFIG_SIZE = 65536 };
+enum {
+    MAX_CONFIG_SIZE = 65536,
+    USERCONFIG_HEX_NIBBLE_SHIFT = 4,
+    USERCONFIG_HEX_NIBBLE_MASK = 0x0F,
+};
 #include "foundation/log.h"
 
 #include <yyjson/yyjson.h>
@@ -32,12 +36,12 @@ enum { MAX_CONFIG_SIZE = 65536 };
 static const cbm_userconfig_t *g_userconfig = NULL;
 
 static void userconfig_source_digest(const char *state, const void *bytes, size_t len,
-                                     char out[CBM_SHA256_HEX_LEN + 1]) {
+                                     char out[CBM_SHA256_HEX_LEN + SKIP_ONE]) {
     static const char domain[] = "cbm-userconfig-source-v1";
     cbm_sha256_ctx sha;
     cbm_sha256_init(&sha);
     cbm_sha256_update(&sha, domain, sizeof(domain));
-    cbm_sha256_update(&sha, state, strlen(state) + 1);
+    cbm_sha256_update(&sha, state, strlen(state) + SKIP_ONE);
     if (bytes && len > 0) {
         cbm_sha256_update(&sha, bytes, len);
     }
@@ -45,8 +49,8 @@ static void userconfig_source_digest(const char *state, const void *bytes, size_
     cbm_sha256_final(&sha, digest);
     static const char hex[] = "0123456789abcdef";
     for (size_t i = 0; i < CBM_SHA256_DIGEST_LEN; i++) {
-        out[i * 2] = hex[digest[i] >> 4];
-        out[(i * 2) + 1] = hex[digest[i] & 0x0f];
+        out[i * PAIR_LEN] = hex[digest[i] >> USERCONFIG_HEX_NIBBLE_SHIFT];
+        out[(i * PAIR_LEN) + SKIP_ONE] = hex[digest[i] & USERCONFIG_HEX_NIBBLE_MASK];
     }
     out[CBM_SHA256_HEX_LEN] = '\0';
 }
@@ -255,7 +259,7 @@ static int parse_extra_extensions(yyjson_val *root, cbm_userext_t **entries, int
  * Returns 0 on success (or absent file), -1 on alloc failure.
  */
 static int load_config_file(const char *path, cbm_userext_t **entries, int *count,
-                            char source_sha256[CBM_SHA256_HEX_LEN + 1]) {
+                            char source_sha256[CBM_SHA256_HEX_LEN + SKIP_ONE]) {
     userconfig_source_digest("missing-or-unreadable", NULL, 0, source_sha256);
     FILE *f = cbm_fopen(path, "rb");
     if (!f) {

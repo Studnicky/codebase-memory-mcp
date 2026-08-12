@@ -7,7 +7,35 @@
 #include "foundation/constants.h"
 #include "extract_node_stack.h"
 
-enum { LAST_IDX = 1 };
+enum {
+    CBM_USAGE_FIRST_NAMED_CHILD_INDEX = 0,
+    CBM_USAGE_SECOND_NAMED_CHILD_INDEX = 1,
+    CBM_USAGE_THIRD_NAMED_CHILD_INDEX = 2,
+    CBM_USAGE_CALL_FORM_MIN_NAMED_CHILDREN = 2,
+    CBM_USAGE_THIRD_NAMED_CHILD_MINIMUM = 3,
+    CBM_USAGE_VHDL_WRAPPER_ANCESTOR_LIMIT = 4,
+    CBM_USAGE_VHDL_TERMINAL_SEARCH_LIMIT = 8,
+    CBM_USAGE_VHDL_TERMINAL_STACK_CAPACITY = CBM_USAGE_VHDL_TERMINAL_SEARCH_LIMIT + 1,
+    CBM_USAGE_PAREN_WRAPPER_DEPTH_LIMIT = 64,
+    CBM_USAGE_INITIAL_NODE_STACK_CAPACITY = 4096,
+    CBM_USAGE_SINGLE_NAMED_CHILD = 1,
+    CBM_USAGE_STRING_TERMINATOR_BYTES = 1,
+    CBM_USAGE_REVERSE_INDEX_STEP = 1,
+    CBM_USAGE_LAST_NAMED_CHILD_OFFSET = 1,
+    CBM_USAGE_CMAKE_PARAMETER_START_INDEX = 1,
+    CBM_USAGE_LEXICAL_SCOPE_ARRAY_OFFSET = 1,
+    CBM_USAGE_SCOPE_STACK_PREVIOUS_INDEX = 1,
+    CBM_USAGE_MAKE_VARIABLE_MIN_WRAPPER_LENGTH = 3,
+    CBM_USAGE_MAKE_VARIABLE_CONTENT_OFFSET = 2,
+    CBM_USAGE_MAKE_VARIABLE_CLOSING_DELIMITER_OFFSET = 1,
+    CBM_USAGE_PERL_CODEREF_SIGIL_WIDTH = 1,
+    CBM_USAGE_PYTHON_IMPORT_SOURCE_MIN_NAMED_CHILDREN = 2,
+    CBM_USAGE_SORT_MINIMUM_ITEMS = 2,
+    CBM_USAGE_BINARY_SEARCH_ADVANCE = 1,
+    CBM_USAGE_SORT_ORDER_LESS = -1,
+    CBM_USAGE_SORT_ORDER_GREATER = 1,
+    CBM_USAGE_VHDL_FRAME_INSPECT = 1,
+};
 #include <stdint.h> // uint32_t
 #include <stdlib.h> // qsort
 #include <string.h>
@@ -79,10 +107,100 @@ static bool is_inside_import(TSNode node, const CBMLangSpec *spec) {
     return false;
 }
 
+static bool is_language_reference_kind(CBMLanguage lang, const char *kind) {
+
+    switch (lang) {
+    case CBM_LANG_JAVASCRIPT:
+    case CBM_LANG_TYPESCRIPT:
+    case CBM_LANG_TSX:
+    case CBM_LANG_QML:
+    case CBM_LANG_CFSCRIPT:
+        return strcmp(kind, "property_identifier") == 0 ||
+               strcmp(kind, "private_property_identifier") == 0;
+    case CBM_LANG_GO:
+        return strcmp(kind, "field_identifier") == 0 || strcmp(kind, "package_identifier") == 0;
+    case CBM_LANG_PYTHON:
+        return strcmp(kind, "attribute") == 0;
+    case CBM_LANG_RUST:
+        return strcmp(kind, "field_identifier") == 0 || strcmp(kind, "scoped_identifier") == 0;
+    case CBM_LANG_C:
+    case CBM_LANG_CPP:
+    case CBM_LANG_CUDA:
+        return strcmp(kind, "field_identifier") == 0;
+    case CBM_LANG_PHP:
+        return strcmp(kind, "name") == 0 || strcmp(kind, "variable_name") == 0;
+    case CBM_LANG_HASKELL:
+        return strcmp(kind, "variable") == 0 || strcmp(kind, "constructor") == 0;
+    case CBM_LANG_OCAML:
+        return strcmp(kind, "value_path") == 0 || strcmp(kind, "constructor_path") == 0;
+    case CBM_LANG_ERLANG:
+        return strcmp(kind, "atom") == 0 || strcmp(kind, "var") == 0;
+    case CBM_LANG_CSS:
+        return strcmp(kind, "plain_value") == 0;
+    case CBM_LANG_SCSS:
+        return strcmp(kind, "variable_value") == 0;
+    case CBM_LANG_LLVM_IR:
+        return strcmp(kind, "local_var") == 0 || strcmp(kind, "global_var") == 0;
+    case CBM_LANG_PUPPET:
+    case CBM_LANG_POWERSHELL:
+        return strcmp(kind, "variable") == 0;
+    case CBM_LANG_BASH:
+    case CBM_LANG_FISH:
+    case CBM_LANG_ZSH:
+        return strcmp(kind, "variable_name") == 0;
+    case CBM_LANG_PERL:
+        return strcmp(kind, "scalar") == 0;
+    case CBM_LANG_CLOJURE:
+    case CBM_LANG_COMMONLISP:
+        return strcmp(kind, "sym_lit") == 0;
+    case CBM_LANG_VIMSCRIPT:
+        return strcmp(kind, "scoped_identifier") == 0 || strcmp(kind, "argument") == 0;
+    case CBM_LANG_ELM:
+        return strcmp(kind, "lower_case_identifier") == 0;
+    case CBM_LANG_COBOL:
+        return strcmp(kind, "qualified_word") == 0;
+    case CBM_LANG_EMACSLISP:
+    case CBM_LANG_SCHEME:
+    case CBM_LANG_FENNEL:
+    case CBM_LANG_RACKET:
+    case CBM_LANG_LINKERSCRIPT:
+        return strcmp(kind, "symbol") == 0;
+    case CBM_LANG_MAKEFILE:
+        return strcmp(kind, "variable_reference") == 0;
+    case CBM_LANG_CMAKE:
+        return strcmp(kind, "variable") == 0;
+    case CBM_LANG_WOLFRAM:
+        return strcmp(kind, "user_symbol") == 0;
+    case CBM_LANG_TYPST:
+        return strcmp(kind, "ident") == 0;
+    case CBM_LANG_TCL:
+        return strcmp(kind, "variable_substitution") == 0;
+    case CBM_LANG_TLAPLUS:
+        return strcmp(kind, "identifier_ref") == 0;
+    case CBM_LANG_AGDA:
+        return strcmp(kind, "qid") == 0;
+    case CBM_LANG_RESCRIPT:
+        return strcmp(kind, "value_identifier") == 0;
+    case CBM_LANG_PURESCRIPT:
+        return strcmp(kind, "variable") == 0;
+    case CBM_LANG_NICKEL:
+        return strcmp(kind, "ident") == 0;
+    case CBM_LANG_JSONNET:
+        return strcmp(kind, "id") == 0;
+    case CBM_LANG_CFML:
+        return strcmp(kind, "property_identifier") == 0;
+    case CBM_LANG_OBJECTSCRIPT_UDL:
+    case CBM_LANG_OBJECTSCRIPT_ROUTINE:
+        return strcmp(kind, "objectscript_identifier") == 0 ||
+               strcmp(kind, "objectscript_identifier_special") == 0;
+    default:
+        return false;
+    }
+}
+
 // Is this an identifier-like node that represents a reference?
 static bool is_reference_node(TSNode node, CBMLanguage lang) {
     const char *kind = ts_node_type(node);
-
     /* Python's attribute node and its terminal identifier describe the same
      * source occurrence. For a direct callable-value argument, keep the leaf
      * as the raw carrier (so unresolved cases retain a useful short-name
@@ -129,106 +247,7 @@ static bool is_reference_node(TSNode node, CBMLanguage lang) {
         return true;
     }
 
-    // Language-specific reference types
-    switch (lang) {
-    case CBM_LANG_JAVASCRIPT:
-    case CBM_LANG_TYPESCRIPT:
-    case CBM_LANG_TSX:
-    case CBM_LANG_QML:
-    case CBM_LANG_CFSCRIPT:
-        return strcmp(kind, "property_identifier") == 0 ||
-               strcmp(kind, "private_property_identifier") == 0;
-    case CBM_LANG_GO:
-        return strcmp(kind, "field_identifier") == 0 || strcmp(kind, "package_identifier") == 0;
-    case CBM_LANG_PYTHON:
-        return strcmp(kind, "attribute") == 0;
-    case CBM_LANG_RUST:
-        return strcmp(kind, "field_identifier") == 0 || strcmp(kind, "scoped_identifier") == 0;
-    case CBM_LANG_C:
-    case CBM_LANG_CPP:
-    case CBM_LANG_CUDA:
-        return strcmp(kind, "field_identifier") == 0;
-    case CBM_LANG_PHP:
-        return strcmp(kind, "name") == 0 || strcmp(kind, "variable_name") == 0;
-    case CBM_LANG_HASKELL:
-        return strcmp(kind, "variable") == 0 || strcmp(kind, "constructor") == 0;
-    case CBM_LANG_OCAML:
-        return strcmp(kind, "value_path") == 0 || strcmp(kind, "constructor_path") == 0;
-    case CBM_LANG_ERLANG:
-        return strcmp(kind, "atom") == 0 || strcmp(kind, "var") == 0;
-    case CBM_LANG_CSS:
-        /* Custom-property reads inside `var(...)` are exposed as plain_value;
-         * declarations use the separate property_name alias. */
-        return strcmp(kind, "plain_value") == 0;
-    case CBM_LANG_SCSS:
-        /* SCSS value occurrences retain their `$` spelling in variable_value;
-         * declaration parameters use the distinct variable_name node. */
-        return strcmp(kind, "variable_value") == 0;
-    case CBM_LANG_LLVM_IR:
-        return strcmp(kind, "local_var") == 0 || strcmp(kind, "global_var") == 0;
-    case CBM_LANG_PUPPET:
-    case CBM_LANG_POWERSHELL:
-        /* Puppet keeps the sigil in a dedicated `variable` node (`$watched`). */
-        return strcmp(kind, "variable") == 0;
-    case CBM_LANG_BASH:
-    case CBM_LANG_FISH:
-    case CBM_LANG_ZSH:
-        /* Expansion wrappers retain `$`; their named leaf is the bare variable name. */
-        return strcmp(kind, "variable_name") == 0;
-    case CBM_LANG_PERL:
-        /* Perl's named scalar node retains its sigil (`$watched`). */
-        return strcmp(kind, "scalar") == 0;
-    case CBM_LANG_CLOJURE:
-    case CBM_LANG_COMMONLISP:
-        return strcmp(kind, "sym_lit") == 0;
-    case CBM_LANG_VIMSCRIPT:
-        return strcmp(kind, "scoped_identifier") == 0 || strcmp(kind, "argument") == 0;
-    case CBM_LANG_ELM:
-        return strcmp(kind, "lower_case_identifier") == 0;
-    case CBM_LANG_COBOL:
-        return strcmp(kind, "qualified_word") == 0;
-    case CBM_LANG_EMACSLISP:
-    case CBM_LANG_SCHEME:
-    case CBM_LANG_FENNEL:
-    case CBM_LANG_RACKET:
-    case CBM_LANG_LINKERSCRIPT:
-        return strcmp(kind, "symbol") == 0;
-    case CBM_LANG_MAKEFILE:
-        return strcmp(kind, "variable_reference") == 0;
-    case CBM_LANG_CMAKE:
-        /* `${watched}` contains a named `variable` leaf spanning only `watched`. */
-        return strcmp(kind, "variable") == 0;
-    case CBM_LANG_WOLFRAM:
-        return strcmp(kind, "user_symbol") == 0;
-    case CBM_LANG_TYPST:
-        return strcmp(kind, "ident") == 0;
-    case CBM_LANG_TCL:
-        /* Tcl's value spelling includes the sigil, so retain the substitution wrapper. */
-        return strcmp(kind, "variable_substitution") == 0;
-    case CBM_LANG_TLAPLUS:
-        /* Definition-side names/parameters are `identifier`; expression-side
-         * values and operator arguments use the distinct `identifier_ref`. */
-        return strcmp(kind, "identifier_ref") == 0;
-    case CBM_LANG_AGDA:
-        /* `_qid` is hidden and aliases its public expression leaf to `qid`. */
-        return strcmp(kind, "qid") == 0;
-    case CBM_LANG_RESCRIPT:
-        return strcmp(kind, "value_identifier") == 0;
-    case CBM_LANG_PURESCRIPT:
-        return strcmp(kind, "variable") == 0;
-    case CBM_LANG_NICKEL:
-        return strcmp(kind, "ident") == 0;
-    case CBM_LANG_JSONNET:
-        return strcmp(kind, "id") == 0;
-    case CBM_LANG_CFML:
-        return strcmp(kind, "property_identifier") == 0;
-    case CBM_LANG_OBJECTSCRIPT_UDL:
-    case CBM_LANG_OBJECTSCRIPT_ROUTINE:
-        return strcmp(kind, "objectscript_identifier") == 0 ||
-               strcmp(kind, "objectscript_identifier_special") == 0;
-    default:
-        return false;
-    }
+    return is_language_reference_kind(lang, kind);
 }
 
 static bool node_contains(TSNode outer, TSNode inner) {
@@ -245,20 +264,39 @@ static bool vhdl_forward_callee_wrapper(TSNode node) {
 }
 
 static TSNode terminal_vhdl_identifier(TSNode node, int remaining_depth) {
-    if (ts_node_is_null(node) || remaining_depth < 0) {
-        return (TSNode){0};
+    typedef struct {
+        TSNode node;
+        int depth;
+        bool inspect;
+    } vhdl_search_frame_t;
+    vhdl_search_frame_t stack[CBM_USAGE_VHDL_TERMINAL_STACK_CAPACITY];
+    int count = 0;
+    if (!ts_node_is_null(node) && remaining_depth >= 0) {
+        stack[count++] = (vhdl_search_frame_t){node, remaining_depth, false};
     }
-    uint32_t count = ts_node_named_child_count(node);
-    for (uint32_t i = count; i > 0; i--) {
-        TSNode found =
-            terminal_vhdl_identifier(ts_node_named_child(node, i - 1), remaining_depth - 1);
-        if (!ts_node_is_null(found)) {
-            return found;
+    while (count > 0) {
+        vhdl_search_frame_t frame = stack[--count];
+        if (frame.inspect) {
+            const char *kind = ts_node_type(frame.node);
+            if (strcmp(kind, "identifier") == 0 || strcmp(kind, "simple_identifier") == 0) {
+                return frame.node;
+            }
+            continue;
+        }
+        if (count < CBM_USAGE_VHDL_TERMINAL_SEARCH_LIMIT) {
+            stack[count++] =
+                (vhdl_search_frame_t){frame.node, frame.depth, CBM_USAGE_VHDL_FRAME_INSPECT};
+        }
+        uint32_t child_count = ts_node_named_child_count(frame.node);
+        for (uint32_t i = 0; i < child_count; i++) {
+            if (frame.depth > 0 && count < CBM_USAGE_VHDL_TERMINAL_SEARCH_LIMIT) {
+                stack[count++] =
+                    (vhdl_search_frame_t){ts_node_named_child(frame.node, i),
+                                          frame.depth - CBM_USAGE_REVERSE_INDEX_STEP, false};
+            }
         }
     }
-    const char *kind = ts_node_type(node);
-    return strcmp(kind, "identifier") == 0 || strcmp(kind, "simple_identifier") == 0 ? node
-                                                                                     : (TSNode){0};
+    return (TSNode){0};
 }
 
 // Dart and VHDL represent some calls as a callee node immediately followed by
@@ -277,10 +315,12 @@ static bool is_forward_sibling_callee(CBMLanguage language, TSNode node) {
     }
 
     TSNode owner = node;
-    for (int depth = 0; depth < 4 && vhdl_forward_callee_wrapper(owner); depth++) {
+    for (int depth = 0;
+         depth < CBM_USAGE_VHDL_WRAPPER_ANCESTOR_LIMIT && vhdl_forward_callee_wrapper(owner);
+         depth++) {
         TSNode next = ts_node_next_named_sibling(owner);
         if (!ts_node_is_null(next) && strcmp(ts_node_type(next), "parenthesis_group") == 0) {
-            TSNode leaf = terminal_vhdl_identifier(owner, 8);
+            TSNode leaf = terminal_vhdl_identifier(owner, CBM_USAGE_VHDL_TERMINAL_SEARCH_LIMIT);
             return !ts_node_is_null(leaf) && ts_node_eq(node, leaf);
         }
         TSNode parent = ts_node_parent(owner);
@@ -568,7 +608,7 @@ static bool is_lisp_def_binding(CBMExtractCtx *ctx, TSNode node) {
     for (TSNode form = ts_node_parent(node); !ts_node_is_null(form); form = ts_node_parent(form)) {
         const char *kind = ts_node_type(form);
         if ((strcmp(kind, "list") != 0 && strcmp(kind, "list_lit") != 0) ||
-            ts_node_named_child_count(form) < 2) {
+            ts_node_named_child_count(form) < CBM_USAGE_CALL_FORM_MIN_NAMED_CHILDREN) {
             continue;
         }
         TSNode head_node = ts_node_named_child(form, 0);
@@ -576,11 +616,13 @@ static bool is_lisp_def_binding(CBMExtractCtx *ctx, TSNode node) {
         if (!lisp_def_head(head)) {
             continue;
         }
-        if (node_contains(head_node, node) || named_child_contains(form, 1, node)) {
+        if (node_contains(head_node, node) ||
+            named_child_contains(form, CBM_USAGE_SECOND_NAMED_CHILD_INDEX, node)) {
             return true;
         }
-        if (ctx->language == CBM_LANG_CLOJURE && ts_node_named_child_count(form) > 2 &&
-            named_child_contains(form, 2, node)) {
+        if (ctx->language == CBM_LANG_CLOJURE &&
+            ts_node_named_child_count(form) >= CBM_USAGE_THIRD_NAMED_CHILD_MINIMUM &&
+            named_child_contains(form, CBM_USAGE_THIRD_NAMED_CHILD_INDEX, node)) {
             return true;
         }
         return false;
@@ -590,11 +632,12 @@ static bool is_lisp_def_binding(CBMExtractCtx *ctx, TSNode node) {
 
 static bool is_fennel_fn_binding(CBMExtractCtx *ctx, TSNode node) {
     for (TSNode form = ts_node_parent(node); !ts_node_is_null(form); form = ts_node_parent(form)) {
-        if (strcmp(ts_node_type(form), "list") != 0 || ts_node_named_child_count(form) < 2 ||
+        if (strcmp(ts_node_type(form), "list") != 0 ||
+            ts_node_named_child_count(form) < CBM_USAGE_CALL_FORM_MIN_NAMED_CHILDREN ||
             !text_equals(ctx, ts_node_named_child(form, 0), "fn")) {
             continue;
         }
-        TSNode first = ts_node_named_child(form, 1);
+        TSNode first = ts_node_named_child(form, CBM_USAGE_SECOND_NAMED_CHILD_INDEX);
         const char *first_kind = ts_node_type(first);
         bool anonymous = strcmp(first_kind, "sequence") == 0 || strcmp(first_kind, "table") == 0 ||
                          strcmp(first_kind, "vector") == 0;
@@ -602,14 +645,16 @@ static bool is_fennel_fn_binding(CBMExtractCtx *ctx, TSNode node) {
             return named_child_contains(form, 0, node) || node_contains(first, node);
         }
         return named_child_contains(form, 0, node) || node_contains(first, node) ||
-               (ts_node_named_child_count(form) > 2 && named_child_contains(form, 2, node));
+               (ts_node_named_child_count(form) >= CBM_USAGE_THIRD_NAMED_CHILD_MINIMUM &&
+                named_child_contains(form, CBM_USAGE_THIRD_NAMED_CHILD_INDEX, node));
     }
     return false;
 }
 
 static bool is_elixir_def_binding(CBMExtractCtx *ctx, TSNode node) {
     for (TSNode form = ts_node_parent(node); !ts_node_is_null(form); form = ts_node_parent(form)) {
-        if (strcmp(ts_node_type(form), "call") != 0 || ts_node_named_child_count(form) < 2) {
+        if (strcmp(ts_node_type(form), "call") != 0 ||
+            ts_node_named_child_count(form) < CBM_USAGE_CALL_FORM_MIN_NAMED_CHILDREN) {
             continue;
         }
         TSNode head = ts_node_named_child(form, 0);
@@ -619,7 +664,7 @@ static bool is_elixir_def_binding(CBMExtractCtx *ctx, TSNode node) {
         }
         TSNode arguments = ts_node_child_by_field_name(form, TS_FIELD("arguments"));
         if (ts_node_is_null(arguments) || ts_node_named_child_count(arguments) == 0) {
-            arguments = ts_node_named_child(form, 1);
+            arguments = ts_node_named_child(form, CBM_USAGE_SECOND_NAMED_CHILD_INDEX);
         }
         TSNode signature = ts_node_named_child_count(arguments) > 0
                                ? ts_node_named_child(arguments, 0)
@@ -705,7 +750,8 @@ static bool is_cobol_move_destination(TSNode node) {
             return true;
         }
         uint32_t count = ts_node_named_child_count(parent);
-        return count > 1 && named_child_contains(parent, count - 1, node);
+        return count > CBM_USAGE_LAST_NAMED_CHILD_OFFSET &&
+               named_child_contains(parent, count - CBM_USAGE_LAST_NAMED_CHILD_OFFSET, node);
     }
     return false;
 }
@@ -755,7 +801,7 @@ static bool is_cmake_function_parameter(TSNode node) {
         return false;
     }
     uint32_t count = ts_node_named_child_count(arguments);
-    for (uint32_t i = 1; i < count; i++) {
+    for (uint32_t i = CBM_USAGE_CMAKE_PARAMETER_START_INDEX; i < count; i++) {
         if (node_contains(ts_node_named_child(arguments, i), node)) {
             return true;
         }
@@ -824,7 +870,7 @@ static bool cfml_argument_tag_name_binding(CBMExtractCtx *ctx, TSNode node) {
     }
     char *tag_text = cbm_node_text(ctx->arena, tag, ctx->source);
     static const char argument_tag[] = "<cfargument";
-    size_t prefix_length = sizeof(argument_tag) - 1U;
+    size_t prefix_length = sizeof(argument_tag) - CBM_USAGE_STRING_TERMINATOR_BYTES;
     if (!tag_text || strncasecmp(tag_text, argument_tag, prefix_length) != 0 ||
         (tag_text[prefix_length] != '\0' && !isspace((unsigned char)tag_text[prefix_length]) &&
          tag_text[prefix_length] != '>' && tag_text[prefix_length] != '/')) {
@@ -1094,6 +1140,36 @@ static bool elixir_binary_operator_binds(CBMExtractCtx *ctx, TSNode node) {
            text_equals(ctx, operator_node, "->") || text_equals(ctx, operator_node, "\\\\");
 }
 
+static bool binding_parent_declares_node(CBMExtractCtx *ctx, TSNode parent, TSNode node,
+                                         const CBMLangSpec *spec,
+                                         const CBMOccurrenceSpec *occurrence) {
+    const char *kind = ts_node_type(parent);
+    if (kind_in_exact_set(kind, common_whole_binding_nodes) ||
+        kind_in_exact_set(kind, occurrence->whole_binding_nodes)) {
+        return true;
+    }
+    bool variable_container =
+        spec->variable_node_types && cbm_kind_in_set(parent, spec->variable_node_types);
+    if (ctx->language == CBM_LANG_ELIXIR && strcmp(kind, "binary_operator") == 0) {
+        variable_container = elixir_binary_operator_binds(ctx, parent);
+    }
+    bool declared =
+        kind_in_exact_set(kind, field_binding_nodes) ||
+        (spec->function_node_types && cbm_kind_in_set(parent, spec->function_node_types)) ||
+        (spec->class_node_types && cbm_kind_in_set(parent, spec->class_node_types)) ||
+        (spec->field_node_types && cbm_kind_in_set(parent, spec->field_node_types)) ||
+        variable_container;
+    if (!declared) {
+        return false;
+    }
+    for (const char *const *field = binding_fields; *field; field++) {
+        if (field_contains_node(parent, *field, node)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static bool is_binding_occurrence(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec,
                                   WalkState *state) {
     const CBMOccurrenceSpec *occurrence = &occurrence_specs[ctx->language];
@@ -1125,30 +1201,8 @@ static bool is_binding_occurrence(CBMExtractCtx *ctx, TSNode node, const CBMLang
             return false;
         }
 
-        const char *kind = ts_node_type(parent);
-        if (kind_in_exact_set(kind, common_whole_binding_nodes) ||
-            kind_in_exact_set(kind, occurrence->whole_binding_nodes)) {
+        if (binding_parent_declares_node(ctx, parent, node, spec, occurrence)) {
             return true;
-        }
-
-        bool variable_container =
-            spec->variable_node_types && cbm_kind_in_set(parent, spec->variable_node_types);
-        if (ctx->language == CBM_LANG_ELIXIR && strcmp(kind, "binary_operator") == 0) {
-            variable_container = elixir_binary_operator_binds(ctx, parent);
-        }
-        bool declared_container =
-            kind_in_exact_set(kind, field_binding_nodes) ||
-            (spec->function_node_types && cbm_kind_in_set(parent, spec->function_node_types)) ||
-            (spec->class_node_types && cbm_kind_in_set(parent, spec->class_node_types)) ||
-            (spec->field_node_types && cbm_kind_in_set(parent, spec->field_node_types)) ||
-            variable_container;
-        if (declared_container) {
-            for (const char *const *binding_field = binding_fields; *binding_field;
-                 binding_field++) {
-                if (field_contains_node(parent, *binding_field, node)) {
-                    return true;
-                }
-            }
         }
         current = parent;
     }
@@ -1169,21 +1223,8 @@ static bool assignment_reads_target(TSNode assignment) {
     if (kind_in_exact_set(ts_node_type(assignment), read_write_nodes)) {
         return true;
     }
-    static const char *const read_write_operators[] = {"+=",
-                                                       "-=",
-                                                       "*=",
-                                                       "/=",
-                                                       "%=",
-                                                       "&=",
-                                                       "|=",
-                                                       "^=",
-                                                       "<<=",
-                                                       ">>=",
-                                                       "?"
-                                                       "?=",
-                                                       "++",
-                                                       "--",
-                                                       NULL};
+    static const char *const read_write_operators[] = {
+        "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", "?", "?=", "++", "--", NULL};
     uint32_t count = ts_node_child_count(assignment);
     for (uint32_t i = 0; i < count; i++) {
         if (kind_in_exact_set(ts_node_type(ts_node_child(assignment, i)), read_write_operators)) {
@@ -1300,13 +1341,16 @@ static bool is_call_argument_label_walk(TSNode node, WalkState *state) {
 static bool is_direct_argument_value(TSNode node) {
     usage_slow_parent_fallback_test_note();
     TSNode parent = ts_node_parent(node);
+    while (!ts_node_is_null(parent) && is_labeled_argument_kind(ts_node_type(parent))) {
+        TSNode value = ts_node_child_by_field_name(parent, TS_FIELD("value"));
+        if (ts_node_is_null(value) || !ts_node_eq(value, node)) {
+            return false;
+        }
+        node = parent;
+        parent = ts_node_parent(node);
+    }
     if (ts_node_is_null(parent)) {
         return false;
-    }
-    if (is_labeled_argument_kind(ts_node_type(parent))) {
-        TSNode value = ts_node_child_by_field_name(parent, TS_FIELD("value"));
-        return !ts_node_is_null(value) && ts_node_eq(value, node) &&
-               is_direct_argument_value(parent);
     }
     TSNode direct_arguments = ts_node_child_by_field_name(parent, TS_FIELD("arguments"));
     if (!ts_node_is_null(direct_arguments) && ts_node_eq(direct_arguments, node)) {
@@ -1387,7 +1431,8 @@ static TSNode python_direct_callable_attribute_site(TSNode node) {
     while (!ts_node_is_null(parent) &&
            strcmp(ts_node_type(parent), "parenthesized_expression") == 0) {
         TSNode inner = ts_node_child_by_field_name(parent, TS_FIELD("expression"));
-        if (ts_node_is_null(inner) && ts_node_named_child_count(parent) == 1) {
+        if (ts_node_is_null(inner) &&
+            ts_node_named_child_count(parent) == CBM_USAGE_SINGLE_NAMED_CHILD) {
             inner = ts_node_named_child(parent, 0);
         }
         if (ts_node_is_null(inner) || !ts_node_eq(inner, site)) {
@@ -1455,7 +1500,8 @@ static TSNode csharp_callable_value_site(TSNode node) {
     while (!ts_node_is_null(parent) &&
            strcmp(ts_node_type(parent), "parenthesized_expression") == 0) {
         TSNode inner = ts_node_child_by_field_name(parent, TS_FIELD("expression"));
-        if (ts_node_is_null(inner) && ts_node_named_child_count(parent) == 1) {
+        if (ts_node_is_null(inner) &&
+            ts_node_named_child_count(parent) == CBM_USAGE_SINGLE_NAMED_CHILD) {
             inner = ts_node_named_child(parent, 0);
         }
         if (ts_node_is_null(inner) || !ts_node_eq(inner, site)) {
@@ -1486,9 +1532,10 @@ static TSNode paren_wrapped_direct_argument_site(TSNode node, TSNode parent, TST
     }
     TSNode site = node;
     TSNode wrapper = parent;
-    for (int depth = 0; depth < 64; depth++) {
+    for (int depth = 0; depth < CBM_USAGE_PAREN_WRAPPER_DEPTH_LIMIT; depth++) {
         TSNode inner = ts_node_child_by_field_name(wrapper, TS_FIELD("expression"));
-        if (ts_node_is_null(inner) && ts_node_named_child_count(wrapper) == 1) {
+        if (ts_node_is_null(inner) &&
+            ts_node_named_child_count(wrapper) == CBM_USAGE_SINGLE_NAMED_CHILD) {
             inner = ts_node_named_child(wrapper, 0);
         }
         if (ts_node_is_null(inner) || !ts_node_eq(inner, site)) {
@@ -1513,6 +1560,50 @@ static TSNode paren_wrapped_direct_argument_site(TSNode node, TSNode parent, TST
     return is_direct_argument_value_walk(site, state) ? site : (TSNode){0};
 }
 
+static TSNode ts_member_callable_candidate(TSNode node, TSNode parent, TSTreeCursor *cursor) {
+    if (ts_node_is_null(parent) || strcmp(ts_node_type(parent), "member_expression") != 0) {
+        return (TSNode){0};
+    }
+    TSNode property = ts_node_child_by_field_name(parent, TS_FIELD("property"));
+    TSNode arguments = {0};
+    const char *field = NULL;
+    if (cursor) {
+        (void)occurrence_parent(cursor, parent, &arguments, &field);
+    } else {
+        usage_slow_parent_fallback_test_note();
+        arguments = ts_node_parent(parent);
+    }
+    return !ts_node_is_null(property) && ts_node_eq(property, node) &&
+                   !ts_node_is_null(arguments) && strcmp(ts_node_type(arguments), "arguments") == 0
+               ? node
+               : (TSNode){0};
+}
+
+static TSNode python_attribute_callable_candidate(TSNode node, TSNode parent) {
+    if (ts_node_is_null(parent) || strcmp(ts_node_type(parent), "attribute") != 0) {
+        return (TSNode){0};
+    }
+    TSNode attribute = ts_node_child_by_field_name(parent, TS_FIELD("attribute"));
+    return !ts_node_is_null(attribute) && ts_node_eq(attribute, node)
+               ? python_direct_callable_attribute_site(parent)
+               : (TSNode){0};
+}
+
+static TSNode go_selector_callable_candidate(TSNode node, TSNode parent, TSTreeCursor *cursor) {
+    if (ts_node_is_null(parent) || strcmp(ts_node_type(parent), "selector_expression") != 0) {
+        return (TSNode){0};
+    }
+    TSNode field = ts_node_child_by_field_name(parent, TS_FIELD("field"));
+    bool direct =
+        cursor ? is_direct_argument_value_cursor(parent, cursor) : is_direct_argument_value(parent);
+    return !ts_node_is_null(field) && ts_node_eq(field, node) && direct ? parent : (TSNode){0};
+}
+
+static bool is_ts_family_language(CBMLanguage language) {
+    return language == CBM_LANG_JAVASCRIPT || language == CBM_LANG_TYPESCRIPT ||
+           language == CBM_LANG_TSX;
+}
+
 static TSNode call_reference_candidate_site(CBMExtractCtx *ctx, TSNode node, const char *name,
                                             WalkState *state) {
     if (!ctx || !name || !language_may_stamp_exact_callable_value_candidate(ctx->language)) {
@@ -1528,40 +1619,16 @@ static TSNode call_reference_candidate_site(CBMExtractCtx *ctx, TSNode node, con
     } else {
         (void)occurrence_parent(cursor, node, &parent, &parent_field);
     }
-    bool ts_family = ctx->language == CBM_LANG_JAVASCRIPT || ctx->language == CBM_LANG_TYPESCRIPT ||
-                     ctx->language == CBM_LANG_TSX;
-    if (ts_family && strcmp(kind, "property_identifier") == 0 && !ts_node_is_null(parent) &&
-        strcmp(ts_node_type(parent), "member_expression") == 0) {
-        TSNode property = ts_node_child_by_field_name(parent, TS_FIELD("property"));
-        TSNode arguments = {0};
-        const char *member_field = NULL;
-        if (cursor) {
-            (void)occurrence_parent(cursor, parent, &arguments, &member_field);
-        } else {
-            usage_slow_parent_fallback_test_note();
-            arguments = ts_node_parent(parent);
-        }
-        return !ts_node_is_null(property) && ts_node_eq(property, node) &&
-                       !ts_node_is_null(arguments) &&
-                       strcmp(ts_node_type(arguments), "arguments") == 0
-                   ? node
-                   : (TSNode){0};
+    bool ts_family = is_ts_family_language(ctx->language);
+    if (ts_family && strcmp(kind, "property_identifier") == 0) {
+        return ts_member_callable_candidate(node, parent, cursor);
     }
     if (ctx->language == CBM_LANG_PYTHON && strcmp(kind, "identifier") == 0 &&
         !ts_node_is_null(parent) && strcmp(ts_node_type(parent), "attribute") == 0) {
-        TSNode attribute = ts_node_child_by_field_name(parent, TS_FIELD("attribute"));
-        return !ts_node_is_null(attribute) && ts_node_eq(attribute, node)
-                   ? python_direct_callable_attribute_site(parent)
-                   : (TSNode){0};
+        return python_attribute_callable_candidate(node, parent);
     }
-    if (ctx->language == CBM_LANG_GO && strcmp(kind, "field_identifier") == 0 &&
-        !ts_node_is_null(parent) && strcmp(ts_node_type(parent), "selector_expression") == 0) {
-        TSNode field = ts_node_child_by_field_name(parent, TS_FIELD("field"));
-        return !ts_node_is_null(field) && ts_node_eq(field, node) &&
-                       (cursor ? is_direct_argument_value_cursor(parent, cursor)
-                               : is_direct_argument_value(parent))
-                   ? parent
-                   : (TSNode){0};
+    if (ctx->language == CBM_LANG_GO && strcmp(kind, "field_identifier") == 0) {
+        return go_selector_callable_candidate(node, parent, cursor);
     }
     if (ctx->language == CBM_LANG_RUST && strcmp(kind, "scoped_identifier") == 0) {
         return is_direct_argument_value_walk(node, state) ? node : (TSNode){0};
@@ -1617,8 +1684,13 @@ static char *reference_name(CBMExtractCtx *ctx, TSNode node) {
      * Normalize only that grammar wrapper; the recorded site still spans the
      * exact source occurrence for occurrence-sensitive resolution. */
     size_t length = strlen(name);
-    bool parenthesized = length > 3 && name[0] == '$' && name[1] == '(' && name[length - 1] == ')';
-    return parenthesized ? cbm_arena_strndup(ctx->arena, name + 2, length - 3) : name;
+    bool parenthesized = length > CBM_USAGE_MAKE_VARIABLE_MIN_WRAPPER_LENGTH && name[0] == '$' &&
+                         name[CBM_USAGE_SECOND_NAMED_CHILD_INDEX] == '(' &&
+                         name[length - CBM_USAGE_MAKE_VARIABLE_CLOSING_DELIMITER_OFFSET] == ')';
+    return parenthesized
+               ? cbm_arena_strndup(ctx->arena, name + CBM_USAGE_MAKE_VARIABLE_CONTENT_OFFSET,
+                                   length - CBM_USAGE_MAKE_VARIABLE_MIN_WRAPPER_LENGTH)
+               : name;
 }
 
 static bool lexical_identifier_case_insensitive(CBMLanguage language) {
@@ -1649,7 +1721,7 @@ static const char *lexical_binding_key(CBMExtractCtx *ctx, WalkState *state, con
         return name;
     }
     size_t n = strlen(name);
-    char *folded = (char *)cbm_arena_alloc(ctx->arena, n + 1U);
+    char *folded = (char *)cbm_arena_alloc(ctx->arena, n + CBM_USAGE_STRING_TERMINATOR_BYTES);
     if (!folded) {
         if (state) {
             state->lexical_binding_tracking_failed = true;
@@ -1674,7 +1746,7 @@ static void stamp_usage_site(CBMExtractCtx *ctx, CBMUsage *usage, TSNode node, c
 
 static const CBMLexicalScope *usage_lexical_scope(const WalkState *state, uint32_t id) {
     return state && id > 0 && id <= (uint32_t)state->lexical_scope_count
-               ? &state->lexical_scopes[id - 1U]
+               ? &state->lexical_scopes[id - CBM_USAGE_LEXICAL_SCOPE_ARRAY_OFFSET]
                : NULL;
 }
 
@@ -1682,7 +1754,7 @@ static uint32_t active_lexical_scope_id(const WalkState *state) {
     if (!state) {
         return 0;
     }
-    for (int i = state->scope_top - 1; i >= 0; i--) {
+    for (int i = state->scope_top - CBM_USAGE_SCOPE_STACK_PREVIOUS_INDEX; i >= 0; i--) {
         if (state->scopes[i].lexical_scope_id != 0) {
             return state->scopes[i].lexical_scope_id;
         }
@@ -1747,7 +1819,7 @@ static uint32_t lexical_ancestor_of_kind(const WalkState *state, uint32_t start_
         }
         id = scope->parent_id;
     }
-    return 0;
+    return CBM_PYTHON_DIRECTIVE_NONE;
 }
 
 static uint32_t python_nearest_namespace(const WalkState *state, uint32_t start_id) {
@@ -1871,7 +1943,9 @@ static void record_python_directive(WalkState *state, uint32_t function_scope_id
 
 static CBMPythonDirectiveKind python_directive_for(const WalkState *state,
                                                    uint32_t function_scope_id, const char *name) {
-    for (int i = state ? state->python_directive_count - 1 : -1; i >= 0; i--) {
+    for (int i = state ? state->python_directive_count - CBM_USAGE_REVERSE_INDEX_STEP
+                       : -CBM_USAGE_REVERSE_INDEX_STEP;
+         i >= 0; i--) {
         const CBMPythonDirective *directive = &state->python_directives[i];
         if (directive->function_scope_id == function_scope_id && directive->name &&
             strcmp(directive->name, name) == 0) {
@@ -1974,6 +2048,97 @@ static bool rust_use_list_has_direct_self(TSNode list) {
     return false;
 }
 
+static bool import_has_ancestor_kind(TSNode node, TSNode boundary, const char *kind) {
+    for (TSNode parent = ts_node_parent(node);
+         !ts_node_is_null(parent) && !ts_node_eq(parent, boundary);
+         parent = ts_node_parent(parent)) {
+        if (strcmp(ts_node_type(parent), kind) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool is_python_import_binding(TSNode node, TSNode boundary) {
+    const char *kind = ts_node_type(boundary);
+    if (strcmp(kind, "future_import_statement") == 0 ||
+        import_has_ancestor_kind(node, boundary, "aliased_import")) {
+        return false;
+    }
+    if (strcmp(kind, "import_from_statement") == 0) {
+        if (field_contains_node(boundary, "module_name", node) ||
+            field_contains_node(boundary, "module", node)) {
+            return false;
+        }
+        if (ts_node_named_child_count(boundary) >=
+                CBM_USAGE_PYTHON_IMPORT_SOURCE_MIN_NAMED_CHILDREN &&
+            node_contains(ts_node_named_child(boundary, 0), node)) {
+            return false;
+        }
+        return strcmp(ts_node_type(node), "identifier") == 0;
+    }
+    TSNode entry = node;
+    for (TSNode parent = ts_node_parent(entry);
+         !ts_node_is_null(parent) && !ts_node_eq(parent, boundary);
+         parent = ts_node_parent(parent)) {
+        entry = parent;
+    }
+    TSNode first = first_named_leaf(entry);
+    return !ts_node_is_null(first) && ts_node_eq(first, node);
+}
+
+static bool is_js_import_binding(TSNode node, TSNode boundary) {
+    if (strcmp(ts_node_type(boundary), "import_statement") != 0) {
+        return false;
+    }
+    for (TSNode parent = ts_node_parent(node);
+         !ts_node_is_null(parent) && !ts_node_eq(parent, boundary);
+         parent = ts_node_parent(parent)) {
+        const char *kind = ts_node_type(parent);
+        if (strcmp(kind, "import_specifier") == 0) {
+            TSNode alias = ts_node_child_by_field_name(parent, TS_FIELD("alias"));
+            return ts_node_is_null(alias) && (field_contains_node(parent, "name", node) ||
+                                              ts_node_eq(first_named_leaf(parent), node));
+        }
+        if (strcmp(kind, "namespace_import") == 0 || strcmp(kind, "import_require_clause") == 0) {
+            return field_contains_node(parent, "name", node) ||
+                   ts_node_eq(first_named_leaf(parent), node);
+        }
+        if (strcmp(kind, "import_clause") == 0) {
+            return ts_node_eq(first_named_leaf(parent), node);
+        }
+    }
+    return false;
+}
+
+static bool is_rust_import_binding(TSNode node, TSNode boundary) {
+    TSNode alias = ts_node_child_by_field_name(boundary, TS_FIELD("alias"));
+    if (!ts_node_is_null(alias) && field_contains_node(boundary, "name", node)) {
+        return false;
+    }
+    bool terminal = false;
+    for (TSNode parent = ts_node_parent(node);
+         !ts_node_is_null(parent) && !ts_node_eq(parent, boundary);
+         parent = ts_node_parent(parent)) {
+        if (field_contains_node(parent, "path", node)) {
+            if (strcmp(ts_node_type(parent), "scoped_use_list") == 0 &&
+                strcmp(ts_node_type(node), "identifier") == 0) {
+                TSNode path = ts_node_child_by_field_name(parent, TS_FIELD("path"));
+                TSNode list = ts_node_child_by_field_name(parent, TS_FIELD("list"));
+                if ((terminal || ts_node_eq(path, node)) && !ts_node_is_null(list) &&
+                    rust_use_list_has_direct_self(list)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        if (field_contains_node(parent, "name", node)) {
+            terminal = true;
+        }
+    }
+    return terminal || strcmp(ts_node_type(node), "identifier") == 0;
+}
+
 /* Import subtrees are excluded from ordinary usage emission, but their local
  * names still participate in lexical lookup. Keep this classifier narrow: it
  * identifies only the binding side, never a module path or imported source
@@ -1993,114 +2158,14 @@ static bool is_import_binding_occurrence(CBMExtractCtx *ctx, TSNode node, const 
     }
 
     switch (ctx->language) {
-    case CBM_LANG_PYTHON: {
-        const char *boundary_kind = ts_node_type(boundary);
-        if (strcmp(boundary_kind, "future_import_statement") == 0) {
-            return false;
-        }
-        for (TSNode parent = ts_node_parent(node);
-             !ts_node_is_null(parent) && !ts_node_eq(parent, boundary);
-             parent = ts_node_parent(parent)) {
-            /* In an aliased import, only the alias binds. */
-            if (strcmp(ts_node_type(parent), "aliased_import") == 0) {
-                return false;
-            }
-        }
-        bool from_import = strcmp(boundary_kind, "import_from_statement") == 0;
-        if (from_import) {
-            if (field_contains_node(boundary, "module_name", node) ||
-                field_contains_node(boundary, "module", node)) {
-                return false;
-            }
-            /* Older Python grammar variants omit the module field. Their first
-             * named child is still the source module, never a local binding. */
-            if (ts_node_named_child_count(boundary) > 1 &&
-                node_contains(ts_node_named_child(boundary, 0), node)) {
-                return false;
-            }
-            return strcmp(ts_node_type(node), "identifier") == 0;
-        }
-
-        TSNode entry = node;
-        TSNode parent = ts_node_parent(entry);
-        while (!ts_node_is_null(parent) && !ts_node_eq(parent, boundary)) {
-            entry = parent;
-            parent = ts_node_parent(parent);
-        }
-        TSNode first = first_named_leaf(entry);
-        return !ts_node_is_null(first) && ts_node_eq(first, node);
-    }
+    case CBM_LANG_PYTHON:
+        return is_python_import_binding(node, boundary);
     case CBM_LANG_JAVASCRIPT:
     case CBM_LANG_TYPESCRIPT:
-    case CBM_LANG_TSX: {
-        if (strcmp(ts_node_type(boundary), "import_statement") != 0) {
-            return false;
-        }
-        for (TSNode parent = ts_node_parent(node);
-             !ts_node_is_null(parent) && !ts_node_eq(parent, boundary);
-             parent = ts_node_parent(parent)) {
-            const char *kind = ts_node_type(parent);
-            if (strcmp(kind, "import_specifier") == 0) {
-                TSNode alias = ts_node_child_by_field_name(parent, TS_FIELD("alias"));
-                if (!ts_node_is_null(alias)) {
-                    return false;
-                }
-                return field_contains_node(parent, "name", node) ||
-                       ts_node_eq(first_named_leaf(parent), node);
-            }
-            if (strcmp(kind, "namespace_import") == 0) {
-                return field_contains_node(parent, "name", node) ||
-                       ts_node_eq(first_named_leaf(parent), node);
-            }
-            if (strcmp(kind, "import_clause") == 0) {
-                /* A direct identifier is the default import. Named and
-                 * namespace imports were handled by their inner containers. */
-                return ts_node_eq(first_named_leaf(parent), node);
-            }
-            if (strcmp(kind, "import_require_clause") == 0) {
-                /* TypeScript `import local = require("module")` and
-                 * `import local = Namespace.member` put the binding first.
-                 * Current grammar variants expose only the source field, so
-                 * retain the first-leaf fallback as the exact role check. */
-                return field_contains_node(parent, "name", node) ||
-                       ts_node_eq(first_named_leaf(parent), node);
-            }
-        }
-        return false;
-    }
-    case CBM_LANG_RUST: {
-        TSNode boundary_alias = ts_node_child_by_field_name(boundary, TS_FIELD("alias"));
-        if (!ts_node_is_null(boundary_alias) && field_contains_node(boundary, "name", node)) {
-            /* `extern crate source as local` binds only local. */
-            return false;
-        }
-        bool terminal = false;
-        for (TSNode parent = ts_node_parent(node);
-             !ts_node_is_null(parent) && !ts_node_eq(parent, boundary);
-             parent = ts_node_parent(parent)) {
-            if (field_contains_node(parent, "path", node)) {
-                /* `use foo::{self}` imports the module itself under the final
-                 * segment of the prefix (`foo`). An aliased `self as x` is a
-                 * use_as_clause child rather than a direct self entry and is
-                 * already handled by the alias rule above. */
-                if (strcmp(ts_node_type(parent), "scoped_use_list") == 0 &&
-                    strcmp(ts_node_type(node), "identifier") == 0) {
-                    TSNode path = ts_node_child_by_field_name(parent, TS_FIELD("path"));
-                    TSNode list = ts_node_child_by_field_name(parent, TS_FIELD("list"));
-                    bool terminal_path = terminal || ts_node_eq(path, node);
-                    if (terminal_path && !ts_node_is_null(list) &&
-                        rust_use_list_has_direct_self(list)) {
-                        return true;
-                    }
-                }
-                return false;
-            }
-            if (field_contains_node(parent, "name", node)) {
-                terminal = true;
-            }
-        }
-        return terminal || strcmp(ts_node_type(node), "identifier") == 0;
-    }
+    case CBM_LANG_TSX:
+        return is_js_import_binding(node, boundary);
+    case CBM_LANG_RUST:
+        return is_rust_import_binding(node, boundary);
     default:
         return false;
     }
@@ -2124,6 +2189,168 @@ static uint32_t lexical_import_scope(const WalkState *state, uint32_t start_id) 
     return 0;
 }
 
+typedef struct {
+    uint32_t id;
+    bool whole;
+} CBMBindingScope;
+
+static bool is_python_executable_scope(const CBMLexicalScope *scope) {
+    return scope && (scope->kind == CBM_LEXICAL_SCOPE_FUNCTION ||
+                     scope->kind == CBM_LEXICAL_SCOPE_COMPREHENSION);
+}
+
+static bool select_python_binding_scope(const WalkState *state, uint32_t current_id,
+                                        const char *name, CBMBindingScope *selection) {
+    uint32_t namespace_id = python_nearest_namespace(state, current_id);
+    const CBMLexicalScope *namespace_scope = usage_lexical_scope(state, namespace_id);
+    uint32_t function_id =
+        namespace_scope && (namespace_scope->kind == CBM_LEXICAL_SCOPE_FUNCTION ||
+                            namespace_scope->kind == CBM_LEXICAL_SCOPE_COMPREHENSION)
+            ? namespace_id
+            : lexical_ancestor_of_kind(state, current_id, true, false);
+    CBMPythonDirectiveKind directive = python_directive_for(state, function_id, name);
+    selection->id = namespace_id;
+    if (directive == CBM_PYTHON_DIRECTIVE_GLOBAL) {
+        selection->id = state->root_lexical_scope_id;
+    } else if (directive == CBM_PYTHON_DIRECTIVE_NONLOCAL) {
+        selection->id = python_enclosing_function_namespace(state, function_id);
+    }
+    const CBMLexicalScope *owner = usage_lexical_scope(state, selection->id);
+    selection->whole = directive == CBM_PYTHON_DIRECTIVE_NONE && is_python_executable_scope(owner);
+    return owner != NULL;
+}
+
+static uint32_t select_js_binding_scope(const WalkState *state, TSNode node, uint32_t current_id) {
+    bool is_var = js_var_binding(node);
+    uint32_t scope_id = lexical_ancestor_of_kind(state, current_id, is_var, !is_var);
+    if (scope_id == 0) {
+        scope_id = lexical_ancestor_of_kind(state, current_id, true, false);
+    }
+    return scope_id ? scope_id : state->root_lexical_scope_id;
+}
+
+static bool is_javascript_language(CBMLanguage language) {
+    return language == CBM_LANG_JAVASCRIPT || language == CBM_LANG_TYPESCRIPT ||
+           language == CBM_LANG_TSX;
+}
+
+static bool record_python_scope_directive(CBMExtractCtx *ctx, WalkState *state, TSNode node,
+                                          uint32_t current_id, const char *name) {
+    if (ctx->language != CBM_LANG_PYTHON) {
+        return false;
+    }
+    CBMPythonDirectiveKind directive = CBM_PYTHON_DIRECTIVE_NONE;
+    if (lexical_ancestor_kind(node, "global_statement")) {
+        directive = CBM_PYTHON_DIRECTIVE_GLOBAL;
+    } else if (lexical_ancestor_kind(node, "nonlocal_statement")) {
+        directive = CBM_PYTHON_DIRECTIVE_NONLOCAL;
+    }
+    if (directive == CBM_PYTHON_DIRECTIVE_NONE) {
+        return false;
+    }
+    uint32_t function_id = lexical_ancestor_of_kind(state, current_id, true, false);
+    record_python_directive(state, function_id, name, directive);
+    return true;
+}
+
+static bool select_function_declaration_scope(CBMExtractCtx *ctx, const WalkState *state,
+                                              uint32_t current_id, CBMBindingScope *selection) {
+    uint32_t function_id = lexical_ancestor_of_kind(state, current_id, true, false);
+    const CBMLexicalScope *function_scope = usage_lexical_scope(state, function_id);
+    uint32_t parent_id = function_scope ? function_scope->parent_id : 0;
+    if (ctx->language == CBM_LANG_PYTHON) {
+        selection->id = python_nearest_namespace(state, parent_id);
+        if (!is_python_executable_scope(usage_lexical_scope(state, selection->id))) {
+            return false;
+        }
+    } else {
+        selection->id = lexical_ancestor_of_kind(state, parent_id, true, true);
+        if (selection->id == 0) {
+            return false;
+        }
+    }
+    selection->whole = true;
+    return true;
+}
+
+static bool select_python_class_declaration_scope(const WalkState *state, uint32_t current_id,
+                                                  CBMBindingScope *selection) {
+    uint32_t class_id = python_nearest_namespace(state, current_id);
+    const CBMLexicalScope *class_scope = usage_lexical_scope(state, class_id);
+    selection->id = python_nearest_namespace(state, class_scope ? class_scope->parent_id : 0);
+    if (!is_python_executable_scope(usage_lexical_scope(state, selection->id))) {
+        return false;
+    }
+    selection->whole = true;
+    return true;
+}
+
+static CBMBindingScope select_regular_binding_scope(CBMExtractCtx *ctx, const WalkState *state,
+                                                    TSNode node, uint32_t current_id,
+                                                    const char *name, bool parameter,
+                                                    bool import_binding) {
+    CBMBindingScope selection = {0};
+    if (parameter) {
+        selection.id = lexical_ancestor_of_kind(state, current_id, true, false);
+        selection.whole = selection.id != 0;
+        return selection;
+    }
+    if (ctx->language == CBM_LANG_PYTHON) {
+        (void)select_python_binding_scope(state, current_id, name, &selection);
+        return selection;
+    }
+    if (ctx->language == CBM_LANG_POWERSHELL) {
+        selection.id = lexical_ancestor_of_kind(state, current_id, true, false);
+        selection.whole = true;
+        return selection;
+    }
+    if (is_javascript_language(ctx->language)) {
+        selection.id = select_js_binding_scope(state, node, current_id);
+        selection.whole = true;
+        return selection;
+    }
+    if (ctx->language == CBM_LANG_RUST && import_binding) {
+        selection.id = lexical_import_scope(state, current_id);
+        if (selection.id == 0) {
+            selection.id = state->root_lexical_scope_id;
+        }
+        selection.whole = true;
+        return selection;
+    }
+    selection.id = lexical_ancestor_of_kind(state, current_id, true, true);
+    if (selection.id == 0) {
+        selection.id = state->root_lexical_scope_id;
+    }
+    return selection;
+}
+
+static const char *lexical_binding_name(CBMExtractCtx *ctx, WalkState *state, const char *raw_name,
+                                        bool parameter) {
+    if (ctx->language == CBM_LANG_VIMSCRIPT && parameter && !strchr(raw_name, ':')) {
+        raw_name = cbm_arena_sprintf(ctx->arena, "a:%s", raw_name);
+        if (!raw_name) {
+            state->lexical_binding_tracking_failed = true;
+            return NULL;
+        }
+    }
+    return lexical_binding_key(ctx, state, raw_name);
+}
+
+static void append_lexical_binding(WalkState *state, TSNode node, const char *name,
+                                   CBMBindingScope selection) {
+    const CBMLexicalScope *scope = usage_lexical_scope(state, selection.id);
+    if (!scope || !ensure_lexical_binding_capacity(state)) {
+        return;
+    }
+    CBMLexicalBinding *binding = &state->lexical_bindings[state->lexical_binding_count++];
+    binding->scope_id = selection.id;
+    binding->active_start = selection.whole ? scope->start_byte : ts_node_end_byte(node);
+    /* Zero means "the finalized end of this concrete scope". Split
+     * signature/body languages extend the scope after parameters are seen. */
+    binding->active_end = 0;
+    binding->name = name;
+}
+
 static void record_lexical_binding(CBMExtractCtx *ctx, WalkState *state, TSNode node,
                                    const CBMLangSpec *spec, const char *raw_name,
                                    bool import_binding) {
@@ -2131,147 +2358,53 @@ static void record_lexical_binding(CBMExtractCtx *ctx, WalkState *state, TSNode 
         return;
     }
     bool parameter = binding_is_parameter(ctx, node, spec);
-    if (ctx->language == CBM_LANG_VIMSCRIPT && parameter && !strchr(raw_name, ':')) {
-        raw_name = cbm_arena_sprintf(ctx->arena, "a:%s", raw_name);
-        if (!raw_name) {
-            state->lexical_binding_tracking_failed = true;
-            return;
-        }
-    }
-    const char *name = lexical_binding_key(ctx, state, raw_name);
+    const char *name = lexical_binding_name(ctx, state, raw_name, parameter);
     if (!name || !name[0]) {
         return;
     }
 
     uint32_t current_id = active_lexical_scope_id(state);
-    uint32_t scope_id = 0;
-    bool whole_scope = false;
-    TSNode function_declaration = declared_function_name_owner(node, spec);
-    TSNode class_declaration = declared_class_name_owner(node, spec);
-
-    if (ctx->language == CBM_LANG_PYTHON && (lexical_ancestor_kind(node, "global_statement") ||
-                                             lexical_ancestor_kind(node, "nonlocal_statement"))) {
-        uint32_t function_id = lexical_ancestor_of_kind(state, current_id, true, false);
-        CBMPythonDirectiveKind directive = lexical_ancestor_kind(node, "global_statement")
-                                               ? CBM_PYTHON_DIRECTIVE_GLOBAL
-                                               : CBM_PYTHON_DIRECTIVE_NONLOCAL;
-        record_python_directive(state, function_id, name, directive);
+    if (record_python_scope_directive(ctx, state, node, current_id, name)) {
         return;
     }
-
-    if (!ts_node_is_null(function_declaration)) {
-        uint32_t function_id = lexical_ancestor_of_kind(state, current_id, true, false);
-        const CBMLexicalScope *function_scope = usage_lexical_scope(state, function_id);
-        uint32_t parent_id = function_scope ? function_scope->parent_id : 0;
-        if (ctx->language == CBM_LANG_PYTHON) {
-            scope_id = python_nearest_namespace(state, parent_id);
-            const CBMLexicalScope *owner = usage_lexical_scope(state, scope_id);
-            if (!owner || (owner->kind != CBM_LEXICAL_SCOPE_FUNCTION &&
-                           owner->kind != CBM_LEXICAL_SCOPE_COMPREHENSION)) {
+    CBMBindingScope selection = {0};
+    TSNode function_declaration = declared_function_name_owner(node, spec);
+    if (!ts_node_is_null(function_declaration) &&
+        !select_function_declaration_scope(ctx, state, current_id, &selection)) {
+        return;
+    }
+    if (ts_node_is_null(function_declaration)) {
+        TSNode class_declaration = declared_class_name_owner(node, spec);
+        if (ctx->language == CBM_LANG_PYTHON && !ts_node_is_null(class_declaration)) {
+            if (!select_python_class_declaration_scope(state, current_id, &selection)) {
                 return;
             }
         } else {
-            scope_id = lexical_ancestor_of_kind(state, parent_id, true, true);
-        }
-        /* Top-level/class callable declarations are themselves semantic
-         * targets, not local-value blockers. Nested declarations still bind
-         * their enclosing executable scope and must block raw-name fallback. */
-        if (scope_id == 0) {
-            return;
-        }
-        whole_scope = true;
-    } else if (ctx->language == CBM_LANG_PYTHON && !ts_node_is_null(class_declaration)) {
-        uint32_t class_id = python_nearest_namespace(state, current_id);
-        const CBMLexicalScope *class_scope = usage_lexical_scope(state, class_id);
-        scope_id = python_nearest_namespace(state, class_scope ? class_scope->parent_id : 0);
-        const CBMLexicalScope *owner = usage_lexical_scope(state, scope_id);
-        if (!owner || (owner->kind != CBM_LEXICAL_SCOPE_FUNCTION &&
-                       owner->kind != CBM_LEXICAL_SCOPE_COMPREHENSION)) {
-            return;
-        }
-        whole_scope = true;
-    } else if (parameter) {
-        scope_id = lexical_ancestor_of_kind(state, current_id, true, false);
-        whole_scope = true;
-    } else if (ctx->language == CBM_LANG_PYTHON) {
-        uint32_t namespace_id = python_nearest_namespace(state, current_id);
-        const CBMLexicalScope *namespace_scope = usage_lexical_scope(state, namespace_id);
-        uint32_t function_id =
-            namespace_scope && (namespace_scope->kind == CBM_LEXICAL_SCOPE_FUNCTION ||
-                                namespace_scope->kind == CBM_LEXICAL_SCOPE_COMPREHENSION)
-                ? namespace_id
-                : lexical_ancestor_of_kind(state, current_id, true, false);
-        CBMPythonDirectiveKind directive = python_directive_for(state, function_id, name);
-        if (directive == CBM_PYTHON_DIRECTIVE_GLOBAL) {
-            scope_id = state->root_lexical_scope_id;
-        } else if (directive == CBM_PYTHON_DIRECTIVE_NONLOCAL) {
-            scope_id = python_enclosing_function_namespace(state, function_id);
-        } else {
-            scope_id = namespace_id;
-        }
-        const CBMLexicalScope *owner = usage_lexical_scope(state, scope_id);
-        if (!owner) {
-            return;
-        }
-        whole_scope = directive == 0 && (owner->kind == CBM_LEXICAL_SCOPE_FUNCTION ||
-                                         owner->kind == CBM_LEXICAL_SCOPE_COMPREHENSION);
-    } else if (ctx->language == CBM_LANG_POWERSHELL) {
-        scope_id = lexical_ancestor_of_kind(state, current_id, true, false);
-        whole_scope = true;
-    } else if (ctx->language == CBM_LANG_JAVASCRIPT || ctx->language == CBM_LANG_TYPESCRIPT ||
-               ctx->language == CBM_LANG_TSX) {
-        bool is_var = js_var_binding(node);
-        scope_id = lexical_ancestor_of_kind(state, current_id, is_var, !is_var);
-        if (scope_id == 0) {
-            scope_id = lexical_ancestor_of_kind(state, current_id, true, false);
-        }
-        if (scope_id == 0) {
-            scope_id = state->root_lexical_scope_id;
-        }
-        whole_scope = true; /* var hoisting and let/const TDZ */
-    } else if (ctx->language == CBM_LANG_RUST && import_binding) {
-        scope_id = lexical_import_scope(state, current_id);
-        if (scope_id == 0) {
-            scope_id = state->root_lexical_scope_id;
-        }
-        /* A Rust use/extern-crate declaration is an item whose name is in
-         * scope for the complete containing block or module, independent of
-         * textual declaration order. */
-        whole_scope = true;
-    } else {
-        scope_id = lexical_ancestor_of_kind(state, current_id, true, true);
-        if (scope_id == 0) {
-            scope_id = state->root_lexical_scope_id;
+            selection = select_regular_binding_scope(ctx, state, node, current_id, name, parameter,
+                                                     import_binding);
         }
     }
-    const CBMLexicalScope *scope = usage_lexical_scope(state, scope_id);
-    if (!scope || !ensure_lexical_binding_capacity(state)) {
-        return;
-    }
-    CBMLexicalBinding *binding = &state->lexical_bindings[state->lexical_binding_count++];
-    binding->scope_id = scope_id;
-    binding->active_start = whole_scope ? scope->start_byte : ts_node_end_byte(node);
-    /* Zero means "the finalized end of this concrete scope". Split
-     * signature/body languages extend the scope after parameters are seen. */
-    binding->active_end = 0;
-    binding->name = name;
+    append_lexical_binding(state, node, name, selection);
 }
 
 static int compare_lexical_bindings(const void *left_ptr, const void *right_ptr) {
     const CBMLexicalBinding *left = (const CBMLexicalBinding *)left_ptr;
     const CBMLexicalBinding *right = (const CBMLexicalBinding *)right_ptr;
     if (left->scope_id != right->scope_id) {
-        return left->scope_id < right->scope_id ? -1 : 1;
+        return left->scope_id < right->scope_id ? CBM_USAGE_SORT_ORDER_LESS
+                                                : CBM_USAGE_SORT_ORDER_GREATER;
     }
     int name_order = strcmp(left->name, right->name);
     if (name_order != 0) {
         return name_order;
     }
     if (left->active_start != right->active_start) {
-        return left->active_start < right->active_start ? -1 : 1;
+        return left->active_start < right->active_start ? CBM_USAGE_SORT_ORDER_LESS
+                                                        : CBM_USAGE_SORT_ORDER_GREATER;
     }
     if (left->active_end != right->active_end) {
-        return left->active_end < right->active_end ? -1 : 1;
+        return left->active_end < right->active_end ? CBM_USAGE_SORT_ORDER_LESS
+                                                    : CBM_USAGE_SORT_ORDER_GREATER;
     }
     return 0;
 }
@@ -2279,7 +2412,8 @@ static int compare_lexical_bindings(const void *left_ptr, const void *right_ptr)
 static int compare_binding_key(const CBMLexicalBinding *binding, uint32_t scope_id,
                                const char *name) {
     if (binding->scope_id != scope_id) {
-        return binding->scope_id < scope_id ? -1 : 1;
+        return binding->scope_id < scope_id ? CBM_USAGE_SORT_ORDER_LESS
+                                            : CBM_USAGE_SORT_ORDER_GREATER;
     }
     return strcmp(binding->name, name);
 }
@@ -2291,7 +2425,7 @@ static int lexical_binding_lower_bound(const WalkState *state, uint32_t scope_id
     while (low < high) {
         int middle = low + ((high - low) / PAIR_LEN);
         if (compare_binding_key(&state->lexical_bindings[middle], scope_id, name) < 0) {
-            low = middle + 1;
+            low = middle + CBM_USAGE_BINARY_SEARCH_ADVANCE;
         } else {
             high = middle;
         }
@@ -2341,7 +2475,7 @@ void cbm_finalize_lexical_usages(CBMExtractCtx *ctx, WalkState *state) {
     if (!ctx || !state) {
         return;
     }
-    if (state->lexical_binding_count > 1) {
+    if (state->lexical_binding_count >= CBM_USAGE_SORT_MINIMUM_ITEMS) {
         qsort(state->lexical_bindings, (size_t)state->lexical_binding_count,
               sizeof(*state->lexical_bindings), compare_lexical_bindings);
     }
@@ -2386,7 +2520,7 @@ static char *perl_direct_coderef_name(CBMExtractCtx *ctx, TSNode node) {
     if (!amp) {
         return NULL;
     }
-    const char *start = amp + 1;
+    const char *start = amp + CBM_USAGE_PERL_CODEREF_SIGIL_WIDTH;
     while (*start && isspace((unsigned char)*start)) {
         start++;
     }
@@ -2466,14 +2600,14 @@ static void try_emit_usage(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *s
 // Iterative usage walker — explicit stack
 static void walk_usages(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec *spec) {
     TSNodeStack stack;
-    ts_nstack_init(&stack, ctx->arena, 4096);
+    ts_nstack_init(&stack, ctx->arena, CBM_USAGE_INITIAL_NODE_STACK_CAPACITY);
     ts_nstack_push(&stack, ctx->arena, root);
 
     while (stack.count > 0) {
         TSNode node = ts_nstack_pop(&stack);
         try_emit_usage(ctx, node, spec);
         uint32_t count = ts_node_child_count(node);
-        for (int i = (int)count - LAST_IDX; i >= 0; i--) {
+        for (int i = (int)count - CBM_USAGE_REVERSE_INDEX_STEP; i >= 0; i--) {
             ts_nstack_push(&stack, ctx->arena, ts_node_child(node, (uint32_t)i));
         }
     }
@@ -2491,6 +2625,75 @@ void cbm_extract_usages(CBMExtractCtx *ctx) {
 // --- Unified handler: called once per node by the cursor walk ---
 // Uses WalkState flags instead of parent-chain walks for O(1) context checks.
 
+static bool has_reference_name(CBMExtractCtx *ctx, const char *name) {
+    return name && name[0] && !cbm_is_keyword(name, ctx->language);
+}
+
+static bool is_possible_binding_leaf(CBMExtractCtx *ctx, TSNode node, WalkState *state,
+                                     const CBMOccurrenceSpec *occurrence) {
+    return ts_node_is_named(node) && ts_node_named_child_count(node) == 0 &&
+           (state->inside_import || is_exact_language_binding(ctx, node, state) ||
+            is_policy_binding(ctx, node, occurrence));
+}
+
+static bool is_exact_callee_node(TSNode node, const WalkState *state) {
+    return (!ts_node_is_null(state->callee_expr) && ts_node_eq(node, state->callee_expr)) ||
+           (!ts_node_is_null(state->callee_leaf) && ts_node_eq(node, state->callee_leaf));
+}
+
+static void emit_callable_reference_usage(CBMExtractCtx *ctx, TSNode node, WalkState *state,
+                                          bool reference_node) {
+    if (!reference_node || state->invocation_kind != CBM_INVOCATION_CALLABLE_REFERENCE) {
+        return;
+    }
+    char *name = reference_name(ctx, node);
+    if (!has_reference_name(ctx, name)) {
+        return;
+    }
+    CBMUsage usage = {0};
+    usage.ref_name = name;
+    usage.enclosing_func_qn = state->enclosing_func_qn;
+    usage.lexical_scope_id = usage_lexical_scope_id_for_node(ctx, state, node);
+    /* Kotlin callable-reference syntax is only a precision candidate. The
+     * semantic pass decides whether `::name` denotes one exact callable;
+     * unresolved properties and ambiguous values remain ordinary USAGE. */
+    usage.kind = ctx->language == CBM_LANG_KOTLIN ? CBM_USAGE_VALUE : CBM_USAGE_CALL_REFERENCE;
+    usage.may_be_call_reference = ctx->language == CBM_LANG_KOTLIN;
+    usage.site_start_byte = ts_node_start_byte(node);
+    usage.site_end_byte = ts_node_end_byte(node);
+    cbm_usages_push(&ctx->result->usages, ctx->arena, usage);
+}
+
+static void record_node_binding(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec,
+                                WalkState *state, bool import_binding) {
+    char *binding_name = reference_name(ctx, node);
+    if (has_reference_name(ctx, binding_name)) {
+        record_lexical_binding(ctx, state, node, spec, binding_name, import_binding);
+    }
+}
+
+static bool is_python_scope_directive_node(CBMExtractCtx *ctx, TSNode node) {
+    return ctx->language == CBM_LANG_PYTHON && (lexical_ancestor_kind(node, "global_statement") ||
+                                                lexical_ancestor_kind(node, "nonlocal_statement"));
+}
+
+static bool is_objectscript_language(CBMLanguage language) {
+    return language == CBM_LANG_OBJECTSCRIPT_UDL || language == CBM_LANG_OBJECTSCRIPT_ROUTINE;
+}
+
+static void emit_value_usage(CBMExtractCtx *ctx, TSNode node, WalkState *state) {
+    char *name = reference_name(ctx, node);
+    if (!has_reference_name(ctx, name)) {
+        return;
+    }
+    CBMUsage usage = {0};
+    usage.ref_name = name;
+    usage.enclosing_func_qn = state->enclosing_func_qn;
+    usage.lexical_scope_id = usage_lexical_scope_id_for_node(ctx, state, node);
+    stamp_usage_site(ctx, &usage, node, name, state);
+    cbm_usages_push(&ctx->result->usages, ctx->arena, usage);
+}
+
 void handle_usages(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, WalkState *state) {
     if (emit_direct_perl_coderef_usage(ctx, node, state->enclosing_func_qn,
                                        active_lexical_scope_id(state))) {
@@ -2501,10 +2704,7 @@ void handle_usages(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, Wal
     }
     bool reference_node = is_reference_node(node, ctx->language);
     const CBMOccurrenceSpec *occurrence = &occurrence_specs[ctx->language];
-    bool possible_binding_leaf =
-        ts_node_is_named(node) && ts_node_named_child_count(node) == 0 &&
-        (state->inside_import || is_exact_language_binding(ctx, node, state) ||
-         is_policy_binding(ctx, node, occurrence));
+    bool possible_binding_leaf = is_possible_binding_leaf(ctx, node, state, occurrence);
     if (!reference_node && !possible_binding_leaf) {
         return;
     }
@@ -2513,32 +2713,8 @@ void handle_usages(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, Wal
     // consumes. Receivers, qualifiers, computed keys, arguments, and nested
     // bodies remain ordinary value references. Explicit callable syntax keeps
     // that exact occurrence as a typed reference instead of erasing it.
-    bool exact_callee =
-        (!ts_node_is_null(state->callee_expr) && ts_node_eq(node, state->callee_expr)) ||
-        (!ts_node_is_null(state->callee_leaf) && ts_node_eq(node, state->callee_leaf));
-    if (exact_callee) {
-        if (reference_node && state->invocation_kind == CBM_INVOCATION_CALLABLE_REFERENCE) {
-            char *name = reference_name(ctx, node);
-            if (name && name[0] && !cbm_is_keyword(name, ctx->language)) {
-                CBMUsage usage = {0};
-                usage.ref_name = name;
-                usage.enclosing_func_qn = state->enclosing_func_qn;
-                usage.lexical_scope_id = usage_lexical_scope_id_for_node(ctx, state, node);
-                /* Kotlin callable-reference syntax is only a precision
-                 * candidate. The semantic pass decides whether `::name`
-                 * denotes one exact callable; unresolved properties and
-                 * ambiguous values must remain ordinary USAGE. */
-                if (ctx->language == CBM_LANG_KOTLIN) {
-                    usage.kind = CBM_USAGE_VALUE;
-                    usage.may_be_call_reference = true;
-                } else {
-                    usage.kind = CBM_USAGE_CALL_REFERENCE;
-                }
-                usage.site_start_byte = ts_node_start_byte(node);
-                usage.site_end_byte = ts_node_end_byte(node);
-                cbm_usages_push(&ctx->result->usages, ctx->arena, usage);
-            }
-        }
+    if (is_exact_callee_node(node, state)) {
+        emit_callable_reference_usage(ctx, node, state, reference_node);
         return;
     }
     if (is_forward_sibling_callee(ctx->language, node)) {
@@ -2551,45 +2727,25 @@ void handle_usages(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, Wal
     // be recorded before the subtree is skipped.
     if (state->inside_import) {
         if (is_import_binding_occurrence(ctx, node, spec)) {
-            char *binding_name = reference_name(ctx, node);
-            if (binding_name && binding_name[0] && !cbm_is_keyword(binding_name, ctx->language)) {
-                record_lexical_binding(ctx, state, node, spec, binding_name, true);
-            }
+            record_node_binding(ctx, node, spec, state, true);
         }
         return;
     }
 
-    bool python_scope_directive =
-        ctx->language == CBM_LANG_PYTHON && (lexical_ancestor_kind(node, "global_statement") ||
-                                             lexical_ancestor_kind(node, "nonlocal_statement"));
-    if (python_scope_directive || is_binding_occurrence(ctx, node, spec, state)) {
-        char *binding_name = reference_name(ctx, node);
-        if (binding_name && binding_name[0] && !cbm_is_keyword(binding_name, ctx->language)) {
-            record_lexical_binding(ctx, state, node, spec, binding_name, false);
-        }
+    if (is_python_scope_directive_node(ctx, node) ||
+        is_binding_occurrence(ctx, node, spec, state)) {
+        record_node_binding(ctx, node, spec, state, false);
         return;
     }
     if (!reference_node) {
         return;
     }
     if (is_write_occurrence(ctx, node, spec, state)) {
-        if (ctx->language == CBM_LANG_OBJECTSCRIPT_UDL ||
-            ctx->language == CBM_LANG_OBJECTSCRIPT_ROUTINE) {
-            char *binding_name = reference_name(ctx, node);
-            if (binding_name && binding_name[0] && !cbm_is_keyword(binding_name, ctx->language)) {
-                record_lexical_binding(ctx, state, node, spec, binding_name, false);
-            }
+        if (is_objectscript_language(ctx->language)) {
+            record_node_binding(ctx, node, spec, state, false);
         }
         return;
     }
 
-    char *name = reference_name(ctx, node);
-    if (name && name[0] && !cbm_is_keyword(name, ctx->language)) {
-        CBMUsage usage = {0};
-        usage.ref_name = name;
-        usage.enclosing_func_qn = state->enclosing_func_qn;
-        usage.lexical_scope_id = usage_lexical_scope_id_for_node(ctx, state, node);
-        stamp_usage_site(ctx, &usage, node, name, state);
-        cbm_usages_push(&ctx->result->usages, ctx->arena, usage);
-    }
+    emit_value_usage(ctx, node, state);
 }

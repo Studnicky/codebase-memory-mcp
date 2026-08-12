@@ -27,6 +27,10 @@
 #include <ctype.h>
 #include <time.h> // struct timespec, CLOCK_MONOTONIC
 
+#if defined(CBM_BIND_TS_ALLOCATOR) && CBM_BIND_TS_ALLOCATOR
+#include <mimalloc.h>
+#endif
+
 // Atomic counters for profiling parse vs extraction time (nanoseconds).
 // Accessed from multiple threads; using _Atomic for safe accumulation.
 #include <stdatomic.h>
@@ -37,15 +41,18 @@ static _Atomic uint64_t total_preprocess_ns = 0;
 static _Atomic uint64_t total_files_preprocessed = 0;
 static _Atomic uint64_t total_files = 0;
 
+enum { CBM_MACRO_EXTRACTION_ENABLED = CBM_INIT_DONE };
+
 // C/C++ preprocessor #define macros are extracted as Macro nodes (#375). On a
 // macro-dense codebase (e.g. the Linux kernel: ~2.4M macros, 49% of all nodes)
 // this is the dominant extraction cost, so it is gated to the full/advanced
 // index modes. Default ON to preserve behavior for direct callers/tests; the
 // pipeline sets it from the index mode before extraction. Set once pre-extract,
 // read-only during, so a relaxed atomic is sufficient.
-static _Atomic int g_extract_macros = 1;
+static _Atomic int g_extract_macros = CBM_MACRO_EXTRACTION_ENABLED;
 void cbm_set_macro_extraction(int enabled) {
-    atomic_store_explicit(&g_extract_macros, enabled ? 1 : 0, memory_order_relaxed);
+    atomic_store_explicit(&g_extract_macros, enabled ? CBM_MACRO_EXTRACTION_ENABLED : 0,
+                          memory_order_relaxed);
 }
 int cbm_macro_extraction_enabled(void) {
     return atomic_load_explicit(&g_extract_macros, memory_order_relaxed);
@@ -461,19 +468,19 @@ static int count_params_from_signature(const char *sig) {
     }
     p++;
     const char *list = p;
-    int depth = 0;
     int commas = 0;
     bool any = false;
+    int depth = 0;
     for (; *p; p++) {
         char ch = *p;
-        if (ch == '(' || ch == '[' || ch == '{' || ch == '<') {
+        if (strchr("([{<", ch)) {
             depth++;
         } else if (ch == ')') {
             if (depth == 0) {
                 break;
             }
             depth--;
-        } else if (ch == ']' || ch == '}' || ch == '>') {
+        } else if (strchr("]}>", ch)) {
             if (depth > 0) {
                 depth--;
             }
@@ -484,18 +491,15 @@ static int count_params_from_signature(const char *sig) {
         }
     }
     if (!any) {
-        return 0; /* "()" */
+        return 0;
     }
-    if (commas == 0) {
-        while (*list == ' ' || *list == '\t') {
-            list++;
-        }
-        if (strncmp(list, "void", 4) == 0 &&
-            (list[4] == ')' || list[4] == ' ' || list[4] == '\0')) {
-            return 0; /* C "(void)" */
-        }
+    while (*list == ' ' || *list == '\t') {
+        list++;
     }
-    return commas + 1;
+    return commas == 0 && strncmp(list, "void", CBM_SZ_4) == 0 &&
+                   (list[CBM_SZ_4] == ')' || list[CBM_SZ_4] == ' ' || list[CBM_SZ_4] == '\0')
+               ? 0
+               : commas + SKIP_ONE;
 }
 
 // --- Main extraction function ---
@@ -558,6 +562,39 @@ static CBMHashTable *g_quarantine_set = NULL;
 enum { CBM_QSET_UNINIT = 0, CBM_QSET_INITING = 1, CBM_QSET_INITED = 2 };
 static atomic_int g_quarantine_state = CBM_QSET_UNINIT;
 
+static void cbm_quarantine_trim_line(char *line) {
+    size_t len = strlen(line);
+    while (len > 0 && (line[len - SKIP_ONE] == '\n' || line[len - SKIP_ONE] == '\r')) {
+        line[--len] = '\0';
+    }
+}
+
+static const char *cbm_quarantine_line_phase(char *line) {
+    char *tab = strchr(line, '\t');
+    if (!tab) {
+        return "crash";
+    }
+    *tab = '\0';
+    return tab[SKIP_ONE] ? tab + SKIP_ONE : "crash";
+}
+
+static void cbm_quarantine_add(CBMHashTable *set, const char *path, const char *phase) {
+    char *value = cbm_strdup(phase);
+    if (!value) {
+        return;
+    }
+    if (cbm_ht_has(set, path)) {
+        free(cbm_ht_set(set, path, value));
+        return;
+    }
+    char *key = cbm_strdup(path);
+    if (key) {
+        cbm_ht_set(set, key, value);
+    } else {
+        free(value);
+    }
+}
+
 static void cbm_quarantine_load(void) {
     const char *qf = getenv("CBM_INDEX_QUARANTINE_FILE");
     if (!qf || !qf[0]) {
@@ -567,31 +604,21 @@ static void cbm_quarantine_load(void) {
     if (!f) {
         return;
     }
-    CBMHashTable *set = cbm_ht_create(16);
+    CBMHashTable *set = cbm_ht_create(CBM_SZ_16);
     if (!set) {
         (void)fclose(f);
         return;
     }
-    char line[2048];
+    char line[CBM_SZ_2K];
     while (fgets(line, sizeof(line), f)) {
-        size_t len = strlen(line);
-        while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
-            line[--len] = '\0';
-        }
-        if (len == 0) {
+        cbm_quarantine_trim_line(line);
+        if (!line[0]) {
             continue;
         }
         /* Line format: "path\tphase" where phase is "crash" or "hang". A bare
          * "path" line (no tab) is tolerated and defaults to phase "crash" for
          * backward compatibility with older quarantine files. */
-        char *tab = strchr(line, '\t');
-        const char *phase = "crash";
-        if (tab) {
-            *tab = '\0';
-            if (tab[1]) {
-                phase = tab + 1;
-            }
-        }
+        const char *phase = cbm_quarantine_line_phase(line);
         if (line[0] == '\0') {
             continue; /* empty path (line began with a tab) — skip */
         }
@@ -599,24 +626,7 @@ static void cbm_quarantine_load(void) {
          * never freed: the set lives for the whole (short-lived worker) process.
          * The value stores the phase so cbm_index_quarantine_phase() can report
          * "crash" vs "hang"; membership (cbm_index_is_quarantined) is value != NULL. */
-        char *pval = cbm_strdup(phase);
-        if (!pval) {
-            continue;
-        }
-        if (cbm_ht_has(set, line)) {
-            /* Duplicate path line: reuse the stored key (the table borrows key
-             * pointers, so a fresh copy would leak on replace) and free the
-             * value it displaces. */
-            free(cbm_ht_set(set, line, (void *)pval));
-        } else {
-            char *key = cbm_strdup(line);
-            if (key) {
-                cbm_ht_set(set, key, (void *)pval);
-            } else {
-                /* Partial failure: don't leak the value copy. */
-                free(pval);
-            }
-        }
+        cbm_quarantine_add(set, line, phase);
     }
     (void)fclose(f);
     g_quarantine_set = set;
@@ -723,24 +733,33 @@ static void cbm_error_regions_push(cbm_error_regions_t *acc, TSNode n) {
     if (acc->count >= CBM_MAX_ERROR_REGIONS) {
         return;
     }
-    acc->starts[acc->count] = ts_node_start_point(n).row + 1;
-    acc->ends[acc->count] = ts_node_end_point(n).row + 1;
+    acc->starts[acc->count] = ts_node_start_point(n).row + TS_LINE_OFFSET;
+    acc->ends[acc->count] = ts_node_end_point(n).row + TS_LINE_OFFSET;
     acc->count++;
 }
 
 static void cbm_collect_error_regions(TSNode n, cbm_error_regions_t *acc) {
-    if (acc->count >= CBM_MAX_ERROR_REGIONS) {
-        return;
-    }
-    uint32_t k = ts_node_child_count(n);
-    for (uint32_t i = 0; i < k && acc->count < CBM_MAX_ERROR_REGIONS; i++) {
-        TSNode c = ts_node_child(n, i);
-        if (ts_node_is_missing(c) || strcmp(ts_node_type(c), "ERROR") == 0) {
-            cbm_error_regions_push(acc, c); /* top-most region; do not descend */
-        } else if (ts_node_has_error(c)) {
-            cbm_collect_error_regions(c, acc);
+    TSTreeCursor cursor = ts_tree_cursor_new(n);
+    bool descend = true;
+    while (acc->count < CBM_MAX_ERROR_REGIONS) {
+        if (descend && ts_tree_cursor_goto_first_child(&cursor)) {
+        } else {
+            while (!ts_tree_cursor_goto_next_sibling(&cursor)) {
+                if (!ts_tree_cursor_goto_parent(&cursor)) {
+                    ts_tree_cursor_delete(&cursor);
+                    return;
+                }
+            }
+        }
+        TSNode current = ts_tree_cursor_current_node(&cursor);
+        if (ts_node_is_missing(current) || strcmp(ts_node_type(current), "ERROR") == 0) {
+            cbm_error_regions_push(acc, current);
+            descend = false;
+        } else {
+            descend = ts_node_has_error(current);
         }
     }
+    ts_tree_cursor_delete(&cursor);
 }
 
 /* Recovery subtraction (#963): tree-sitter error recovery plus the
@@ -773,21 +792,21 @@ static bool cbm_region_is_recovered(uint32_t rs, uint32_t re, const CBMDefArray 
         return false;
     }
     /* Insertion-sort by start, then sweep for gaps in [rs, re]. */
-    for (int i = 1; i < n; i++) {
+    for (int i = SKIP_ONE; i < n; i++) {
         uint32_t s = starts[i];
         uint32_t e = ends[i];
-        int j = i - 1;
+        int j = i - SKIP_ONE;
         while (j >= 0 && starts[j] > s) {
-            starts[j + 1] = starts[j];
-            ends[j + 1] = ends[j];
+            starts[j + SKIP_ONE] = starts[j];
+            ends[j + SKIP_ONE] = ends[j];
             j--;
         }
-        starts[j + 1] = s;
-        ends[j + 1] = e;
+        starts[j + SKIP_ONE] = s;
+        ends[j + SKIP_ONE] = e;
     }
-    uint32_t covered_to = rs - 1;
+    uint32_t covered_to = rs - SKIP_ONE;
     for (int i = 0; i < n; i++) {
-        if (starts[i] > covered_to + 1) {
+        if (starts[i] > covered_to + SKIP_ONE) {
             return false; /* uncovered gap */
         }
         if (ends[i] > covered_to) {
@@ -805,7 +824,7 @@ static bool cbm_line_contains(const char *src, int src_len, uint32_t line, const
     if (!src || !name || !name[0] || line == 0) {
         return false;
     }
-    uint32_t cur = 1;
+    uint32_t cur = TS_LINE_OFFSET;
     int i = 0;
     while (i < src_len && cur < line) {
         if (src[i] == '\n') {
@@ -833,6 +852,90 @@ static bool cbm_identifier_char(char c) {
     return isalnum((unsigned char)c) || c == '_';
 }
 
+static bool cbm_source_line_span(const char *src, int src_len, uint32_t start_line,
+                                 uint32_t end_line, int *span_start, int *span_end) {
+    int start = 0;
+    uint32_t line = TS_LINE_OFFSET;
+    while (start < src_len && line < start_line) {
+        if (src[start++] == '\n') {
+            line++;
+        }
+    }
+    if (line != start_line) {
+        return false;
+    }
+    int end = start;
+    while (end < src_len && line <= end_line) {
+        if (src[end++] == '\n') {
+            line++;
+        }
+    }
+    *span_start = start;
+    *span_end = end;
+    return true;
+}
+
+static bool cbm_name_at_span(const char *src, int src_len, int pos, int name_len,
+                             const char *name) {
+    return strncmp(src + pos, name, (size_t)name_len) == 0 &&
+           (pos == 0 || !cbm_identifier_char(src[pos - SKIP_ONE])) &&
+           (pos + name_len >= src_len || !cbm_identifier_char(src[pos + name_len]));
+}
+
+static bool cbm_has_callable_prefix(const char *src, int span_start, int pos) {
+    int before = pos;
+    while (before > span_start && isspace((unsigned char)src[before - SKIP_ONE])) {
+        before--;
+    }
+    return before == span_start || !strchr("(,=!?[.", src[before - SKIP_ONE]);
+}
+
+static int cbm_after_callable_parameters(const char *src, int span_end, int open) {
+    int depth = 0;
+    for (int i = open; i < span_end; i++) {
+        if (src[i] == '(') {
+            depth++;
+        } else if (src[i] == ')' && --depth == 0) {
+            return i + SKIP_ONE;
+        }
+    }
+    return CBM_NOT_FOUND;
+}
+
+static bool cbm_has_callable_body(const char *src, int span_end, int after_parameters) {
+    for (int i = after_parameters; i < span_end; i++) {
+        if (src[i] == '{') {
+            return true;
+        }
+        if (src[i] == ';') {
+            return false;
+        }
+    }
+    return false;
+}
+
+static bool cbm_name_is_invoked(const char *src, int src_len, int span_start, int span_end,
+                                const char *name) {
+    size_t name_len_size = strlen(name);
+    if (name_len_size > (size_t)INT_MAX) {
+        return false;
+    }
+    int name_len = (int)name_len_size;
+    for (int pos = span_start; pos + name_len <= span_end; pos++) {
+        if (!cbm_name_at_span(src, src_len, pos, name_len, name)) {
+            continue;
+        }
+        int open = pos + name_len;
+        while (open < span_end && isspace((unsigned char)src[open])) {
+            open++;
+        }
+        if (open < span_end && src[open] == '(') {
+            return true;
+        }
+    }
+    return false;
+}
+
 /* Verify that the mapped original span contains callable-definition syntax,
  * not merely the name at a macro invocation or call site. */
 static bool cbm_span_contains_callable_def(const char *src, int src_len, uint32_t start_line,
@@ -840,21 +943,10 @@ static bool cbm_span_contains_callable_def(const char *src, int src_len, uint32_
     if (!src || src_len <= 0 || !name || !name[0] || start_line == 0 || end_line < start_line) {
         return false;
     }
-    int span_start = 0;
-    uint32_t line = 1;
-    while (span_start < src_len && line < start_line) {
-        if (src[span_start++] == '\n') {
-            line++;
-        }
-    }
-    if (line != start_line) {
+    int span_start;
+    int span_end;
+    if (!cbm_source_line_span(src, src_len, start_line, end_line, &span_start, &span_end)) {
         return false;
-    }
-    int span_end = span_start;
-    while (span_end < src_len && line <= end_line) {
-        if (src[span_end++] == '\n') {
-            line++;
-        }
     }
     /* This function works in int offsets throughout (matching src_len's
      * public-API int type), so convert name's length to int once here,
@@ -866,16 +958,10 @@ static bool cbm_span_contains_callable_def(const char *src, int src_len, uint32_
     }
     int name_len = (int)name_len_sz;
     for (int pos = span_start; pos + name_len <= span_end; pos++) {
-        if (strncmp(src + pos, name, (size_t)name_len) != 0 ||
-            (pos > 0 && cbm_identifier_char(src[pos - 1])) ||
-            (pos + name_len < src_len && cbm_identifier_char(src[pos + name_len]))) {
+        if (!cbm_name_at_span(src, src_len, pos, name_len, name)) {
             continue;
         }
-        int before = pos;
-        while (before > span_start && isspace((unsigned char)src[before - 1])) {
-            before--;
-        }
-        if (before > span_start && strchr("(,=!?[.", src[before - 1])) {
+        if (!cbm_has_callable_prefix(src, span_start, pos)) {
             continue;
         }
         int open = pos + name_len;
@@ -885,26 +971,12 @@ static bool cbm_span_contains_callable_def(const char *src, int src_len, uint32_
         if (open >= span_end || src[open] != '(') {
             continue;
         }
-        int depth = 0;
-        int close = -1;
-        for (int i = open; i < span_end; i++) {
-            if (src[i] == '(') {
-                depth++;
-            } else if (src[i] == ')' && --depth == 0) {
-                close = i;
-                break;
-            }
-        }
-        if (close < 0) {
+        int after_parameters = cbm_after_callable_parameters(src, span_end, open);
+        if (after_parameters < 0) {
             continue;
         }
-        for (int i = close + 1; i < span_end; i++) {
-            if (src[i] == '{') {
-                return true;
-            }
-            if (src[i] == ';') {
-                break;
-            }
+        if (cbm_has_callable_body(src, span_end, after_parameters)) {
+            return true;
         }
     }
     return false;
@@ -933,7 +1005,7 @@ static bool cbm_remap_preprocessed_def(CBMDefinition *def, const CBMPreprocessed
 
     def->start_line = original_start;
     def->end_line = original_end;
-    def->lines = (int)(original_end - original_start + 1);
+    def->lines = (int)(original_end - original_start + SKIP_ONE);
     return true;
 }
 
@@ -961,21 +1033,10 @@ static bool cbm_span_is_macro_invocation(const char *src, int src_len, uint32_t 
     if (!src || src_len <= 0 || !defs || start_line == 0 || end_line < start_line) {
         return false;
     }
-    int span_start = 0;
-    uint32_t line = 1;
-    while (span_start < src_len && line < start_line) {
-        if (src[span_start++] == '\n') {
-            line++;
-        }
-    }
-    if (line != start_line) {
+    int span_start;
+    int span_end;
+    if (!cbm_source_line_span(src, src_len, start_line, end_line, &span_start, &span_end)) {
         return false;
-    }
-    int span_end = span_start;
-    while (span_end < src_len && line <= end_line) {
-        if (src[span_end++] == '\n') {
-            line++;
-        }
     }
     for (int di = 0; di < defs->count; di++) {
         const CBMDefinition *d = &defs->items[di];
@@ -985,20 +1046,8 @@ static bool cbm_span_is_macro_invocation(const char *src, int src_len, uint32_t 
             !d->name[0]) {
             continue;
         }
-        int nlen = (int)strlen(d->name);
-        for (int pos = span_start; pos + nlen <= span_end; pos++) {
-            if (strncmp(src + pos, d->name, (size_t)nlen) != 0 ||
-                (pos > 0 && cbm_identifier_char(src[pos - 1])) ||
-                (pos + nlen < src_len && cbm_identifier_char(src[pos + nlen]))) {
-                continue;
-            }
-            int open = pos + nlen;
-            while (open < span_end && isspace((unsigned char)src[open])) {
-                open++;
-            }
-            if (open < span_end && src[open] == '(') {
-                return true; /* NAME( ... ) — an invocation of this file's macro */
-            }
+        if (cbm_name_is_invoked(src, src_len, span_start, span_end, d->name)) {
+            return true;
         }
     }
     return false;
@@ -1060,6 +1109,314 @@ static const char *cbm_error_ranges_str(CBMArena *a, const cbm_error_regions_t *
                                 regs->ends[i]);
     }
     return buf;
+}
+
+static bool cbm_has_suffix(const char *path, const char *suffix, size_t suffix_length) {
+    if (!path) {
+        return false;
+    }
+    size_t length = strlen(path);
+    return length >= suffix_length && strcmp(path + length - suffix_length, suffix) == 0;
+}
+
+static void cbm_run_lsp_extractors(CBMArena *arena, CBMFileResult *result, const char *source,
+                                   int source_len, TSNode root, CBMLanguage language,
+                                   const char *rel_path) {
+    if (language == CBM_LANG_GO) {
+        cbm_run_go_lsp(arena, result, source, source_len, root);
+    }
+    if (language == CBM_LANG_C || language == CBM_LANG_CPP || language == CBM_LANG_CUDA) {
+        cbm_run_c_lsp(arena, result, source, source_len, root, language != CBM_LANG_C,
+                      CBM_SOURCE_ORIGIN_RAW);
+    }
+    if (language == CBM_LANG_PHP) {
+        cbm_run_php_lsp(arena, result, source, source_len, root);
+    }
+    if (language == CBM_LANG_PERL) {
+        cbm_run_perl_lsp(arena, result, source, source_len, root);
+    }
+    if (language == CBM_LANG_PYTHON) {
+        cbm_run_py_lsp(arena, result, source, source_len, root);
+    }
+    if (language == CBM_LANG_JAVASCRIPT || language == CBM_LANG_TYPESCRIPT ||
+        language == CBM_LANG_TSX) {
+        bool js_mode = language == CBM_LANG_JAVASCRIPT;
+        bool jsx_mode =
+            language == CBM_LANG_TSX || (js_mode && cbm_has_suffix(rel_path, ".jsx", CBM_SZ_4));
+        bool dts_mode =
+            language == CBM_LANG_TYPESCRIPT && cbm_has_suffix(rel_path, ".d.ts", CBM_SZ_5);
+        cbm_run_ts_lsp(arena, result, source, source_len, root, js_mode, jsx_mode, dts_mode);
+    }
+    if (language == CBM_LANG_CSHARP) {
+        cbm_run_cs_lsp(arena, result, source, source_len, root);
+    }
+    if (language == CBM_LANG_JAVA) {
+        cbm_run_java_lsp(arena, result, source, source_len, root);
+    }
+    if (language == CBM_LANG_KOTLIN) {
+        cbm_run_kotlin_lsp(arena, result, source, source_len, root);
+    }
+    if (language == CBM_LANG_RUST) {
+        cbm_run_rust_lsp(arena, result, source, source_len, root);
+    }
+}
+
+static void cbm_run_primary_extractors(CBMExtractCtx *ctx) {
+    cbm_extract_definitions(ctx);
+    cbm_extract_imports(ctx);
+    cbm_extract_unified(ctx);
+    cbm_extract_channels(ctx);
+    if (ctx->language == CBM_LANG_KUSTOMIZE || ctx->language == CBM_LANG_K8S) {
+        cbm_extract_k8s(ctx);
+    }
+}
+
+static void cbm_set_definition_parameter_counts(CBMDefArray *defs) {
+    for (int i = 0; i < defs->count; i++) {
+        CBMDefinition *definition = &defs->items[i];
+        int count = 0;
+        while (definition->param_names && definition->param_names[count]) {
+            count++;
+        }
+        definition->param_count = count == 0 && definition->signature
+                                      ? count_params_from_signature(definition->signature)
+                                      : count;
+    }
+}
+
+static int cbm_enclosing_callable_index(const CBMDefArray *defs, int line) {
+    int best = CBM_NOT_FOUND;
+    int best_span = CBM_NOT_FOUND;
+    for (int i = 0; i < defs->count; i++) {
+        const CBMDefinition *definition = &defs->items[i];
+        bool callable = definition->label && (strcmp(definition->label, "Function") == 0 ||
+                                              strcmp(definition->label, "Method") == 0);
+        if (!callable || !definition->name || (int)definition->start_line > line ||
+            line > (int)definition->end_line) {
+            continue;
+        }
+        int span = (int)definition->end_line - (int)definition->start_line;
+        if (best < 0 || span < best_span) {
+            best = i;
+            best_span = span;
+        }
+    }
+    return best;
+}
+
+static void cbm_update_self_metrics(CBMDefinition *definition, const CBMCall *call,
+                                    int definition_index, bool *has_self, bool *has_guarded) {
+    const char *dot = strrchr(call->callee_name, '.');
+    const char *short_name = dot ? dot + SKIP_ONE : call->callee_name;
+    bool in_loop = call->loop_depth > 0;
+    if (strcmp(short_name, definition->name) == 0 &&
+        is_self_receiver(call->callee_name, definition->receiver)) {
+        definition->is_recursive = true;
+        if (has_self) {
+            has_self[definition_index] = true;
+        }
+        if (in_loop) {
+            definition->recursion_in_loop = true;
+        }
+        if (call->branch_depth > 0 && has_guarded) {
+            has_guarded[definition_index] = true;
+        }
+    }
+    if (in_loop && is_linear_scan_name(short_name)) {
+        definition->linear_scan_in_loop++;
+    }
+    if (in_loop && is_alloc_name(short_name)) {
+        definition->alloc_in_loop++;
+    }
+}
+
+static void cbm_record_call_metrics(CBMFileResult *result, int call_count, bool *has_self,
+                                    bool *has_guarded) {
+    for (int i = 0; i < call_count; i++) {
+        const CBMCall *call = &result->calls.items[i];
+        if (!call->callee_name || call->start_line <= 0) {
+            continue;
+        }
+        int definition_index = cbm_enclosing_callable_index(&result->defs, call->start_line);
+        if (definition_index < 0) {
+            continue;
+        }
+        CBMDefinition *definition = &result->defs.items[definition_index];
+        cbm_update_self_metrics(definition, call, definition_index, has_self, has_guarded);
+    }
+}
+
+static void cbm_compute_metrics(CBMFileResult *result, int call_count) {
+    int definition_count = result->defs.count;
+    bool *has_self =
+        definition_count > 0 ? calloc((size_t)definition_count, sizeof(*has_self)) : NULL;
+    bool *has_guarded =
+        definition_count > 0 ? calloc((size_t)definition_count, sizeof(*has_guarded)) : NULL;
+    cbm_set_definition_parameter_counts(&result->defs);
+    cbm_record_call_metrics(result, call_count, has_self, has_guarded);
+    for (int i = 0; i < definition_count; i++) {
+        if (has_self && has_self[i] && !(has_guarded && has_guarded[i])) {
+            result->defs.items[i].unguarded_recursion = true;
+        }
+    }
+    free(has_self);
+    free(has_guarded);
+}
+
+static void cbm_record_parse_coverage(CBMFileResult *result, TSNode root, CBMArena *arena,
+                                      const char *source, int source_len) {
+    if (!ts_node_has_error(root)) {
+        return;
+    }
+    cbm_error_regions_t regions = {{0}, {0}, 0};
+    cbm_collect_error_regions(root, &regions);
+    if (regions.count == 0 && result->defs.count == 0 && strcmp(ts_node_type(root), "ERROR") == 0) {
+        cbm_error_regions_push(&regions, root);
+    }
+    cbm_subtract_recovered_regions(&regions, &result->defs);
+    cbm_subtract_macro_invocation_regions(&regions, &result->defs, source, source_len);
+    if (regions.count > 0) {
+        result->parse_incomplete = true;
+        result->error_region_count = regions.count;
+        result->error_ranges = cbm_error_ranges_str(arena, &regions);
+    }
+}
+
+static void cbm_stamp_preprocessed_parser_origins(CBMFileResult *result, int calls_before,
+                                                  int usages_before) {
+    for (int i = calls_before; i < result->calls.count; i++) {
+        result->calls.items[i].source_origin = CBM_SOURCE_ORIGIN_PREPROCESSED;
+    }
+    for (int i = usages_before; i < result->usages.count; i++) {
+        result->usages.items[i].source_origin = CBM_SOURCE_ORIGIN_PREPROCESSED;
+    }
+}
+
+static void cbm_stamp_preprocessed_lsp_origins(CBMFileResult *result, int resolved_before) {
+    for (int i = resolved_before; i < result->resolved_calls.count; i++) {
+        result->resolved_calls.items[i].source_origin = CBM_SOURCE_ORIGIN_PREPROCESSED;
+    }
+}
+
+static bool cbm_definition_overlaps_regions(const CBMDefinition *definition,
+                                            const cbm_error_regions_t *regions) {
+    for (int i = 0; i < regions->count; i++) {
+        if (definition->start_line <= regions->ends[i] &&
+            definition->end_line >= regions->starts[i]) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool cbm_definition_has_unique_qn(const CBMDefArray *definitions, int limit,
+                                         const CBMDefinition *definition) {
+    for (int i = 0; i < limit; i++) {
+        const char *existing = definitions->items[i].qualified_name;
+        if (existing && definition->qualified_name &&
+            strcmp(existing, definition->qualified_name) == 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool cbm_accept_recovered_definition(CBMDefinition *definition,
+                                            const CBMPreprocessedSource *preprocessed,
+                                            const cbm_error_regions_t *regions,
+                                            const CBMDefArray *definitions, int original_count,
+                                            const char *source, int source_len) {
+    return cbm_remap_preprocessed_def(definition, preprocessed) &&
+           cbm_definition_overlaps_regions(definition, regions) && definition->name &&
+           cbm_line_contains(source, source_len, definition->start_line, definition->name) &&
+           cbm_span_contains_callable_def(source, source_len, definition->start_line,
+                                          definition->end_line, definition->name) &&
+           cbm_definition_has_unique_qn(definitions, original_count, definition);
+}
+
+static void cbm_recover_preprocessed_definitions(CBMExtractCtx *expanded_context, TSNode raw_root,
+                                                 const CBMPreprocessedSource *preprocessed,
+                                                 const char *source, int source_len) {
+    if (!ts_node_has_error(raw_root)) {
+        return;
+    }
+    cbm_error_regions_t regions = {{0}, {0}, 0};
+    cbm_collect_error_regions(raw_root, &regions);
+    if (regions.count == 0) {
+        return;
+    }
+    CBMDefArray *definitions = &expanded_context->result->defs;
+    int original_count = definitions->count;
+    cbm_extract_definitions(expanded_context);
+    int write_index = original_count;
+    for (int i = original_count; i < definitions->count; i++) {
+        CBMDefinition *definition = &definitions->items[i];
+        if (cbm_accept_recovered_definition(definition, preprocessed, &regions, definitions,
+                                            original_count, source, source_len)) {
+            definitions->items[write_index++] = *definition;
+        }
+    }
+    definitions->count = write_index;
+}
+
+static void cbm_extract_expanded_source(CBMArena *arena, CBMFileResult *result,
+                                        const CBMPreprocessedSource *preprocessed,
+                                        const TSLanguage *language_parser, CBMLanguage language,
+                                        const char *project, const char *rel_path, TSNode raw_root,
+                                        const char *source, int source_len) {
+    char *expanded = preprocessed->source;
+    int expanded_len = (int)strlen(expanded);
+    TSParser *parser = get_thread_parser(language_parser, language);
+    if (!parser) {
+        return;
+    }
+    ts_parser_reset(parser);
+    CBMStringInput input = {expanded, (uint32_t)expanded_len};
+    TSInput tree_input = {&input, cbm_string_read, TSInputEncodingUTF8, NULL};
+    TSTree *tree = ts_parser_parse_with_options(parser, NULL, tree_input, (TSParseOptions){0});
+    if (!tree) {
+        return;
+    }
+    int calls_before = result->calls.count;
+    int usages_before = result->usages.count;
+    int resolved_before = result->resolved_calls.count;
+    TSNode root = ts_tree_root_node(tree);
+    CBMExtractCtx context = {.arena = arena,
+                             .result = result,
+                             .source = expanded,
+                             .source_len = expanded_len,
+                             .language = language,
+                             .project = project,
+                             .rel_path = rel_path,
+                             .module_qn = result->module_qn,
+                             .root = root};
+    cbm_extract_unified(&context);
+    cbm_stamp_preprocessed_parser_origins(result, calls_before, usages_before);
+    cbm_run_c_lsp(arena, result, expanded, expanded_len, root, language != CBM_LANG_C,
+                  CBM_SOURCE_ORIGIN_PREPROCESSED);
+    cbm_stamp_preprocessed_lsp_origins(result, resolved_before);
+    cbm_recover_preprocessed_definitions(&context, raw_root, preprocessed, source, source_len);
+    ts_tree_delete(tree);
+}
+
+static void cbm_extract_preprocessor_phase(CBMArena *arena, CBMFileResult *result,
+                                           const char *source, int source_len, const char *rel_path,
+                                           const char **extra_defines, const char **include_paths,
+                                           const TSLanguage *ts_language, CBMLanguage language,
+                                           const char *project, TSNode raw_root) {
+    if (language != CBM_LANG_C && language != CBM_LANG_CPP && language != CBM_LANG_CUDA) {
+        return;
+    }
+    uint64_t phase_start = now_ns();
+    CBMPreprocessedSource *preprocessed = cbm_preprocess_with_map(
+        source, source_len, rel_path, extra_defines, include_paths, language != CBM_LANG_C);
+    if (preprocessed && preprocessed->source) {
+        cbm_extract_expanded_source(arena, result, preprocessed, ts_language, language, project,
+                                    rel_path, raw_root, source, source_len);
+        atomic_fetch_add(&total_files_preprocessed, 1);
+    }
+    cbm_preprocessed_source_free(preprocessed);
+    atomic_fetch_add(&total_preprocess_ns, now_ns() - phase_start);
 }
 
 /* Public entry: run the extraction and journal completion. The DONE mark on
@@ -1200,74 +1557,12 @@ CBMFileResult *cbm_extract_file_ex(const char *source, int source_len, CBMLangua
         .return_type_table = return_type_table,
     };
 
-    // Run extractors: defs + imports use separate walks (unique recursion patterns),
-    // then a single unified cursor walk handles the remaining 7 extractors.
-    cbm_extract_definitions(&ctx);
-    cbm_extract_imports(&ctx);
-    cbm_extract_unified(&ctx);
-
-    // Channel detection (Socket.IO / EventEmitter) — JS/TS only.
-    cbm_extract_channels(&ctx);
-
-    // K8s / Kustomize semantic pass (additional structured extraction for YAML-based infra files).
-    if (ctx.language == CBM_LANG_KUSTOMIZE || ctx.language == CBM_LANG_K8S) {
-        cbm_extract_k8s(&ctx);
-    }
+    cbm_run_primary_extractors(&ctx);
 
     // LSP type-aware call/usage resolution (per-file). Runs in every mode;
     // refines the tree-sitter + textual-resolution graph with type info.
     uint64_t lsp_start = now_ns();
-    {
-        if (language == CBM_LANG_GO) {
-            cbm_run_go_lsp(a, result, source, source_len, root);
-        }
-        if (language == CBM_LANG_C || language == CBM_LANG_CPP || language == CBM_LANG_CUDA) {
-            cbm_run_c_lsp(a, result, source, source_len, root, language != CBM_LANG_C,
-                          CBM_SOURCE_ORIGIN_RAW);
-        }
-        if (language == CBM_LANG_PHP) {
-            cbm_run_php_lsp(a, result, source, source_len, root);
-        }
-        if (language == CBM_LANG_PERL) {
-            cbm_run_perl_lsp(a, result, source, source_len, root);
-        }
-        if (language == CBM_LANG_PYTHON) {
-            cbm_run_py_lsp(a, result, source, source_len, root);
-        }
-        if (language == CBM_LANG_JAVASCRIPT || language == CBM_LANG_TYPESCRIPT ||
-            language == CBM_LANG_TSX) {
-            bool js_mode = (language == CBM_LANG_JAVASCRIPT);
-            // jsx_mode: TSX always; .jsx in the JS bucket also enables it.
-            bool jsx_mode = (language == CBM_LANG_TSX);
-            if (language == CBM_LANG_JAVASCRIPT && rel_path) {
-                size_t rl = strlen(rel_path);
-                if (rl >= 4 && strcmp(rel_path + rl - 4, ".jsx") == 0) {
-                    jsx_mode = true;
-                }
-            }
-            // dts_mode: ".d.ts" suffix (TypeScript only).
-            bool dts_mode = false;
-            if (language == CBM_LANG_TYPESCRIPT && rel_path) {
-                size_t rl = strlen(rel_path);
-                if (rl >= 5 && strcmp(rel_path + rl - 5, ".d.ts") == 0) {
-                    dts_mode = true;
-                }
-            }
-            cbm_run_ts_lsp(a, result, source, source_len, root, js_mode, jsx_mode, dts_mode);
-        }
-        if (language == CBM_LANG_CSHARP) {
-            cbm_run_cs_lsp(a, result, source, source_len, root);
-        }
-    }
-    if (language == CBM_LANG_JAVA) {
-        cbm_run_java_lsp(a, result, source, source_len, root);
-    }
-    if (language == CBM_LANG_KOTLIN) {
-        cbm_run_kotlin_lsp(a, result, source, source_len, root);
-    }
-    if (language == CBM_LANG_RUST) {
-        cbm_run_rust_lsp(a, result, source, source_len, root);
-    }
+    cbm_run_lsp_extractors(a, result, source, source_len, root, language, rel_path);
     atomic_fetch_add(&total_lsp_ns, now_ns() - lsp_start);
 
     // Calls extracted so far all carry ORIGINAL-source line numbers; the C/C++
@@ -1276,269 +1571,12 @@ CBMFileResult *cbm_extract_file_ex(const char *source, int source_len, CBMLangua
     // metrics. Remember the boundary.
     int orig_calls_count = result->calls.count;
 
-    // Second pass: preprocess C/C++/CUDA and extract additional macro-hidden calls.
-    // Defs keep original-source line numbers; only CALLS are extracted from expanded source.
-    if (language == CBM_LANG_C || language == CBM_LANG_CPP || language == CBM_LANG_CUDA) {
-        uint64_t pp_start = now_ns();
-        CBMPreprocessedSource *preprocessed = cbm_preprocess_with_map(
-            source, source_len, rel_path, extra_defines, include_paths, language != CBM_LANG_C);
-        if (preprocessed && preprocessed->source) {
-            char *expanded = preprocessed->source;
-            int expanded_len = (int)strlen(expanded);
-            // Record every site-bearing array boundary before the second pass.
-            // Numeric byte spans in `expanded` are not raw-source coordinates.
-            int calls_before = result->calls.count;
-            int usages_before = result->usages.count;
-            int resolved_before = result->resolved_calls.count;
+    cbm_extract_preprocessor_phase(a, result, source, source_len, rel_path, extra_defines,
+                                   include_paths, ts_lang, language, project, root);
 
-            // Parse expanded source with fresh tree
-            TSParser *pp_parser = get_thread_parser(ts_lang, language);
-            if (pp_parser) {
-                ts_parser_reset(pp_parser);
-                CBMStringInput pp_input = {expanded, (uint32_t)expanded_len};
-                TSInput pp_ts_input = {
-                    &pp_input,
-                    cbm_string_read,
-                    TSInputEncodingUTF8,
-                    NULL,
-                };
-                TSParseOptions pp_opts = {0};
-                TSTree *pp_tree =
-                    ts_parser_parse_with_options(pp_parser, NULL, pp_ts_input, pp_opts);
-                if (pp_tree) {
-                    TSNode pp_root = ts_tree_root_node(pp_tree);
-
-                    // Build context for expanded source — extract only calls via unified extractor
-                    CBMExtractCtx pp_ctx = {
-                        .arena = a,
-                        .result = result,
-                        .source = expanded,
-                        .source_len = expanded_len,
-                        .language = language,
-                        .project = project,
-                        .rel_path = rel_path,
-                        .module_qn = result->module_qn,
-                        .root = pp_root,
-                    };
-                    // Re-run unified extraction on expanded source.
-                    // This adds macro-expanded calls; duplicates with original calls are
-                    // harmless (pipeline deduplicates by caller+callee).
-                    cbm_extract_unified(&pp_ctx);
-
-                    /* Stamp parser carriers before C-LSP performs any
-                     * origin-sensitive rewrite. Numeric spans in the expanded
-                     * buffer may collide with unrelated raw-source spans. */
-                    for (int i = calls_before; i < result->calls.count; i++) {
-                        result->calls.items[i].source_origin = CBM_SOURCE_ORIGIN_PREPROCESSED;
-                    }
-                    for (int i = usages_before; i < result->usages.count; i++) {
-                        result->usages.items[i].source_origin = CBM_SOURCE_ORIGIN_PREPROCESSED;
-                    }
-
-                    // Also run LSP on expanded source for additional type-resolved
-                    // calls (language is already C/C++/CUDA — checked in enclosing
-                    // block). Runs in every mode.
-                    cbm_run_c_lsp(a, result, expanded, expanded_len, pp_root,
-                                  language != CBM_LANG_C, CBM_SOURCE_ORIGIN_PREPROCESSED);
-
-                    /* All C-LSP emitters stamp origin directly so rewrite-time
-                     * comparisons are already safe. Keep this boundary sweep as
-                     * a defensive invariant for any future emitter added to the
-                     * C resolver. */
-                    for (int i = resolved_before; i < result->resolved_calls.count; i++) {
-                        result->resolved_calls.items[i].source_origin =
-                            CBM_SOURCE_ORIGIN_PREPROCESSED;
-                    }
-
-                    /* #961: a def whose body braces are split across
-                     * #ifdef/#else branches parses as an ERROR region on the
-                     * RAW source (both branches present at once -> unbalanced
-                     * braces), so the raw defs walk silently dropped it. The
-                     * expanded tree parses clean (simplecpp picked one
-                     * branch) and same-file token lines stay aligned, so
-                     * recover defs from it — adopting ONLY those that
-                     * intersect a raw ERROR region, whose name is visible on
-                     * the raw source line, and whose QN the raw pass did not
-                     * already extract. */
-                    if (ts_node_has_error(root)) {
-                        cbm_error_regions_t raw_regs = {{0}, {0}, 0};
-                        cbm_collect_error_regions(root, &raw_regs);
-                        if (raw_regs.count > 0) {
-                            int defs_before = result->defs.count;
-                            cbm_extract_definitions(&pp_ctx);
-                            int w = defs_before;
-                            for (int i = defs_before; i < result->defs.count; i++) {
-                                CBMDefinition *d = &result->defs.items[i];
-                                bool adopt = false;
-                                if (cbm_remap_preprocessed_def(d, preprocessed)) {
-                                    for (int rj = 0; rj < raw_regs.count && !adopt; rj++) {
-                                        if (d->start_line <= raw_regs.ends[rj] &&
-                                            d->end_line >= raw_regs.starts[rj]) {
-                                            adopt = true;
-                                        }
-                                    }
-                                }
-                                if (adopt && (!d->name ||
-                                              !cbm_line_contains(source, source_len, d->start_line,
-                                                                 d->name) ||
-                                              !cbm_span_contains_callable_def(
-                                                  source, source_len, d->start_line, d->end_line,
-                                                  d->name))) {
-                                    adopt = false;
-                                }
-                                for (int j = 0; j < defs_before && adopt; j++) {
-                                    const char *q = result->defs.items[j].qualified_name;
-                                    if (q && d->qualified_name &&
-                                        strcmp(q, d->qualified_name) == 0) {
-                                        adopt = false;
-                                    }
-                                }
-                                if (adopt) {
-                                    result->defs.items[w++] = *d;
-                                }
-                            }
-                            result->defs.count = w;
-                        }
-                    }
-
-                    ts_tree_delete(pp_tree);
-                }
-            }
-            cbm_preprocessed_source_free(preprocessed);
-            atomic_fetch_add(&total_files_preprocessed, 1);
-            (void)calls_before; // used for future logging
-        } else {
-            cbm_preprocessed_source_free(preprocessed);
-        }
-        atomic_fetch_add(&total_preprocess_ns, now_ns() - pp_start);
-    }
-
-    // Bottleneck call-context metrics. Each call is attributed to the INNERMOST
-    // enclosing Function/Method def by source-line range (defs and calls in one
-    // CBMFileResult share the same file). Range matching is used instead of
-    // enclosing_func_qn string matching because some grammars (notably C, whose
-    // function_definition has no "name" field) attribute the call's scope to the
-    // module rather than the function — line ranges are unambiguous and
-    // language-agnostic. Bounded per file (defs x calls), not a repo-scale scan.
-    int def_count = result->defs.count;
-    bool *has_self = def_count > 0 ? calloc((size_t)def_count, sizeof(bool)) : NULL;
-    bool *has_guarded = def_count > 0 ? calloc((size_t)def_count, sizeof(bool)) : NULL;
-
-    // param_count is a standalone structural smell (independent of calls). Prefer
-    // the parsed param_names array; fall back to counting from the signature text
-    // for languages (e.g. C) that populate only the signature.
-    for (int di = 0; di < def_count; di++) {
-        CBMDefinition *d = &result->defs.items[di];
-        int pc = 0;
-        if (d->param_names) {
-            while (d->param_names[pc]) {
-                pc++;
-            }
-        }
-        if (pc == 0 && d->signature) {
-            pc = count_params_from_signature(d->signature);
-        }
-        d->param_count = pc;
-    }
-
-    for (int ci = 0; ci < orig_calls_count; ci++) {
-        const CBMCall *c = &result->calls.items[ci];
-        if (!c->callee_name || c->start_line <= 0) {
-            continue;
-        }
-        // Innermost enclosing Function/Method def by line range (smallest span).
-        int best = -1;
-        int best_span = -1;
-        for (int di = 0; di < def_count; di++) {
-            const CBMDefinition *d = &result->defs.items[di];
-            if (!d->name || !d->label ||
-                (strcmp(d->label, "Function") != 0 && strcmp(d->label, "Method") != 0)) {
-                continue;
-            }
-            if ((int)d->start_line <= c->start_line && c->start_line <= (int)d->end_line) {
-                int span = (int)d->end_line - (int)d->start_line;
-                if (best < 0 || span < best_span) {
-                    best_span = span;
-                    best = di;
-                }
-            }
-        }
-        if (best < 0) {
-            continue;
-        }
-        CBMDefinition *d = &result->defs.items[best];
-        // callee_name may be bare ("recur") or qualified ("self.recur",
-        // "super().save", "axios.get"). A short-name match alone is not
-        // self-recursion: the callee must also target the same object
-        // (is_self_receiver), or super().save() inside save and axios.get
-        // inside get are false positives (#599).
-        const char *dot = strrchr(c->callee_name, '.');
-        const char *callee_short = dot ? dot + 1 : c->callee_name;
-        bool in_loop = c->loop_depth > 0;
-
-        if (strcmp(callee_short, d->name) == 0 && is_self_receiver(c->callee_name, d->receiver)) {
-            // Direct self-recursion. The call graph omits self-edges (pass_calls
-            // skips source==target), so detect it here; seeds "recursive".
-            d->is_recursive = true;
-            if (has_self) {
-                has_self[best] = true;
-            }
-            if (in_loop) {
-                d->recursion_in_loop = true; // recursion compounded by a loop
-            }
-            if (c->branch_depth > 0 && has_guarded) {
-                has_guarded[best] = true; // a self-call guarded by some conditional
-            }
-        }
-        if (in_loop && is_linear_scan_name(callee_short)) {
-            d->linear_scan_in_loop++; // hidden O(n^2): linear scan inside a loop
-        }
-        if (in_loop && is_alloc_name(callee_short)) {
-            d->alloc_in_loop++; // repeated allocation/append inside a loop
-        }
-    }
-
-    // Recursive with no self-call guarded by any conditional → no obvious base
-    // case on the recursive path: a stronger "potentially unbounded" signal.
-    for (int di = 0; di < def_count; di++) {
-        if (has_self && has_self[di] && !(has_guarded && has_guarded[di])) {
-            result->defs.items[di].unguarded_recursion = true;
-        }
-    }
-    free(has_self);
-    free(has_guarded);
-
+    cbm_compute_metrics(result, orig_calls_count);
     uint64_t t2 = now_ns();
-
-    /* Best-effort parse-coverage signal (#963): flag files whose tree contains
-     * ERROR/MISSING regions. Computed AFTER extraction so definite recovery is
-     * subtracted first — a region fully re-extracted as definitions is not a
-     * miss, and a fully recovered file is not flagged at all. Detection aid
-     * only: the absence of this flag is NOT a completeness guarantee. */
-    if (ts_node_has_error(root)) {
-        cbm_error_regions_t regs = {{0}, {0}, 0};
-        /* Collect the innermost failed regions, whatever the root's own type.
-         * A root labelled ERROR still parses most of its children — reporting
-         * its whole span would describe the error node rather than what was
-         * lost, and a file that recovered cleanly would read as one that did
-         * not index at all. The span is the honest answer only when the parse
-         * yielded no regions AND no definitions: nothing came back, so the
-         * loss really is the file. */
-        cbm_collect_error_regions(root, &regs);
-        if (regs.count == 0 && result->defs.count == 0 &&
-            strcmp(ts_node_type(root), "ERROR") == 0) {
-            cbm_error_regions_push(&regs, root); /* whole file unparseable */
-        }
-        cbm_subtract_recovered_regions(&regs, &result->defs);
-        /* #1071: don't flag a benign function-like-macro call (defined in-file)
-         * that tree-sitter can't parse without the preprocessor. */
-        cbm_subtract_macro_invocation_regions(&regs, &result->defs, source, source_len);
-        if (regs.count > 0) {
-            result->parse_incomplete = true;
-            result->error_region_count = regs.count;
-            result->error_ranges = cbm_error_ranges_str(a, &regs);
-        }
-    }
+    cbm_record_parse_coverage(result, root, a, source, source_len);
 
     result->imports_count = result->imports.count;
 
@@ -1554,22 +1592,54 @@ CBMFileResult *cbm_extract_file_ex(const char *source, int source_len, CBMLangua
     return result;
 }
 
+typedef struct {
+    CBMFileResult *result;
+    int next_child;
+} CBMResultFreeFrame;
+
+static void cbm_free_result_payload(CBMFileResult *result) {
+    if (result->cached_tree) {
+        ts_tree_delete(result->cached_tree);
+    }
+    free(result->owned_results);
+    cbm_arena_destroy(&result->arena);
+    free(result);
+}
+
 void cbm_free_result(CBMFileResult *result) {
     if (!result) {
         return;
     }
-    if (result->cached_tree) {
-        ts_tree_delete(result->cached_tree);
-        result->cached_tree = NULL;
+    int capacity = CBM_SZ_16;
+    int top = 0;
+    CBMResultFreeFrame *stack = calloc((size_t)capacity, sizeof(*stack));
+    if (!stack) {
+        return;
     }
-    for (int i = 0; i < result->owned_result_count; i++) {
-        cbm_free_result(result->owned_results[i]);
+    stack[top++] = (CBMResultFreeFrame){result, 0};
+    while (top > 0) {
+        CBMResultFreeFrame *frame = &stack[top - SKIP_ONE];
+        if (frame->next_child < frame->result->owned_result_count) {
+            CBMFileResult *child = frame->result->owned_results[frame->next_child++];
+            if (!child) {
+                continue;
+            }
+            if (top == capacity) {
+                int new_capacity = capacity * PAIR_LEN;
+                CBMResultFreeFrame *grown = realloc(stack, (size_t)new_capacity * sizeof(*stack));
+                if (!grown) {
+                    break;
+                }
+                stack = grown;
+                capacity = new_capacity;
+            }
+            stack[top++] = (CBMResultFreeFrame){child, 0};
+            continue;
+        }
+        cbm_free_result_payload(frame->result);
+        top--;
     }
-    free(result->owned_results);
-    result->owned_results = NULL;
-    result->owned_result_count = 0;
-    cbm_arena_destroy(&result->arena);
-    free(result);
+    free(stack);
 }
 
 void cbm_free_tree(CBMFileResult *result) {

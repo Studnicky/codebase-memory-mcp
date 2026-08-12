@@ -254,7 +254,58 @@ static void append_json_str_array(char *buf, size_t bufsize, size_t *pos, const 
     *pos = p;
 }
 
+static void build_def_optional_props(char *buf, size_t bufsize, size_t *pos,
+                                     const CBMDefinition *def) {
+    append_json_string(buf, bufsize, pos, "docstring", def->docstring);
+    append_json_string(buf, bufsize, pos, "signature", def->signature);
+    append_json_string(buf, bufsize, pos, "return_type", def->return_type);
+    append_json_string(buf, bufsize, pos, "parent_class", def->parent_class);
+    append_json_str_array(buf, bufsize, pos, "decorators", def->decorators);
+    append_json_str_array(buf, bufsize, pos, "base_classes", def->base_classes);
+    append_json_str_array(buf, bufsize, pos, "param_names", def->param_names);
+    append_json_str_array(buf, bufsize, pos, "param_types", def->param_types);
+    append_json_string(buf, bufsize, pos, "route_path", def->route_path);
+    append_json_string(buf, bufsize, pos, "route_method", def->route_method);
+    if (def->fingerprint && def->fingerprint_k > 0 &&
+        *pos + CBM_MINHASH_HEX_LEN + CBM_MINHASH_JSON_OVERHEAD < bufsize) {
+        char fingerprint_hex[CBM_MINHASH_HEX_BUF];
+        cbm_minhash_to_hex((const cbm_minhash_t *)def->fingerprint, fingerprint_hex,
+                           sizeof(fingerprint_hex));
+        append_json_string(buf, bufsize, pos, "fp", fingerprint_hex);
+    }
+    if (def->structural_profile && *pos + CBM_AST_PROFILE_BUF < bufsize) {
+        append_json_string(buf, bufsize, pos, "sp", def->structural_profile);
+    }
+    if (def->body_tokens && *pos + CBM_SZ_512 < bufsize) {
+        append_json_string(buf, bufsize, pos, "bt", def->body_tokens);
+    }
+}
+
 /* Build properties JSON for a definition node. */
+static int build_callable_def_props(char *buf, size_t bufsize, const CBMDefinition *def) {
+    return snprintf(buf, bufsize,
+                    "{\"complexity\":%d,\"cognitive\":%d,\"loop_count\":%d,\"loop_depth\":%d,"
+                    "\"self_recursive\":%s,\"param_count\":%d,\"max_access_depth\":%d,"
+                    "\"linear_scan_in_loop\":%d,\"alloc_in_loop\":%d,\"recursion_in_loop\":%s,"
+                    "\"unguarded_recursion\":%s,"
+                    "\"lines\":%d,\"is_exported\":%s,\"is_test\":%s,\"is_entry_point\":%s",
+                    def->complexity, def->cognitive, def->loop_count, def->loop_depth,
+                    def->is_recursive ? "true" : "false", def->param_count, def->max_access_depth,
+                    def->linear_scan_in_loop, def->alloc_in_loop,
+                    def->recursion_in_loop ? "true" : "false",
+                    def->unguarded_recursion ? "true" : "false", def->lines,
+                    def->is_exported ? "true" : "false", def->is_test ? "true" : "false",
+                    def->is_entry_point ? "true" : "false");
+}
+
+static int build_basic_def_props(char *buf, size_t bufsize, const CBMDefinition *def) {
+    return snprintf(buf, bufsize,
+                    "{\"complexity\":%d,\"lines\":%d,\"is_exported\":%s,\"is_test\":%s,"
+                    "\"is_entry_point\":%s",
+                    def->complexity, def->lines, def->is_exported ? "true" : "false",
+                    def->is_test ? "true" : "false", def->is_entry_point ? "true" : "false");
+}
+
 static void build_def_props(char *buf, size_t bufsize, const CBMDefinition *def) {
     /* The complexity/loop/recursion metrics are only meaningful for executable
      * units (Function/Method). Emitting them on the millions of Macro/Field/
@@ -263,62 +314,15 @@ static void build_def_props(char *buf, size_t bufsize, const CBMDefinition *def)
      * dump. Gate the block to functions; other labels keep the lean base. */
     const bool is_fn =
         def->label && (strcmp(def->label, "Function") == 0 || strcmp(def->label, "Method") == 0);
-    int n;
-    if (is_fn) {
-        n = snprintf(buf, bufsize,
-                     "{\"complexity\":%d,\"cognitive\":%d,\"loop_count\":%d,\"loop_depth\":%d,"
-                     "\"self_recursive\":%s,\"param_count\":%d,\"max_access_depth\":%d,"
-                     "\"linear_scan_in_loop\":%d,\"alloc_in_loop\":%d,\"recursion_in_loop\":%s,"
-                     "\"unguarded_recursion\":%s,"
-                     "\"lines\":%d,\"is_exported\":%s,\"is_test\":%s,\"is_entry_point\":%s",
-                     def->complexity, def->cognitive, def->loop_count, def->loop_depth,
-                     def->is_recursive ? "true" : "false", def->param_count, def->max_access_depth,
-                     def->linear_scan_in_loop, def->alloc_in_loop,
-                     def->recursion_in_loop ? "true" : "false",
-                     def->unguarded_recursion ? "true" : "false", def->lines,
-                     def->is_exported ? "true" : "false", def->is_test ? "true" : "false",
-                     def->is_entry_point ? "true" : "false");
-    } else {
-        n = snprintf(buf, bufsize,
-                     "{\"complexity\":%d,\"lines\":%d,\"is_exported\":%s,\"is_test\":%s,"
-                     "\"is_entry_point\":%s",
-                     def->complexity, def->lines, def->is_exported ? "true" : "false",
-                     def->is_test ? "true" : "false", def->is_entry_point ? "true" : "false");
-    }
+    int n = is_fn ? build_callable_def_props(buf, bufsize, def)
+                  : build_basic_def_props(buf, bufsize, def);
 
     if (n <= 0 || (size_t)n >= bufsize) {
         buf[0] = '\0';
         return;
     }
     size_t pos = (size_t)n;
-    append_json_string(buf, bufsize, &pos, "docstring", def->docstring);
-    append_json_string(buf, bufsize, &pos, "signature", def->signature);
-    append_json_string(buf, bufsize, &pos, "return_type", def->return_type);
-    append_json_string(buf, bufsize, &pos, "parent_class", def->parent_class);
-    append_json_str_array(buf, bufsize, &pos, "decorators", def->decorators);
-    append_json_str_array(buf, bufsize, &pos, "base_classes", def->base_classes);
-    append_json_str_array(buf, bufsize, &pos, "param_names", def->param_names);
-    append_json_str_array(buf, bufsize, &pos, "param_types", def->param_types);
-    append_json_string(buf, bufsize, &pos, "route_path", def->route_path);
-    append_json_string(buf, bufsize, &pos, "route_method", def->route_method);
-
-    /* MinHash fingerprint — append if present and buffer has room. */
-    if (def->fingerprint && def->fingerprint_k > 0 &&
-        pos + CBM_MINHASH_HEX_LEN + CBM_MINHASH_JSON_OVERHEAD < bufsize) {
-        char fp_hex[CBM_MINHASH_HEX_BUF];
-        cbm_minhash_to_hex((const cbm_minhash_t *)def->fingerprint, fp_hex, sizeof(fp_hex));
-        append_json_string(buf, bufsize, &pos, "fp", fp_hex);
-    }
-
-    /* AST structural profile */
-    if (def->structural_profile && pos + CBM_AST_PROFILE_BUF < bufsize) {
-        append_json_string(buf, bufsize, &pos, "sp", def->structural_profile);
-    }
-
-    /* Body tokens */
-    if (def->body_tokens && pos + CBM_SZ_512 < bufsize) {
-        append_json_string(buf, bufsize, &pos, "bt", def->body_tokens);
-    }
+    build_def_optional_props(buf, bufsize, &pos, def);
 
     if (pos < bufsize - SKIP_ONE) {
         buf[pos] = '}';
@@ -536,39 +540,51 @@ static bool objectscript_export_append_strings(CBMArena *arena, const char ***ds
     return true;
 }
 
-#define OBJECTSCRIPT_EXPORT_APPEND_ARRAY(aggregate, part, field, push_fn)                   \
-    do {                                                                                    \
-        int expected_count = (aggregate)->field.count + (part)->field.count;                \
-        for (int item_i = 0; item_i < (part)->field.count; item_i++) {                      \
-            push_fn(&(aggregate)->field, &(aggregate)->arena, (part)->field.items[item_i]); \
-        }                                                                                   \
-        if ((aggregate)->field.count != expected_count) {                                   \
-            return false;                                                                   \
-        }                                                                                   \
-    } while (0)
+#define OBJECTSCRIPT_EXPORT_DEFINE_APPEND(field, push_fn)                        \
+    static bool objectscript_export_append_##field(CBMFileResult *aggregate,     \
+                                                   const CBMFileResult *part) {  \
+        int expected_count = aggregate->field.count + part->field.count;         \
+        for (int i = 0; i < part->field.count; i++) {                            \
+            push_fn(&aggregate->field, &aggregate->arena, part->field.items[i]); \
+        }                                                                        \
+        return aggregate->field.count == expected_count;                         \
+    }
+
+OBJECTSCRIPT_EXPORT_DEFINE_APPEND(defs, cbm_defs_push)
+OBJECTSCRIPT_EXPORT_DEFINE_APPEND(calls, cbm_calls_push)
+OBJECTSCRIPT_EXPORT_DEFINE_APPEND(imports, cbm_imports_push)
+OBJECTSCRIPT_EXPORT_DEFINE_APPEND(usages, cbm_usages_push)
+OBJECTSCRIPT_EXPORT_DEFINE_APPEND(throws, cbm_throws_push)
+OBJECTSCRIPT_EXPORT_DEFINE_APPEND(rw, cbm_rw_push)
+OBJECTSCRIPT_EXPORT_DEFINE_APPEND(type_refs, cbm_typerefs_push)
+OBJECTSCRIPT_EXPORT_DEFINE_APPEND(env_accesses, cbm_envaccess_push)
+OBJECTSCRIPT_EXPORT_DEFINE_APPEND(type_assigns, cbm_typeassign_push)
+OBJECTSCRIPT_EXPORT_DEFINE_APPEND(impl_traits, cbm_impltrait_push)
+OBJECTSCRIPT_EXPORT_DEFINE_APPEND(resolved_calls, cbm_resolvedcall_push)
+OBJECTSCRIPT_EXPORT_DEFINE_APPEND(string_refs, cbm_stringref_push)
+OBJECTSCRIPT_EXPORT_DEFINE_APPEND(infra_bindings, cbm_infrabinding_push)
+OBJECTSCRIPT_EXPORT_DEFINE_APPEND(channels, cbm_channels_push)
 
 static bool objectscript_export_append_primary_arrays(CBMFileResult *aggregate,
                                                       const CBMFileResult *part) {
-    OBJECTSCRIPT_EXPORT_APPEND_ARRAY(aggregate, part, defs, cbm_defs_push);
-    OBJECTSCRIPT_EXPORT_APPEND_ARRAY(aggregate, part, calls, cbm_calls_push);
-    OBJECTSCRIPT_EXPORT_APPEND_ARRAY(aggregate, part, imports, cbm_imports_push);
-    OBJECTSCRIPT_EXPORT_APPEND_ARRAY(aggregate, part, usages, cbm_usages_push);
-    OBJECTSCRIPT_EXPORT_APPEND_ARRAY(aggregate, part, throws, cbm_throws_push);
-    OBJECTSCRIPT_EXPORT_APPEND_ARRAY(aggregate, part, rw, cbm_rw_push);
-    OBJECTSCRIPT_EXPORT_APPEND_ARRAY(aggregate, part, type_refs, cbm_typerefs_push);
-    return true;
+    return objectscript_export_append_defs(aggregate, part) &&
+           objectscript_export_append_calls(aggregate, part) &&
+           objectscript_export_append_imports(aggregate, part) &&
+           objectscript_export_append_usages(aggregate, part) &&
+           objectscript_export_append_throws(aggregate, part) &&
+           objectscript_export_append_rw(aggregate, part) &&
+           objectscript_export_append_type_refs(aggregate, part);
 }
 
 static bool objectscript_export_append_secondary_arrays(CBMFileResult *aggregate,
                                                         const CBMFileResult *part) {
-    OBJECTSCRIPT_EXPORT_APPEND_ARRAY(aggregate, part, env_accesses, cbm_envaccess_push);
-    OBJECTSCRIPT_EXPORT_APPEND_ARRAY(aggregate, part, type_assigns, cbm_typeassign_push);
-    OBJECTSCRIPT_EXPORT_APPEND_ARRAY(aggregate, part, impl_traits, cbm_impltrait_push);
-    OBJECTSCRIPT_EXPORT_APPEND_ARRAY(aggregate, part, resolved_calls, cbm_resolvedcall_push);
-    OBJECTSCRIPT_EXPORT_APPEND_ARRAY(aggregate, part, string_refs, cbm_stringref_push);
-    OBJECTSCRIPT_EXPORT_APPEND_ARRAY(aggregate, part, infra_bindings, cbm_infrabinding_push);
-    OBJECTSCRIPT_EXPORT_APPEND_ARRAY(aggregate, part, channels, cbm_channels_push);
-    return true;
+    return objectscript_export_append_env_accesses(aggregate, part) &&
+           objectscript_export_append_type_assigns(aggregate, part) &&
+           objectscript_export_append_impl_traits(aggregate, part) &&
+           objectscript_export_append_resolved_calls(aggregate, part) &&
+           objectscript_export_append_string_refs(aggregate, part) &&
+           objectscript_export_append_infra_bindings(aggregate, part) &&
+           objectscript_export_append_channels(aggregate, part);
 }
 
 /* Preserve every generated class's parse diagnostics. The generated UDL
@@ -685,7 +701,102 @@ CBMFileResult *cbm_pipeline_extract_objectscript_export(
     return aggregate;
 }
 
-#undef OBJECTSCRIPT_EXPORT_APPEND_ARRAY
+#undef OBJECTSCRIPT_EXPORT_DEFINE_APPEND
+
+typedef struct {
+    int definitions;
+    int calls;
+    int imports;
+    int errors;
+} definition_pass_stats_t;
+
+typedef struct {
+    cbm_pipeline_ctx_t *pipeline;
+    const cbm_file_info_t *files;
+    CBMFileResult **cache;
+    definition_pass_stats_t *stats;
+} definition_pass_context_t;
+
+static void definition_pass_release_owned_cache(CBMFileResult **cache, int file_count) {
+    for (int i = 0; i < file_count; i++) {
+        if (cache[i]) {
+            cbm_free_result(cache[i]);
+        }
+    }
+    free(cache);
+}
+
+static int definition_pass_process_file(definition_pass_context_t *context, int index) {
+    cbm_pipeline_ctx_t *ctx = context->pipeline;
+    const cbm_file_info_t *file = &context->files[index];
+    const char *rel = file->rel_path;
+    if (cbm_index_is_quarantined(rel)) {
+        const char *phase = cbm_index_quarantine_phase(rel);
+        const char *reason = phase && strcmp(phase, "hang") == 0 ? "quarantined after hang"
+                                                                 : "quarantined after crash";
+        cbm_pipeline_add_file_error(ctx->pipeline, rel, reason, phase ? phase : "crash");
+        context->stats->errors++;
+        return 0;
+    }
+    int source_len = 0;
+    long file_size = 0;
+    cbm_read_status_t read_status = CBM_READ_OK;
+    char *source = read_file(file->path, &source_len, &file_size, &read_status);
+    if (!source) {
+        if (read_status == CBM_READ_OVERSIZED) {
+            long cap = cbm_max_file_bytes();
+            const long bytes_per_mb = (long)CBM_SZ_1K * CBM_SZ_1K;
+            char reason[PD_OVERSIZED_REASON_CAP];
+            snprintf(reason, sizeof(reason), "oversized (%lld MB > %lld MB)",
+                     (long long)(file_size / bytes_per_mb), (long long)(cap / bytes_per_mb));
+            cbm_pipeline_add_file_error(ctx->pipeline, rel, reason, "oversized");
+            cbm_log_warn("index.file_oversized", "path", rel, "size_mb",
+                         itoa_log((int)(file_size / bytes_per_mb)), "cap_mb",
+                         itoa_log((int)(cap / bytes_per_mb)));
+            context->stats->errors++;
+        } else if (read_status == CBM_READ_OPEN_FAIL || read_status == CBM_READ_OOM) {
+            context->stats->errors++;
+            cbm_pipeline_add_file_error(ctx->pipeline, rel, "read failed", "read");
+        }
+        return 0;
+    }
+    CBMFileResult *result =
+        file->language == CBM_LANG_OBJECTSCRIPT_EXPORT
+            ? cbm_pipeline_extract_objectscript_export(source, source_len, ctx->project_name, rel,
+                                                       ctx->macro_table, NULL)
+            : cbm_extract_file_ex(source, source_len, file->language, ctx->project_name, rel,
+                                  CBM_EXTRACT_BUDGET, NULL, NULL, ctx->macro_table, NULL);
+    free(source);
+    if (!result) {
+        context->stats->errors++;
+        cbm_pipeline_add_file_error(ctx->pipeline, rel, "extract failed", "extract");
+        return 0;
+    }
+    if (result->has_error) {
+        cbm_pipeline_add_file_error(ctx->pipeline, rel,
+                                    result->error_msg ? result->error_msg : "extract failed",
+                                    "extract");
+        context->stats->errors++;
+    } else if (result->parse_incomplete) {
+        cbm_pipeline_add_file_error(ctx->pipeline, rel,
+                                    result->error_ranges ? result->error_ranges : "unknown",
+                                    "parse_partial");
+    }
+    for (int i = 0; i < result->defs.count; i++) {
+        process_def(ctx, &result->defs.items[i], rel);
+        context->stats->definitions++;
+    }
+    context->stats->calls += result->calls.count;
+    if (context->cache) {
+        context->cache[index] = result;
+    } else {
+        context->stats->imports += create_import_edges_for_file(ctx, result, rel, NULL);
+        create_channel_edges_for_file(ctx, result, rel);
+        cbm_pipeline_create_env_configures_for_file(ctx, result, rel);
+        cbm_free_result(result);
+    }
+    return 0;
+}
 
 int cbm_pipeline_pass_definitions(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files,
                                   int file_count) {
@@ -699,10 +810,7 @@ int cbm_pipeline_pass_definitions(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t
      * here so the first cbm_extract_file below recreates a fresh parser. */
     cbm_destroy_thread_parser();
 
-    int total_defs = 0;
-    int total_calls = 0;
-    int total_imports = 0;
-    int errors = 0;
+    definition_pass_stats_t stats = {0};
 
     /* Sequential pass must extract all defs (which create Module/Function/...
      * nodes) BEFORE resolving imports — otherwise a workspace import in the
@@ -726,121 +834,13 @@ int cbm_pipeline_pass_definitions(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t
              * at the end of the pass does the same) -- clang-analyzer caught
              * this return leaking the whole cache. */
             if (owns_local_cache) {
-                for (int j = 0; j < file_count; j++) {
-                    if (local_cache[j]) {
-                        cbm_free_result(local_cache[j]);
-                    }
-                }
-                free(local_cache);
+                definition_pass_release_owned_cache(local_cache, file_count);
             }
             return CBM_NOT_FOUND;
         }
-
-        const char *path = files[i].path;
-        const char *rel = files[i].rel_path;
-        CBMLanguage lang = files[i].language;
-
-        /* Crash-quarantine skip (Stage 3c): the supervisor's single-threaded
-         * recovery re-run always lands on THIS sequential path (worker_count
-         * forced to 1). This first sequential pass REPORTS a crasher as a
-         * phase="crash" skip (surfacing it in skipped[]) and continues; later
-         * sequential passes (calls/usages/semantic) re-extract on a cache miss
-         * but hit the hard guard inside cbm_extract_file, so they no-op without
-         * re-crashing and without duplicating the skip. No-op unless
-         * CBM_INDEX_QUARANTINE_FILE is set. */
-        if (cbm_index_is_quarantined(rel)) {
-            const char *phase = cbm_index_quarantine_phase(rel);
-            if (!phase) {
-                phase = "crash";
-            }
-            const char *reason =
-                (strcmp(phase, "hang") == 0) ? "quarantined after hang" : "quarantined after crash";
-            cbm_pipeline_add_file_error(ctx->pipeline, rel, reason, phase);
-            errors++;
-            continue;
-        }
-
-        /* Read source file */
-        int source_len = 0;
-        long file_size = 0;
-        cbm_read_status_t rst = CBM_READ_OK;
-        char *source = read_file(path, &source_len, &file_size, &rst);
-        if (!source) {
-            errors++;
-            if (rst == CBM_READ_OVERSIZED) {
-                /* Never a silent drop: record the oversized skip + WARN so the
-                 * file surfaces in the response/logfile with its sizes. */
-                long cap = cbm_max_file_bytes();
-                const long bytes_per_mb = (long)CBM_SZ_1K * CBM_SZ_1K;
-                char reason[PD_OVERSIZED_REASON_CAP];
-                snprintf(reason, sizeof(reason), "oversized (%lld MB > %lld MB)",
-                         (long long)(file_size / bytes_per_mb), (long long)(cap / bytes_per_mb));
-                cbm_pipeline_add_file_error(ctx->pipeline, rel, reason, "oversized");
-                cbm_log_warn("index.file_oversized", "path", rel, "size_mb",
-                             itoa_log((int)(file_size / bytes_per_mb)), "cap_mb",
-                             itoa_log((int)(cap / bytes_per_mb)));
-            } else if (rst == CBM_READ_OPEN_FAIL || rst == CBM_READ_OOM) {
-                cbm_pipeline_add_file_error(ctx->pipeline, rel, "read failed", "read");
-            }
-            /* CBM_READ_EMPTY: benign 0-byte file — nothing to index, not reported. */
-            continue;
-        }
-
-        /* Studio Export XML is transformed to one cacheable aggregate so later
-         * passes see the same calls/usages/semantic carriers as native UDL. */
-        CBMFileResult *result =
-            lang == CBM_LANG_OBJECTSCRIPT_EXPORT
-                ? cbm_pipeline_extract_objectscript_export(source, source_len, ctx->project_name,
-                                                           rel, ctx->macro_table, NULL)
-                : cbm_extract_file_ex(
-                      source, source_len, lang, ctx->project_name, rel, CBM_EXTRACT_BUDGET, NULL,
-                      NULL /* no extra defines or include paths */, ctx->macro_table, NULL);
-        free(source);
-
-        if (!result) {
-            errors++;
-            cbm_pipeline_add_file_error(ctx->pipeline, rel, "extract failed", "extract");
-            continue;
-        }
-        /* Consume the previously-ignored has_error flag: a parse timeout /
-         * parse failure / unsupported-grammar result carries no defs but must
-         * still be reported (phase "extract", reason = the extractor's message).
-         * The empty result flows through unchanged (the defs loop is a no-op). */
-        if (result->has_error) {
-            cbm_pipeline_add_file_error(ctx->pipeline, rel,
-                                        result->error_msg ? result->error_msg : "extract failed",
-                                        "extract");
-            errors++;
-        } else if (result->parse_incomplete) {
-            /* Best-effort parse-coverage signal (#963): indexed, but with
-             * ERROR/MISSING regions — see pass_parallel.c (keep in sync). */
-            cbm_pipeline_add_file_error(ctx->pipeline, rel,
-                                        result->error_ranges ? result->error_ranges : "unknown",
-                                        "parse_partial");
-        }
-
-        /* Create nodes for each definition */
-        for (int d = 0; d < result->defs.count; d++) {
-            process_def(ctx, &result->defs.items[d], rel);
-            total_defs++;
-        }
-
-        /* Store calls for pass_calls (we save them in the extraction results
-         * for now — a future optimization would batch these) */
-        total_calls += result->calls.count;
-
-        if (local_cache) {
-            local_cache[i] = result;
-        } else {
-            /* Cache unavailable: imports for this file can still only
-             * resolve to defs already in the graph, but the file's
-             * own defs are now persisted before the lookup. No namespace
-             * map is available without the cache (single-file scope). */
-            total_imports += create_import_edges_for_file(ctx, result, rel, NULL);
-            create_channel_edges_for_file(ctx, result, rel);
-            cbm_pipeline_create_env_configures_for_file(ctx, result, rel);
-            cbm_free_result(result);
-        }
+        definition_pass_context_t context = {
+            .pipeline = ctx, .files = files, .cache = local_cache, .stats = &stats};
+        (void)definition_pass_process_file(&context, i);
     }
 
     /* Phase 2: now that all extraction results are cached and Module
@@ -868,24 +868,19 @@ int cbm_pipeline_pass_definitions(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t
             if (!result) {
                 continue;
             }
-            total_imports +=
+            stats.imports +=
                 create_import_edges_for_file(ctx, result, files[i].rel_path, namespace_map);
             create_channel_edges_for_file(ctx, result, files[i].rel_path);
             cbm_pipeline_create_env_configures_for_file(ctx, result, files[i].rel_path);
         }
         cbm_pipeline_namespace_map_free(namespace_map);
         if (owns_local_cache) {
-            for (int i = 0; i < file_count; i++) {
-                if (local_cache[i]) {
-                    cbm_free_result(local_cache[i]);
-                }
-            }
-            free(local_cache);
+            definition_pass_release_owned_cache(local_cache, file_count);
         }
     }
 
-    cbm_log_info("pass.done", "pass", "definitions", "defs", itoa_log(total_defs), "calls",
-                 itoa_log(total_calls), "imports", itoa_log(total_imports), "errors",
-                 itoa_log(errors));
+    cbm_log_info("pass.done", "pass", "definitions", "defs", itoa_log(stats.definitions), "calls",
+                 itoa_log(stats.calls), "imports", itoa_log(stats.imports), "errors",
+                 itoa_log(stats.errors));
     return 0;
 }

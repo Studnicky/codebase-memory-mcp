@@ -5,6 +5,7 @@
 
 #include "foundation/compat_thread.h"
 
+#include <limits.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -79,6 +80,10 @@ enum {
     FRAME_LENGTH_2 = 9,
     FRAME_LENGTH_1 = 10,
     FRAME_LENGTH_0 = 11,
+    FRAME_FLAGS_HIGH_SHIFT = CHAR_BIT,
+    FRAME_LENGTH_MOST_SIGNIFICANT_SHIFT = (sizeof(uint32_t) - sizeof(uint8_t)) * CHAR_BIT,
+    FRAME_LENGTH_UPPER_MIDDLE_SHIFT = (sizeof(uint32_t) - sizeof(uint16_t)) * CHAR_BIT,
+    FRAME_LENGTH_LOWER_MIDDLE_SHIFT = CHAR_BIT,
 };
 
 static bool frame_type_valid(cbm_daemon_frame_type_t type) {
@@ -87,9 +92,9 @@ static bool frame_type_valid(cbm_daemon_frame_type_t type) {
 
 static char *daemon_string_dup(const char *value) {
     size_t length = strlen(value);
-    char *copy = malloc(length + 1);
+    char *copy = malloc(length + sizeof(*copy));
     if (copy) {
-        memcpy(copy, value, length + 1);
+        memcpy(copy, value, length + sizeof(*copy));
     }
     return copy;
 }
@@ -331,10 +336,11 @@ void cbm_daemon_coordinator_set_permanent(cbm_daemon_coordinator_t *coordinator,
 }
 
 cbm_daemon_coordinator_t *cbm_daemon_coordinator_new(uint64_t lease_timeout_ms) {
-    cbm_daemon_coordinator_t *coordinator = calloc(1, sizeof(*coordinator));
+    cbm_daemon_coordinator_t *coordinator = malloc(sizeof(*coordinator));
     if (!coordinator) {
         return NULL;
     }
+    memset(coordinator, 0, sizeof(*coordinator));
     cbm_mutex_init(&coordinator->mutex);
     coordinator->lease_timeout_ms = lease_timeout_ms;
     coordinator->state = CBM_DAEMON_COORDINATOR_RUNNING;
@@ -531,7 +537,7 @@ cbm_daemon_subscription_result_t cbm_daemon_job_subscribe(
     char *key_copy = NULL;
     cbm_daemon_subscription_t *subscription = malloc(sizeof(*subscription));
     if (started) {
-        new_job = calloc(1, sizeof(*new_job));
+        new_job = malloc(sizeof(*new_job));
         key_copy = daemon_string_dup(project_key);
     }
     if (!subscription || (started && (!new_job || !key_copy))) {
@@ -551,6 +557,7 @@ cbm_daemon_subscription_result_t cbm_daemon_job_subscribe(
         return CBM_DAEMON_SUBSCRIPTION_REJECTED;
     }
     if (started) {
+        memset(new_job, 0, sizeof(*new_job));
         new_job->project_key = key_copy;
         new_job->state = CBM_DAEMON_JOB_RUNNING;
         new_job->next = coordinator->jobs;
@@ -591,7 +598,7 @@ cbm_daemon_subscription_result_t cbm_daemon_watch_subscribe(
     char *key_copy = NULL;
     cbm_daemon_subscription_t *subscription = malloc(sizeof(*subscription));
     if (started) {
-        new_watch = calloc(1, sizeof(*new_watch));
+        new_watch = malloc(sizeof(*new_watch));
         key_copy = daemon_string_dup(project_key);
     }
     if (!subscription || (started && (!new_watch || !key_copy))) {
@@ -611,6 +618,7 @@ cbm_daemon_subscription_result_t cbm_daemon_watch_subscribe(
         return CBM_DAEMON_SUBSCRIPTION_REJECTED;
     }
     if (started) {
+        memset(new_watch, 0, sizeof(*new_watch));
         new_watch->project_key = key_copy;
         new_watch->next = coordinator->watches;
         coordinator->watches = new_watch;
@@ -815,11 +823,11 @@ bool cbm_daemon_frame_header_encode(uint8_t header[CBM_DAEMON_FRAME_HEADER_SIZE]
     header[FRAME_MAGIC_3] = 'D';
     header[FRAME_VERSION] = CBM_DAEMON_RENDEZVOUS_FRAME_VERSION;
     header[FRAME_TYPE] = (uint8_t)type;
-    header[FRAME_FLAGS_HI] = (uint8_t)(flags >> 8);
+    header[FRAME_FLAGS_HI] = (uint8_t)(flags >> FRAME_FLAGS_HIGH_SHIFT);
     header[FRAME_FLAGS_LO] = (uint8_t)flags;
-    header[FRAME_LENGTH_3] = (uint8_t)(length >> 24);
-    header[FRAME_LENGTH_2] = (uint8_t)(length >> 16);
-    header[FRAME_LENGTH_1] = (uint8_t)(length >> 8);
+    header[FRAME_LENGTH_3] = (uint8_t)(length >> FRAME_LENGTH_MOST_SIGNIFICANT_SHIFT);
+    header[FRAME_LENGTH_2] = (uint8_t)(length >> FRAME_LENGTH_UPPER_MIDDLE_SHIFT);
+    header[FRAME_LENGTH_1] = (uint8_t)(length >> FRAME_LENGTH_LOWER_MIDDLE_SHIFT);
     header[FRAME_LENGTH_0] = (uint8_t)length;
     return true;
 }
@@ -833,16 +841,17 @@ bool cbm_daemon_frame_header_decode(const uint8_t header[CBM_DAEMON_FRAME_HEADER
     }
 
     cbm_daemon_frame_type_t type = (cbm_daemon_frame_type_t)header[FRAME_TYPE];
-    uint32_t length = ((uint32_t)header[FRAME_LENGTH_3] << 24) |
-                      ((uint32_t)header[FRAME_LENGTH_2] << 16) |
-                      ((uint32_t)header[FRAME_LENGTH_1] << 8) | (uint32_t)header[FRAME_LENGTH_0];
+    uint32_t length = ((uint32_t)header[FRAME_LENGTH_3] << FRAME_LENGTH_MOST_SIGNIFICANT_SHIFT) |
+                      ((uint32_t)header[FRAME_LENGTH_2] << FRAME_LENGTH_UPPER_MIDDLE_SHIFT) |
+                      ((uint32_t)header[FRAME_LENGTH_1] << FRAME_LENGTH_LOWER_MIDDLE_SHIFT) |
+                      (uint32_t)header[FRAME_LENGTH_0];
     if (!frame_type_valid(type) || length > CBM_DAEMON_MAX_FRAME_SIZE) {
         return false;
     }
 
     frame->type = type;
-    frame->flags =
-        (uint16_t)(((uint16_t)header[FRAME_FLAGS_HI] << 8) | (uint16_t)header[FRAME_FLAGS_LO]);
+    frame->flags = (uint16_t)(((uint16_t)header[FRAME_FLAGS_HI] << FRAME_FLAGS_HIGH_SHIFT) |
+                              (uint16_t)header[FRAME_FLAGS_LO]);
     frame->length = length;
     return true;
 }

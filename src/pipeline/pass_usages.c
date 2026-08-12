@@ -143,6 +143,107 @@ static const cbm_gbuf_node_t *find_enclosing_node(cbm_pipeline_ctx_t *ctx, const
     return node;
 }
 
+enum {
+    USAGE_EDGE_RESOLVED = 1,
+};
+
+static const CBMResolvedCall *find_semantic_usage_reference(
+    cbm_pipeline_ctx_t *ctx, const CBMFileResult *result,
+    const cbm_pipeline_lsp_reference_index_t *reference_index, CBMUsage *usage, CBMLanguage lang) {
+    if (!cbm_pipeline_usage_semantic_reference_candidate(usage)) {
+        return NULL;
+    }
+    bool allow_tail = cbm_pipeline_lsp_allow_tail_match(lang);
+    const CBMResolvedCall *reference = cbm_pipeline_find_lsp_reference_indexed_in_graph(
+        &result->resolved_calls, reference_index, usage, allow_tail, ctx->gbuf, ctx->project_name);
+    if (!reference || cbm_pipeline_usage_allows_semantic_reference(usage, reference)) {
+        return reference;
+    }
+    return NULL;
+}
+
+static const cbm_gbuf_node_t *resolve_semantic_usage_target(
+    cbm_pipeline_ctx_t *ctx, const CBMFileResult *result,
+    const cbm_pipeline_lsp_reference_index_t *reference_index, CBMUsage *usage, CBMLanguage lang,
+    bool *precise_call_reference, bool *semantic_reference_found) {
+    const CBMResolvedCall *reference =
+        find_semantic_usage_reference(ctx, result, reference_index, usage, lang);
+    if (!reference) {
+        return NULL;
+    }
+    *semantic_reference_found = true;
+    bool allow_tail = cbm_pipeline_lsp_allow_tail_match(lang);
+    const cbm_gbuf_node_t *target = cbm_pipeline_lsp_target_node(ctx->gbuf, ctx->project_name,
+                                                                 reference->callee_qn, allow_tail);
+    *precise_call_reference = cbm_pipeline_node_is_callable_target(target);
+    return target;
+}
+
+static const cbm_gbuf_node_t *resolve_usage_fallback(cbm_pipeline_ctx_t *ctx, CBMUsage *usage,
+                                                     const char *module_qn, const char **imp_keys,
+                                                     const char **imp_vals, int imp_count,
+                                                     CBMLanguage lang) {
+    cbm_resolution_t resolution = cbm_registry_resolve(ctx->registry, usage->ref_name, module_qn,
+                                                       imp_keys, imp_vals, imp_count);
+    if (!resolution.qualified_name || resolution.qualified_name[0] == '\0') {
+        return NULL;
+    }
+    if (!cbm_pipeline_reference_candidate_fallback_allowed(lang, usage, resolution.strategy,
+                                                           imp_keys, imp_count)) {
+        return NULL;
+    }
+    const cbm_gbuf_node_t *target = cbm_gbuf_find_by_qn(ctx->gbuf, resolution.qualified_name);
+    bool blocked =
+        usage->semantic_reference_blocked &&
+        (usage->semantic_reference_local_shadow || cbm_pipeline_node_is_callable_target(target));
+    return blocked ? NULL : target;
+}
+
+static const cbm_gbuf_node_t *resolve_usage_target(
+    cbm_pipeline_ctx_t *ctx, const CBMFileResult *result,
+    const cbm_pipeline_lsp_reference_index_t *reference_index, CBMUsage *usage,
+    const char *module_qn, const char **imp_keys, const char **imp_vals, int imp_count,
+    CBMLanguage lang, bool *precise_call_reference) {
+    bool semantic_reference_found = false;
+    const cbm_gbuf_node_t *target =
+        resolve_semantic_usage_target(ctx, result, reference_index, usage, lang,
+                                      precise_call_reference, &semantic_reference_found);
+    if (target || semantic_reference_found) {
+        return target;
+    }
+    return resolve_usage_fallback(ctx, usage, module_qn, imp_keys, imp_vals, imp_count, lang);
+}
+
+static int resolve_usage_edge(cbm_pipeline_ctx_t *ctx, const CBMFileResult *result,
+                              const cbm_pipeline_lsp_reference_index_t *reference_index,
+                              CBMUsage *usage, const char *rel, const char *module_qn,
+                              const char **imp_keys, const char **imp_vals, int imp_count,
+                              CBMLanguage lang) {
+    if (!usage->ref_name) {
+        return 0;
+    }
+    const cbm_gbuf_node_t *source = find_enclosing_node(ctx, usage->enclosing_func_qn, rel);
+    if (!source) {
+        return 0;
+    }
+    bool precise_call_reference = false;
+    const cbm_gbuf_node_t *target =
+        resolve_usage_target(ctx, result, reference_index, usage, module_qn, imp_keys, imp_vals,
+                             imp_count, lang, &precise_call_reference);
+    if (!target || cbm_node_id_eq(source->id, target->id)) {
+        return 0;
+    }
+    enum { USAGE_PROP_COUNT = 1 };
+    cbm_gbuf_prop_t properties[USAGE_PROP_COUNT] = {
+        {.key = "callee", .kind = CBM_EDGE_PROP_STRING, .text = usage->ref_name},
+    };
+    const char *edge_type = precise_call_reference ? "CALL_REFERENCE" : "USAGE";
+    cbm_gbuf_insert_edge_props(ctx->gbuf,
+                               (cbm_edge_endpoints_t){.source = source->id, .target = target->id},
+                               edge_type, properties, USAGE_PROP_COUNT);
+    return USAGE_EDGE_RESOLVED;
+}
+
 /* Resolve USAGE edges for one file's extracted usages. */
 static int resolve_usage_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *result,
                                const char *rel, const char *module_qn, const char **imp_keys,
@@ -153,73 +254,8 @@ static int resolve_usage_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *res
         cbm_pipeline_lsp_reference_index_build(&result->resolved_calls, &reference_index);
     for (int u = 0; u < result->usages.count; u++) {
         CBMUsage *usage = &result->usages.items[u];
-        if (!usage->ref_name) {
-            continue;
-        }
-        const cbm_gbuf_node_t *src = find_enclosing_node(ctx, usage->enclosing_func_qn, rel);
-        if (!src) {
-            continue;
-        }
-
-        const cbm_gbuf_node_t *tgt = NULL;
-        bool precise_call_reference = false;
-        const CBMResolvedCall *semantic_reference = NULL;
-        if (cbm_pipeline_usage_semantic_reference_candidate(usage)) {
-            bool allow_tail = cbm_pipeline_lsp_allow_tail_match(lang);
-            semantic_reference = cbm_pipeline_find_lsp_reference_indexed_in_graph(
-                &result->resolved_calls, reference_index_ready ? &reference_index : NULL, usage,
-                allow_tail, ctx->gbuf, ctx->project_name);
-            if (semantic_reference &&
-                !cbm_pipeline_usage_allows_semantic_reference(usage, semantic_reference)) {
-                semantic_reference = NULL;
-            }
-            if (semantic_reference) {
-                tgt = cbm_pipeline_lsp_target_node(ctx->gbuf, ctx->project_name,
-                                                   semantic_reference->callee_qn, allow_tail);
-                precise_call_reference = cbm_pipeline_node_is_callable_target(tgt);
-            }
-        }
-
-        /* A syntactically explicit reference remains useful when exact semantic
-         * resolution is unavailable, but the textual registry fallback proves
-         * only value use—not an occurrence-exact callable target. Emit USAGE in
-         * that case; CALL_REFERENCE is reserved for the exact LSP join. */
-        if (!tgt) {
-            /* An occurrence-exact semantic record owns this reference even when
-             * its target is not materialized in the graph (for example, a
-             * Kotlin local function). Falling back by raw name here would bind
-             * an unrelated same-named declaration. */
-            if (semantic_reference) {
-                continue;
-            }
-            cbm_resolution_t res = cbm_registry_resolve(ctx->registry, usage->ref_name, module_qn,
-                                                        imp_keys, imp_vals, imp_count);
-            if (!res.qualified_name || res.qualified_name[0] == '\0') {
-                continue;
-            }
-            if (!cbm_pipeline_reference_candidate_fallback_allowed(lang, usage, res.strategy,
-                                                                   imp_keys, imp_count)) {
-                continue;
-            }
-            tgt = cbm_gbuf_find_by_qn(ctx->gbuf, res.qualified_name);
-            if (usage->semantic_reference_blocked && (usage->semantic_reference_local_shadow ||
-                                                      cbm_pipeline_node_is_callable_target(tgt))) {
-                continue;
-            }
-        }
-        if (!tgt || cbm_node_id_eq(src->id, tgt->id)) {
-            continue;
-        }
-
-        enum { USAGE_PROP_COUNT = 1 };
-        cbm_gbuf_prop_t uprops[USAGE_PROP_COUNT] = {
-            {.key = "callee", .kind = CBM_EDGE_PROP_STRING, .text = usage->ref_name},
-        };
-        const char *edge_type = precise_call_reference ? "CALL_REFERENCE" : "USAGE";
-        cbm_gbuf_insert_edge_props(ctx->gbuf,
-                                   (cbm_edge_endpoints_t){.source = src->id, .target = tgt->id},
-                                   edge_type, uprops, USAGE_PROP_COUNT);
-        resolved++;
+        resolved += resolve_usage_edge(ctx, result, reference_index_ready ? &reference_index : NULL,
+                                       usage, rel, module_qn, imp_keys, imp_vals, imp_count, lang);
     }
     cbm_pipeline_lsp_reference_index_free(&reference_index);
     return resolved;

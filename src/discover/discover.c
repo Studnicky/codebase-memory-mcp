@@ -137,7 +137,9 @@ static bool str_contains(const char *s, const char *sub) {
 
 /* ── Git global excludes resolution ───────────────────────────── */
 
-enum { GIT_TILDE_PREFIX_LEN = 2 }; /* "~/". */
+enum { GIT_TILDE_PREFIX_LEN = sizeof("~/") - SKIP_ONE };
+
+static const char GITDIR_PREFIX[] = "gitdir:";
 
 static bool ascii_ieq(const char *a, const char *b) {
     while (*a && *b) {
@@ -155,7 +157,7 @@ static char *trim_ws(char *s) {
         s++;
     }
     char *end = s + strlen(s);
-    while (end > s && isspace((unsigned char)end[-1])) {
+    while (end > s && isspace((unsigned char)end[-SKIP_ONE])) {
         end--;
     }
     *end = '\0';
@@ -166,7 +168,7 @@ static void strip_inline_comment(char *s) {
     bool in_quote = false;
     char quote = '\0';
     for (char *p = s; *p; p++) {
-        if ((*p == '"' || *p == '\'') && (p == s || p[-1] != '\\')) {
+        if ((*p == '"' || *p == '\'') && (p == s || p[-SKIP_ONE] != '\\')) {
             if (!in_quote) {
                 in_quote = true;
                 quote = *p;
@@ -175,7 +177,8 @@ static void strip_inline_comment(char *s) {
             }
             continue;
         }
-        if (!in_quote && (*p == '#' || *p == ';') && (p == s || isspace((unsigned char)p[-1]))) {
+        if (!in_quote && (*p == '#' || *p == ';') &&
+            (p == s || isspace((unsigned char)p[-SKIP_ONE]))) {
             *p = '\0';
             return;
         }
@@ -227,7 +230,7 @@ static bool expand_git_path(const char *path, char *out, size_t out_sz) {
         return out[0] != '\0';
     }
 
-    if (normalized[1] != '\0' && normalized[1] != '/') {
+    if (normalized[SKIP_ONE] != '\0' && normalized[SKIP_ONE] != '/') {
         return false; /* ~user expansion is intentionally not supported. */
     }
 
@@ -235,7 +238,7 @@ static bool expand_git_path(const char *path, char *out, size_t out_sz) {
     if (!home || home[0] == '\0') {
         return false;
     }
-    if (normalized[1] == '\0') {
+    if (normalized[SKIP_ONE] == '\0') {
         snprintf(out, out_sz, "%s", home);
         cbm_normalize_path_sep(out);
     } else {
@@ -290,8 +293,7 @@ static bool read_core_excludes_file(const char *config_path, char *out, size_t o
         }
     }
 
-    fclose(f);
-    return found;
+    return fclose(f) == 0 && found;
 }
 
 static bool resolve_xdg_git_config_dir(char *out, size_t out_sz) {
@@ -590,7 +592,7 @@ static bool dir_is_cache_tree(const char *abs_path) {
         return false;
     }
     size_t n = strlen(cache);
-    while (n > 1 && (cache[n - 1] == '/' || cache[n - 1] == '\\')) {
+    while (n > SKIP_ONE && (cache[n - SKIP_ONE] == '/' || cache[n - SKIP_ONE] == '\\')) {
         n--;
     }
     if (strncmp(abs_path, cache, n) != 0) {
@@ -711,7 +713,9 @@ static CBMLanguage detect_file_language(const char *entry_name, const char *abs_
         if (xf) {
             char xbuf[CBM_SZ_256];
             size_t xn = fread(xbuf, SKIP_ONE, sizeof(xbuf) - SKIP_ONE, xf);
-            (void)fclose(xf);
+            if (fclose(xf) != 0) {
+                return CBM_LANG_COUNT;
+            }
             xbuf[xn] = '\0';
             if (strstr(xbuf, "<Export generator=")) {
                 return CBM_LANG_OBJECTSCRIPT_EXPORT;
@@ -837,11 +841,11 @@ static void walk_push_subdir(walk_stack_t *ws, const char *abs_path, const char 
         /* Doubling an int overflows before the cast can widen it, so bound it
          * first and treat hitting the ceiling the same as an allocation
          * failure. */
-        if (ws->cap > INT_MAX / 2) {
+        if (ws->cap > INT_MAX / PAIR_LEN) {
             out->failed = true;
             return;
         }
-        int new_cap = ws->cap * 2;
+        int new_cap = ws->cap * PAIR_LEN;
         walk_frame_t *grown = realloc(ws->frames, (size_t)new_cap * sizeof(*grown));
         if (!grown) {
             out->failed = true;
@@ -918,7 +922,7 @@ static bool walk_owned_gitignore_append(cbm_gitignore_t ***owned, size_t *count,
         return false;
     }
     if (*count == *capacity) {
-        size_t next_capacity = *capacity == 0 ? 16U : *capacity * 2U;
+        size_t next_capacity = *capacity == 0 ? CBM_SZ_16 : *capacity * PAIR_LEN;
         if (next_capacity < *capacity || next_capacity > SIZE_MAX / sizeof(**owned)) {
             return false;
         }
@@ -1012,6 +1016,56 @@ static bool discover_path_is_absolute(const char *path) {
 #endif
 }
 
+static bool resolve_git_link_path(const char *repo_path, const char *link_path,
+                                  char git_dir[CBM_SZ_4K]) {
+    FILE *file = cbm_fopen(link_path, "r");
+    if (!file) {
+        return false;
+    }
+    bool found = false;
+    char line[CBM_SZ_4K];
+    if (fgets(line, sizeof(line), file)) {
+        char *value = trim_ws(line);
+        if (strncmp(value, GITDIR_PREFIX, sizeof(GITDIR_PREFIX) - SKIP_ONE) == 0) {
+            value = trim_ws(value + sizeof(GITDIR_PREFIX) - SKIP_ONE);
+            if (value[0]) {
+                if (discover_path_is_absolute(value)) {
+                    snprintf(git_dir, CBM_SZ_4K, "%s", value);
+                    cbm_normalize_path_sep(git_dir);
+                } else {
+                    path_join(git_dir, CBM_SZ_4K, repo_path, value);
+                }
+                found = true;
+            }
+        }
+    }
+    return fclose(file) == 0 && found;
+}
+
+static bool resolve_git_common_link(const char *git_dir, char *common_dir, size_t size) {
+    char link_path[CBM_SZ_4K];
+    path_join(link_path, sizeof(link_path), git_dir, "commondir");
+    FILE *file = cbm_fopen(link_path, "r");
+    if (!file) {
+        return false;
+    }
+    char line[CBM_SZ_4K];
+    bool found = false;
+    if (fgets(line, sizeof(line), file)) {
+        char *value = trim_ws(line);
+        if (value[0]) {
+            if (discover_path_is_absolute(value)) {
+                snprintf(common_dir, size, "%s", value);
+                cbm_normalize_path_sep(common_dir);
+            } else {
+                path_join(common_dir, size, git_dir, value);
+            }
+            found = true;
+        }
+    }
+    return fclose(file) == 0 && found;
+}
+
 /* Resolve the shared "common" git directory for repo_path.
  * Handles three layouts:
  *   1. <repo>/.git is a directory    - ordinary repo; common_dir == <repo>/.git
@@ -1039,60 +1093,15 @@ static bool resolve_git_common_dir(const char *repo_path, char *common_dir, size
         return false;
     }
 
-    /* Linked worktree: parse "gitdir: <path>" from the gitlink file.
-     * cbm_fopen (not raw fopen) so non-ASCII repo paths open on Windows. */
-    FILE *f = cbm_fopen(dot_git, "r");
-    if (!f) {
-        return false;
-    }
     char git_dir[CBM_SZ_4K];
-    bool got_git_dir = false;
-    char line[CBM_SZ_4K];
-    while (fgets(line, sizeof(line), f)) {
-        char *gs = trim_ws(line);
-        if (strncmp(gs, "gitdir:", 7) == 0) {
-            char *val = trim_ws(gs + 7);
-            if (val[0] != '\0') {
-                if (discover_path_is_absolute(val)) {
-                    snprintf(git_dir, sizeof(git_dir), "%s", val);
-                    cbm_normalize_path_sep(git_dir);
-                } else {
-                    path_join(git_dir, sizeof(git_dir), repo_path, val);
-                }
-                got_git_dir = true;
-            }
-            break;
-        }
-    }
-    fclose(f);
-    if (!got_git_dir) {
+    if (!resolve_git_link_path(repo_path, dot_git, git_dir)) {
         return false;
     }
 
     /* The shared dir holding info/exclude + config is named in <git_dir>/commondir
      * (typically a relative path like "../.."). Absent in single-worktree gitdirs. */
-    char commondir_path[CBM_SZ_4K];
-    path_join(commondir_path, sizeof(commondir_path), git_dir, "commondir");
-    FILE *cf = cbm_fopen(commondir_path, "r");
-    if (cf) {
-        char cbuf[CBM_SZ_4K];
-        bool resolved = false;
-        if (fgets(cbuf, sizeof(cbuf), cf)) {
-            char *cs = trim_ws(cbuf);
-            if (cs[0] != '\0') {
-                if (discover_path_is_absolute(cs)) {
-                    snprintf(common_dir, cd_sz, "%s", cs);
-                    cbm_normalize_path_sep(common_dir);
-                } else {
-                    path_join(common_dir, cd_sz, git_dir, cs);
-                }
-                resolved = true;
-            }
-        }
-        fclose(cf);
-        if (resolved) {
-            return true;
-        }
+    if (resolve_git_common_link(git_dir, common_dir, cd_sz)) {
+        return true;
     }
 
     snprintf(common_dir, cd_sz, "%s", git_dir);
@@ -1109,6 +1118,84 @@ int cbm_discover_ex(const char *repo_path, const cbm_discover_opts_t *opts, cbm_
                     int *count, char ***excluded_out, int *excluded_count_out) {
     return cbm_discover_ex2(repo_path, opts, out, count, excluded_out, excluded_count_out, NULL,
                             NULL, NULL);
+}
+
+static cbm_discover_status_t discover_finish(file_list_t *files, cbm_file_info_t **out, int *count,
+                                             char ***excluded_out, int *excluded_count_out,
+                                             cbm_ignored_file_t **ignored_out,
+                                             int *ignored_count_out, int *ignored_total_out,
+                                             bool count_only) {
+    if (files->count > (size_t)INT_MAX || files->excluded_count > (size_t)INT_MAX ||
+        files->ignored_count > (size_t)INT_MAX || files->ignored_total > (size_t)INT_MAX) {
+        files->failed = true;
+    }
+    if (count_only || files->failed) {
+        cbm_discover_free(files->files, (int)files->count);
+        cbm_discover_free_excluded(files->excluded, (int)files->excluded_count);
+        cbm_discover_free_ignored(files->ignored, (int)files->ignored_count);
+        if (files->failed) {
+            *count = 0;
+            return CBM_DISCOVER_ERROR;
+        }
+        *count = (int)files->count;
+        return files->limit_exceeded ? CBM_DISCOVER_LIMIT_EXCEEDED : CBM_DISCOVER_OK;
+    }
+    *out = files->files;
+    *count = (int)files->count;
+    if (excluded_out) {
+        *excluded_out = files->excluded;
+        if (excluded_count_out) {
+            *excluded_count_out = (int)files->excluded_count;
+        }
+    } else {
+        cbm_discover_free_excluded(files->excluded, (int)files->excluded_count);
+    }
+    if (ignored_out) {
+        *ignored_out = files->ignored;
+        if (ignored_count_out) {
+            *ignored_count_out = (int)files->ignored_count;
+        }
+        if (ignored_total_out) {
+            *ignored_total_out = (int)files->ignored_total;
+        }
+    } else {
+        cbm_discover_free_ignored(files->ignored, (int)files->ignored_count);
+    }
+    return CBM_DISCOVER_OK;
+}
+
+static void discover_load_ignore_sources(const char *repo_path, const cbm_discover_opts_t *opts,
+                                         cbm_gitignore_t **gitignore, cbm_gitignore_t **global_gi,
+                                         cbm_gitignore_t **cbmignore) {
+    char path[CBM_SZ_4K];
+    char common_dir[CBM_SZ_4K];
+    struct stat status;
+    snprintf(path, sizeof(path), "%s/.gitignore", repo_path);
+    *gitignore = cbm_gitignore_load(path);
+    bool git_repo = resolve_git_common_dir(repo_path, common_dir, sizeof(common_dir));
+    bool has_config = false;
+    if (git_repo) {
+        path_join(path, sizeof(path), common_dir, "config");
+        has_config = wide_stat(path, &status) == 0 && S_ISREG(status.st_mode);
+        path_join(path, sizeof(path), common_dir, "info/exclude");
+        cbm_gitignore_t *exclude = cbm_gitignore_load(path);
+        if (exclude) {
+            if (!*gitignore) {
+                *gitignore = exclude;
+            } else {
+                (void)cbm_gitignore_merge(*gitignore, exclude);
+                cbm_gitignore_free(exclude);
+            }
+        }
+    }
+    if (has_config && resolve_global_excludes_path(path, sizeof(path))) {
+        *global_gi = cbm_gitignore_load(path);
+    }
+    *cbmignore = cbm_gitignore_load(opts && opts->ignore_file ? opts->ignore_file : "");
+    if (!*cbmignore && (!opts || !opts->ignore_file)) {
+        snprintf(path, sizeof(path), "%s/.cbmignore", repo_path);
+        *cbmignore = cbm_gitignore_load(path);
+    }
 }
 
 static cbm_discover_status_t discover_impl(const char *repo_path, const cbm_discover_opts_t *opts,
@@ -1155,56 +1242,19 @@ static cbm_discover_status_t discover_impl(const char *repo_path, const cbm_disc
      * downstream call paths remain unchanged. Fixes issue #489: OOM on repos whose
      * worktrees are excluded only via .git/info/exclude (e.g. Sandcastle). */
     cbm_gitignore_t *gitignore = NULL;
-    char gi_path[CBM_SZ_4K];
-    struct stat gi_stat;
     /* Resolve the git common dir, transparently following a worktree gitlink so the
      * .git/info/exclude and core.excludesfile sources are honoured inside linked
      * worktrees too (where .git is a file pointing at the shared dir, not a directory). */
-    char git_common_dir[CBM_SZ_4K];
-    bool is_git_repo = resolve_git_common_dir(repo_path, git_common_dir, sizeof(git_common_dir));
-    bool has_git_config = false;
     /* Always honour the .gitignore at the indexed-directory root, even when the
      * directory is not a git repo root (e.g. indexing a sub-package directly).
      * Fixes issue #510: a root .gitignore was silently ignored without .git/. */
-    snprintf(gi_path, sizeof(gi_path), "%s/.gitignore", repo_path);
-    gitignore = cbm_gitignore_load(gi_path);
-    if (is_git_repo) {
-        path_join(gi_path, sizeof(gi_path), git_common_dir, "config");
-        has_git_config = wide_stat(gi_path, &gi_stat) == 0 && S_ISREG(gi_stat.st_mode);
-
-        char exc_path[CBM_SZ_4K];
-        path_join(exc_path, sizeof(exc_path), git_common_dir, "info/exclude");
-        cbm_gitignore_t *git_exclude = cbm_gitignore_load(exc_path);
-        if (git_exclude) {
-            if (!gitignore) {
-                gitignore = git_exclude;
-            } else {
-                /* On allocation failure the merge is atomic (dst unchanged), so
-                 * the .gitignore patterns still apply; the exclude patterns are
-                 * simply skipped — same as if .git/info/exclude were absent. */
-                (void)cbm_gitignore_merge(gitignore, git_exclude);
-                cbm_gitignore_free(git_exclude);
-            }
-        }
-    }
-
     cbm_gitignore_t *global_gi = NULL;
-    if (has_git_config && resolve_global_excludes_path(gi_path, sizeof(gi_path))) {
-        global_gi = cbm_gitignore_load(gi_path);
-    }
-
-    /* Load cbmignore if specified or exists at repo root */
     cbm_gitignore_t *cbmignore = NULL;
-    if (opts && opts->ignore_file) {
-        cbmignore = cbm_gitignore_load(opts->ignore_file);
-    } else {
-        snprintf(gi_path, sizeof(gi_path), "%s/.cbmignore", repo_path);
-        cbmignore = cbm_gitignore_load(gi_path);
-    }
+    discover_load_ignore_sources(repo_path, opts, &gitignore, &global_gi, &cbmignore);
 
     /* Walk */
     file_list_t fl = {
-        .max_files = count_only ? max_files : -1,
+        .max_files = count_only ? max_files : CBM_NOT_FOUND,
         .deadline_ms = count_only ? deadline_ms : 0,
         .count_only = count_only,
         .collect_excluded = !count_only && excluded_out != NULL,
@@ -1218,59 +1268,8 @@ static cbm_discover_status_t discover_impl(const char *repo_path, const cbm_disc
     cbm_gitignore_free(global_gi);
     cbm_gitignore_free(cbmignore);
 
-    /* The public ABI reports counts as int. Exceeding INT_MAX entries isn't
-     * reachable in practice (the array alone would be tens of gigabytes),
-     * but route it through the existing failure path instead of silently
-     * truncating a size_t count down to a wrapped/negative int. */
-    if (fl.count > (size_t)INT_MAX || fl.excluded_count > (size_t)INT_MAX ||
-        fl.ignored_count > (size_t)INT_MAX || fl.ignored_total > (size_t)INT_MAX) {
-        fl.failed = true;
-    }
-
-    if (count_only) {
-        cbm_discover_free(fl.files, (int)fl.count);
-        cbm_discover_free_excluded(fl.excluded, (int)fl.excluded_count);
-        cbm_discover_free_ignored(fl.ignored, (int)fl.ignored_count);
-        if (fl.failed) {
-            *count = 0;
-            return CBM_DISCOVER_ERROR;
-        }
-        *count = (int)fl.count;
-        return fl.limit_exceeded ? CBM_DISCOVER_LIMIT_EXCEEDED : CBM_DISCOVER_OK;
-    }
-    if (fl.failed) {
-        cbm_discover_free(fl.files, (int)fl.count);
-        cbm_discover_free_excluded(fl.excluded, (int)fl.excluded_count);
-        cbm_discover_free_ignored(fl.ignored, (int)fl.ignored_count);
-        return CBM_DISCOVER_ERROR;
-    }
-
-    *out = fl.files;
-    *count = (int)fl.count;
-
-    /* Hand the excluded-dir list to the caller, or free it if not requested. */
-    if (excluded_out) {
-        *excluded_out = fl.excluded;
-        if (excluded_count_out) {
-            *excluded_count_out = (int)fl.excluded_count;
-        }
-    } else {
-        cbm_discover_free_excluded(fl.excluded, (int)fl.excluded_count);
-    }
-
-    /* Same handoff for the ignored-file list (#963). */
-    if (ignored_out) {
-        *ignored_out = fl.ignored;
-        if (ignored_count_out) {
-            *ignored_count_out = (int)fl.ignored_count;
-        }
-        if (ignored_total_out) {
-            *ignored_total_out = (int)fl.ignored_total;
-        }
-    } else {
-        cbm_discover_free_ignored(fl.ignored, (int)fl.ignored_count);
-    }
-    return CBM_DISCOVER_OK;
+    return discover_finish(&fl, out, count, excluded_out, excluded_count_out, ignored_out,
+                           ignored_count_out, ignored_total_out, count_only);
 }
 
 int cbm_discover_ex2(const char *repo_path, const cbm_discover_opts_t *opts, cbm_file_info_t **out,
@@ -1285,7 +1284,7 @@ cbm_discover_status_t cbm_discover_count_bounded(const char *repo_path,
                                                  const cbm_discover_opts_t *opts, int max_files,
                                                  uint64_t deadline_ms, int *count_out) {
     if (count_out) {
-        *count_out = -1;
+        *count_out = CBM_NOT_FOUND;
     }
     if (!repo_path || !count_out || max_files < 0) {
         return CBM_DISCOVER_ERROR;
@@ -1295,7 +1294,7 @@ cbm_discover_status_t cbm_discover_count_bounded(const char *repo_path,
     cbm_discover_status_t status = discover_impl(repo_path, opts, &files, &count, NULL, NULL, NULL,
                                                  NULL, NULL, true, max_files, deadline_ms);
     cbm_discover_free(files, count);
-    *count_out = status == CBM_DISCOVER_ERROR ? -1 : count;
+    *count_out = status == CBM_DISCOVER_ERROR ? CBM_NOT_FOUND : count;
     return status;
 }
 

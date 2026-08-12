@@ -40,6 +40,7 @@ enum {
     CR_MAX_CACHE_ENTRIES = 16384,
     CR_COL_3 = 3,
     CR_COL_4 = 4,
+    CR_CHANNEL_MATCHED = 1,
     CR_SCHEME_SKIP = 3,      /* strlen("://") */
     CR_ROUTE_PREFIX_LEN = 9, /* strlen("__route__") */
     CR_ANY_LEN = 3,          /* strlen("ANY") */
@@ -132,7 +133,7 @@ static bool cr_store_has_exact_project(cbm_store_t *store, const char *project) 
     int count = 0;
     bool matches = store && cbm_store_check_integrity(store) &&
                    cbm_store_list_projects(store, &projects, &count) == CBM_STORE_OK &&
-                   count == 1 && projects[0].name && strcmp(projects[0].name, project) == 0;
+                   count == SKIP_ONE && projects[0].name && strcmp(projects[0].name, project) == 0;
     cbm_store_free_projects(projects, count);
     return matches;
 }
@@ -413,7 +414,7 @@ static bool cr_path_matches_template(const char *concrete, const char *templ) {
         }
         size_t clen = (size_t)(c - cseg);
         size_t tlen = (size_t)(t - tseg);
-        bool t_is_param = (tlen >= PAIR_LEN && tseg[0] == '{' && tseg[tlen - 1] == '}');
+        bool t_is_param = (tlen >= PAIR_LEN && tseg[0] == '{' && tseg[tlen - SKIP_ONE] == '}');
         if (!t_is_param) {
             if (clen != tlen || strncmp(cseg, tseg, clen) != 0) {
                 return false;
@@ -442,6 +443,25 @@ static bool cr_path_matches_template(const char *concrete, const char *templ) {
  * factors stay small (calls are capped at CR_MAX_EDGES and it only runs for
  * edges the exact lookup missed); revisit with a prepared template index if
  * cross-repo matching ever shows up in profiles. (#523) */
+static bool fuzzy_route_matches(const char *route_qn, const char *concrete_path,
+                                const char *method) {
+    if (!route_qn || strncmp(route_qn, "__route__", CR_ROUTE_PREFIX_LEN) != 0) {
+        return false;
+    }
+    const char *route_method = route_qn + CR_ROUTE_PREFIX_LEN;
+    const char *separator = strstr(route_method, "__");
+    if (!separator) {
+        return false;
+    }
+    size_t method_length = (size_t)(separator - route_method);
+    bool method_matches =
+        !method || !method[0] ||
+        (strncmp(route_method, method, method_length) == 0 && method[method_length] == '\0');
+    bool any_method = method_length == CR_ANY_LEN && strncmp(route_method, "ANY", CR_ANY_LEN) == 0;
+    return (method_matches || any_method) &&
+           cr_path_matches_template(concrete_path, separator + PAIR_LEN);
+}
+
 static int64_t find_route_handler_fuzzy(cbm_store_t *target_store, const char *concrete_path,
                                         const char *method, char *out_qn, size_t out_qn_sz,
                                         char *handler_name, size_t name_sz, char *handler_file,
@@ -467,27 +487,7 @@ static int64_t find_route_handler_fuzzy(cbm_store_t *target_store, const char *c
            (step_rc = cbm_sql_step(s)) == CBM_SQL_ROW) {
         scanned++;
         const char *qn = cbm_sql_column_text(s, 0);
-        if (!qn || strncmp(qn, "__route__", CR_ROUTE_PREFIX_LEN) != 0) {
-            continue;
-        }
-        /* Split "__route__<METHOD>__<path>" */
-        const char *rest = qn + CR_ROUTE_PREFIX_LEN;
-        const char *sep = strstr(rest, "__");
-        if (!sep) {
-            continue;
-        }
-        size_t mlen = (size_t)(sep - rest);
-        const char *rpath = sep + PAIR_LEN;
-        /* Method gate: the route's method must equal the caller's, or be ANY.
-         * A missing caller method matches any route method. */
-        if (method && method[0]) {
-            bool same_method = (strncmp(rest, method, mlen) == 0 && method[mlen] == '\0');
-            bool route_any = (mlen == CR_ANY_LEN && strncmp(rest, "ANY", CR_ANY_LEN) == 0);
-            if (!same_method && !route_any) {
-                continue;
-            }
-        }
-        if (!cr_path_matches_template(concrete_path, rpath)) {
+        if (!fuzzy_route_matches(qn, concrete_path, method)) {
             continue;
         }
         /* A concrete path can match more than one stored template (e.g. a raw
@@ -572,6 +572,31 @@ static bool emit_cross_route_bidirectional(
     return insert_cross_edge(tgt_store, tgt_project, handler_id, tgt_route_id, edge_type, rev, ctx);
 }
 
+static int64_t find_http_route_handler(cbm_store_t *target_store, const char *url_path,
+                                       const char *method, char *route_qn, size_t route_qn_size,
+                                       char *handler_name, size_t handler_name_size,
+                                       char *handler_file, size_t handler_file_size, bool *failed,
+                                       cr_run_context_t *ctx) {
+    char canonical_path[CBM_SZ_256];
+    const char *path =
+        cbm_route_canon_path(cr_url_path(url_path), canonical_path, sizeof(canonical_path));
+    const char *route_method = method[0] ? method : "ANY";
+    snprintf(route_qn, route_qn_size, "__route__%s__%s", route_method, path);
+    int64_t handler_id = find_route_handler(target_store, route_qn, handler_name, handler_name_size,
+                                            handler_file, handler_file_size, failed);
+    if (!*failed && handler_id == 0) {
+        snprintf(route_qn, route_qn_size, "__route__ANY__%s", path);
+        handler_id = find_route_handler(target_store, route_qn, handler_name, handler_name_size,
+                                        handler_file, handler_file_size, failed);
+    }
+    if (!*failed && handler_id == 0) {
+        handler_id = find_route_handler_fuzzy(
+            target_store, path, method[0] ? method : NULL, route_qn, route_qn_size, handler_name,
+            handler_name_size, handler_file, handler_file_size, failed, ctx);
+    }
+    return handler_id;
+}
+
 static cr_match_result_t match_http_routes(cbm_store_t *src_store, const char *src_project,
                                            cbm_store_t *tgt_store, const char *tgt_project,
                                            cr_run_context_t *ctx) {
@@ -612,35 +637,13 @@ static cr_match_result_t match_http_routes(cbm_store_t *src_store, const char *s
             continue;
         }
 
-        /* Build the expected Route QN in the target project (authority-stripped
-         * and param-canonicalized so client url_path matches the server handler
-         * regardless of base URL and framework placeholder syntax). */
         char route_qn[CR_QN_BUF];
-        char cpath[CBM_SZ_256];
-        const char *curl = cbm_route_canon_path(cr_url_path(url_path), cpath, sizeof(cpath));
-        snprintf(route_qn, sizeof(route_qn), "__route__%s__%s", method[0] ? method : "ANY", curl);
-
         char handler_name[CBM_SZ_256] = {0};
         char handler_file[CBM_SZ_512] = {0};
         bool query_failed = false;
-        int64_t handler_id =
-            find_route_handler(tgt_store, route_qn, handler_name, sizeof(handler_name),
-                               handler_file, sizeof(handler_file), &query_failed);
-        if (!query_failed && handler_id == 0) {
-            /* Try without method (ANY) */
-            snprintf(route_qn, sizeof(route_qn), "__route__ANY__%s", curl);
-            handler_id = find_route_handler(tgt_store, route_qn, handler_name, sizeof(handler_name),
-                                            handler_file, sizeof(handler_file), &query_failed);
-        }
-        if (!query_failed && handler_id == 0) {
-            /* Exact QN lookup missed. A concrete client path ("/v2/orders/123")
-             * never exact-matches a templated route ("/v2/orders/{}"), so fall
-             * back to segment-wise template matching. (#523) */
-            handler_id =
-                find_route_handler_fuzzy(tgt_store, curl, method[0] ? method : NULL, route_qn,
-                                         sizeof(route_qn), handler_name, sizeof(handler_name),
-                                         handler_file, sizeof(handler_file), &query_failed, ctx);
-        }
+        int64_t handler_id = find_http_route_handler(
+            tgt_store, url_path, method, route_qn, sizeof(route_qn), handler_name,
+            sizeof(handler_name), handler_file, sizeof(handler_file), &query_failed, ctx);
         if (query_failed) {
             failed = true;
             break;
@@ -670,6 +673,19 @@ static cr_match_result_t match_http_routes(cbm_store_t *src_store, const char *s
         failed = true;
     }
     return cr_match_finish(ctx, count, failed);
+}
+
+typedef struct {
+    cbm_store_t *provider_store;
+    const char *provider_project;
+    cbm_store_t *consumer_store;
+    const char *consumer_project;
+} cr_reverse_http_pair_t;
+
+static cr_match_result_t match_http_routes_from_consumer(const cr_reverse_http_pair_t *pair,
+                                                         cr_run_context_t *ctx) {
+    return match_http_routes(pair->consumer_store, pair->consumer_project, pair->provider_store,
+                             pair->provider_project, ctx);
 }
 
 /* ── Phase B: Async matching ─────────────────────────────────────── */
@@ -832,7 +848,7 @@ static int try_match_channel_listener(cbm_store_t *src_store, const char *src_pr
                       "channel_name", transport);
     if (insert_cross_edge(tgt_store, tgt_project, listener_id, tgt_channel_id, "CROSS_CHANNEL", rev,
                           ctx)) {
-        return 1;
+        return CR_CHANNEL_MATCHED;
     }
     if (cr_cancel_requested(ctx)) {
         return CBM_STORE_NOT_FOUND;
@@ -1046,13 +1062,66 @@ static cr_match_result_t match_typed_routes(cbm_store_t *src_store, const char *
 
 static void free_project_list(char **projects, int count);
 
+static bool project_from_database_entry(const char *entry_name, char *project,
+                                        size_t project_size) {
+    size_t name_length = strlen(entry_name);
+    if (name_length < CR_COL_4 || strcmp(entry_name + name_length - CR_DB_EXT_LEN, ".db") != 0) {
+        return false;
+    }
+    if (strcmp(entry_name, "_cross_repo.db") == 0 || strcmp(entry_name, "_config.db") == 0) {
+        return false;
+    }
+    size_t project_length = name_length - CR_DB_EXT_LEN;
+    if (project_length >= project_size) {
+        return false;
+    }
+    memcpy(project, entry_name, project_length);
+    project[project_length] = '\0';
+    return cbm_validate_project_name(project) && cr_project_exists(project);
+}
+
+static bool append_discovered_project(char ***projects, size_t *capacity, int *count,
+                                      const char *project) {
+    if (*count >= CR_MAX_PROJECTS) {
+        return false;
+    }
+    if ((size_t)*count >= *capacity) {
+        size_t next_capacity = *capacity * PAIR_LEN;
+        char **resized = realloc(*projects, next_capacity * sizeof(**projects));
+        if (!resized) {
+            return false;
+        }
+        *projects = resized;
+        *capacity = next_capacity;
+    }
+    (*projects)[*count] = cbm_strdup(project);
+    if (!(*projects)[*count]) {
+        return false;
+    }
+    (*count)++;
+    return true;
+}
+
+static int sort_and_deduplicate_projects(char **projects, int count) {
+    qsort(projects, (size_t)count, sizeof(*projects), cr_project_compare);
+    int unique_count = 0;
+    for (int i = 0; i < count; i++) {
+        if (unique_count == 0 || strcmp(projects[i], projects[unique_count - SKIP_ONE]) != 0) {
+            projects[unique_count++] = projects[i];
+            continue;
+        }
+        free(projects[i]);
+    }
+    return unique_count;
+}
+
 /* When target_projects = ["*"], scan the cache directory for all .db files. */
 static int collect_all_projects(char ***out, cr_run_context_t *ctx) {
     *out = NULL;
     const char *dir = cr_cache_dir();
     cbm_dir_t *d = cbm_opendir(dir);
     if (!d) {
-        return -1;
+        return CBM_STORE_ERR;
     }
 
     /* cap is size_t so the doubling below is defined unsigned arithmetic; count
@@ -1062,7 +1131,7 @@ static int collect_all_projects(char ***out, cr_run_context_t *ctx) {
     char **projects = malloc(cap * sizeof(char *));
     if (!projects) {
         cbm_closedir(d);
-        return -1;
+        return CBM_STORE_ERR;
     }
 
     bool failed = false;
@@ -1079,44 +1148,14 @@ static int collect_all_projects(char ***out, cr_run_context_t *ctx) {
             failed = true;
             break;
         }
-        size_t len = strlen(ent->name);
-        if (len < CR_COL_4 || strcmp(ent->name + len - CR_DB_EXT_LEN, ".db") != 0) {
-            continue;
-        }
-        /* Internal stores are exact filenames. Substring filtering would hide
-         * legitimate projects such as orders_config_service or api-wal. */
-        if (strcmp(ent->name, "_cross_repo.db") == 0 || strcmp(ent->name, "_config.db") == 0) {
-            continue;
-        }
-        if (count >= CR_MAX_PROJECTS) {
-            failed = true;
-            break;
-        }
         char project[CBM_DIRENT_NAME_MAX];
-        size_t project_length = len - CR_DB_EXT_LEN;
-        if (project_length == 0 || project_length >= sizeof(project)) {
+        if (!project_from_database_entry(ent->name, project, sizeof(project))) {
             continue;
         }
-        memcpy(project, ent->name, project_length);
-        project[project_length] = '\0';
-        if (!cbm_validate_project_name(project) || !cr_project_exists(project)) {
-            continue;
-        }
-        if ((size_t)count >= cap) {
-            cap *= PAIR_LEN;
-            char **tmp = realloc(projects, cap * sizeof(char *));
-            if (!tmp) {
-                failed = true;
-                break;
-            }
-            projects = tmp;
-        }
-        projects[count] = cbm_strdup(project);
-        if (!projects[count]) {
+        if (!append_discovered_project(&projects, &cap, &count, project)) {
             failed = true;
             break;
         }
-        count++;
     }
     cbm_closedir(d);
 
@@ -1124,17 +1163,8 @@ static int collect_all_projects(char ***out, cr_run_context_t *ctx) {
         free_project_list(projects, count);
         return cr_cancel_requested(ctx) ? CBM_STORE_NOT_FOUND : CBM_STORE_ERR;
     }
-    qsort(projects, (size_t)count, sizeof(*projects), cr_project_compare);
-    int unique_count = 0;
-    for (int i = 0; i < count; i++) {
-        if (unique_count == 0 || strcmp(projects[i], projects[unique_count - 1]) != 0) {
-            projects[unique_count++] = projects[i];
-        } else {
-            free(projects[i]);
-        }
-    }
     *out = projects;
-    return unique_count;
+    return sort_and_deduplicate_projects(projects, count);
 }
 
 static void free_project_list(char **projects, int count) {
@@ -1148,11 +1178,11 @@ static int collect_named_projects(const char **targets, int target_count, char *
                                   cr_run_context_t *ctx) {
     *out = NULL;
     if (!targets || target_count <= 0 || target_count > CR_MAX_PROJECTS) {
-        return -1;
+        return CBM_STORE_ERR;
     }
     char **projects = calloc((size_t)target_count, sizeof(*projects));
     if (!projects) {
-        return -1;
+        return CBM_STORE_ERR;
     }
     int count = 0;
     for (int i = 0; i < target_count; i++) {
@@ -1162,31 +1192,109 @@ static int collect_named_projects(const char **targets, int target_count, char *
         }
         if (!targets[i] || strcmp(targets[i], "*") == 0 || !cbm_validate_project_name(targets[i])) {
             free_project_list(projects, count);
-            return -1;
+            return CBM_STORE_ERR;
         }
         projects[count] = cbm_strdup(targets[i]);
         if (!projects[count]) {
             free_project_list(projects, count);
-            return -1;
+            return CBM_STORE_ERR;
         }
         count++;
     }
-    qsort(projects, (size_t)count, sizeof(*projects), cr_project_compare);
-    int unique_count = 0;
-    for (int i = 0; i < count; i++) {
-        if (unique_count == 0 || strcmp(projects[i], projects[unique_count - 1]) != 0) {
-            projects[unique_count++] = projects[i];
-        } else {
-            free(projects[i]);
-        }
-    }
     *out = projects;
-    return unique_count;
+    return sort_and_deduplicate_projects(projects, count);
 }
 
 static cr_run_status_t add_match_count(int *total, cr_match_result_t matched) {
     *total += matched.count;
     return matched.status;
+}
+
+static bool cross_repo_request_is_valid(const char *project, const char **target_projects,
+                                        int target_count) {
+    return project && cbm_validate_project_name(project) && target_projects && target_count > 0 &&
+           !(target_count == SKIP_ONE && !target_projects[0]) && cr_project_exists(project);
+}
+
+static int resolve_target_projects(const char **target_projects, int target_count, char ***resolved,
+                                   cr_run_context_t *ctx) {
+    if (target_count == SKIP_ONE && target_projects[0] && strcmp(target_projects[0], "*") == 0) {
+        return collect_all_projects(resolved, ctx);
+    }
+    return collect_named_projects(target_projects, target_count, resolved, ctx);
+}
+
+static cr_run_status_t validate_resolved_projects(const char *source_project, char **projects,
+                                                  int project_count, cr_run_context_t *ctx) {
+    for (int i = 0; i < project_count; i++) {
+        if (cr_cancel_requested(ctx)) {
+            return CR_RUN_CANCELLED;
+        }
+        if (strcmp(projects[i], source_project) != 0 && !cr_project_exists(projects[i])) {
+            return CR_RUN_FAILED;
+        }
+    }
+    return CR_RUN_OK;
+}
+
+static cr_run_status_t match_target_project(cbm_store_t *source_store, const char *source_project,
+                                            const char *target_project,
+                                            cbm_cross_repo_result_t *result,
+                                            cr_run_context_t *ctx) {
+    if (cr_cancel_requested(ctx)) {
+        return CR_RUN_CANCELLED;
+    }
+    if (strcmp(target_project, source_project) == 0) {
+        return CR_RUN_OK;
+    }
+    cbm_store_t *target_store = cr_open_existing_project(target_project);
+    if (!target_store) {
+        return CR_RUN_FAILED;
+    }
+
+    cr_run_status_t status =
+        add_match_count(&result->http_edges, match_http_routes(source_store, source_project,
+                                                               target_store, target_project, ctx));
+    if (status == CR_RUN_OK) {
+        const cr_reverse_http_pair_t reverse_pair = {
+            .provider_store = source_store,
+            .provider_project = source_project,
+            .consumer_store = target_store,
+            .consumer_project = target_project,
+        };
+        status = add_match_count(&result->http_edges,
+                                 match_http_routes_from_consumer(&reverse_pair, ctx));
+    }
+    if (status == CR_RUN_OK) {
+        status = add_match_count(
+            &result->async_edges,
+            match_async_routes(source_store, source_project, target_store, target_project, ctx));
+    }
+    if (status == CR_RUN_OK) {
+        status = add_match_count(
+            &result->channel_edges,
+            match_channels(source_store, source_project, target_store, target_project, ctx));
+    }
+    if (status == CR_RUN_OK) {
+        status = add_match_count(&result->grpc_edges,
+                                 match_typed_routes(source_store, source_project, target_store,
+                                                    target_project, "GRPC_CALLS", "service",
+                                                    "method", "CROSS_GRPC_CALLS", ctx));
+    }
+    if (status == CR_RUN_OK) {
+        status = add_match_count(&result->graphql_edges,
+                                 match_typed_routes(source_store, source_project, target_store,
+                                                    target_project, "GRAPHQL_CALLS", "operation",
+                                                    "operation", "CROSS_GRAPHQL_CALLS", ctx));
+    }
+    if (status == CR_RUN_OK) {
+        status = add_match_count(&result->trpc_edges,
+                                 match_typed_routes(source_store, source_project, target_store,
+                                                    target_project, "TRPC_CALLS", "procedure",
+                                                    "procedure", "CROSS_TRPC_CALLS", ctx));
+    }
+    cbm_store_close(target_store);
+    return status;
 }
 
 /* ── Entry point ─────────────────────────────────────────────────── */
@@ -1200,8 +1308,7 @@ cbm_cross_repo_result_t cbm_cross_repo_match_cancellable(const char *project,
     struct timespec t0;
     clock_gettime(CLOCK_MONOTONIC, &t0);
 
-    if (!project || !cbm_validate_project_name(project) || !target_projects || target_count <= 0 ||
-        (target_count == SKIP_ONE && !target_projects[0]) || !cr_project_exists(project)) {
+    if (!cross_repo_request_is_valid(project, target_projects, target_count)) {
         result.failed = true;
         return result;
     }
@@ -1214,27 +1321,19 @@ cbm_cross_repo_result_t cbm_cross_repo_match_cancellable(const char *project,
     char **resolved = NULL;
     int resolved_count = 0;
 
-    if (target_count == SKIP_ONE && target_projects[0] && strcmp(target_projects[0], "*") == 0) {
-        resolved_count = collect_all_projects(&resolved, &run);
-    } else {
-        resolved_count = collect_named_projects(target_projects, target_count, &resolved, &run);
-    }
+    resolved_count = resolve_target_projects(target_projects, target_count, &resolved, &run);
     if (resolved_count < 0) {
         result.cancelled = cr_cancel_requested(&run);
         result.failed = !result.cancelled;
         return result;
     }
-    for (int i = 0; i < resolved_count; i++) {
-        if (cr_cancel_requested(&run)) {
-            result.cancelled = true;
-            free_project_list(resolved, resolved_count);
-            return result;
-        }
-        if (strcmp(resolved[i], project) != 0 && !cr_project_exists(resolved[i])) {
-            result.failed = true;
-            free_project_list(resolved, resolved_count);
-            return result;
-        }
+    cr_run_status_t validation_status =
+        validate_resolved_projects(project, resolved, resolved_count, &run);
+    if (validation_status != CR_RUN_OK) {
+        result.cancelled = validation_status == CR_RUN_CANCELLED;
+        result.failed = validation_status == CR_RUN_FAILED;
+        free_project_list(resolved, resolved_count);
+        return result;
     }
 
     /* Every input is known to exist before destructive source cleanup. The
@@ -1266,65 +1365,8 @@ cbm_cross_repo_result_t cbm_cross_repo_match_cancellable(const char *project,
 
     /* Match against each target */
     for (int i = 0; i < resolved_count; i++) {
-        if (cr_cancel_requested(&run)) {
-            result.cancelled = true;
-            result.partial_results = run.mutated;
-            break;
-        }
-        const char *tgt = resolved[i];
-        if (strcmp(tgt, project) == 0) {
-            continue; /* skip self */
-        }
-
-        /* Open target store read-write (for bidirectional edge writes) */
-        cbm_store_t *tgt_store = cr_open_existing_project(tgt);
-        if (!tgt_store) {
-            result.failed = true;
-            break;
-        }
-
-        cr_run_status_t match_status = add_match_count(
-            &result.http_edges, match_http_routes(src_store, project, tgt_store, tgt, &run));
-        /* Reverse direction: when this pass runs from the provider side, the
-         * consumer's HTTP_CALLS live in tgt, not src — the forward pass above
-         * finds nothing because the provider has no outbound calls. This also
-         * re-creates the provider-side reverse edges that delete_cross_edges
-         * just wiped, which a provider-side run previously destroyed for good.
-         * A caller edge lives in exactly one DB, so the two directions scan
-         * disjoint edge sets and never double-count a pair; the store's
-         * (source, target, type) upsert keeps re-recorded rows unique. (#523) */
-        if (match_status == CR_RUN_OK) {
-            match_status = add_match_count(
-                &result.http_edges, match_http_routes(tgt_store, tgt, src_store, project, &run));
-        }
-        if (match_status == CR_RUN_OK) {
-            match_status = add_match_count(
-                &result.async_edges, match_async_routes(src_store, project, tgt_store, tgt, &run));
-        }
-        if (match_status == CR_RUN_OK) {
-            match_status = add_match_count(
-                &result.channel_edges, match_channels(src_store, project, tgt_store, tgt, &run));
-        }
-        if (match_status == CR_RUN_OK) {
-            match_status =
-                add_match_count(&result.grpc_edges,
-                                match_typed_routes(src_store, project, tgt_store, tgt, "GRPC_CALLS",
-                                                   "service", "method", "CROSS_GRPC_CALLS", &run));
-        }
-        if (match_status == CR_RUN_OK) {
-            match_status = add_match_count(
-                &result.graphql_edges,
-                match_typed_routes(src_store, project, tgt_store, tgt, "GRAPHQL_CALLS", "operation",
-                                   "operation", "CROSS_GRAPHQL_CALLS", &run));
-        }
-        if (match_status == CR_RUN_OK) {
-            match_status = add_match_count(
-                &result.trpc_edges,
-                match_typed_routes(src_store, project, tgt_store, tgt, "TRPC_CALLS", "procedure",
-                                   "procedure", "CROSS_TRPC_CALLS", &run));
-        }
-
-        cbm_store_close(tgt_store);
+        cr_run_status_t match_status =
+            match_target_project(src_store, project, resolved[i], &result, &run);
         if (match_status == CR_RUN_FAILED) {
             result.failed = true;
             break;
@@ -1334,7 +1376,9 @@ cbm_cross_repo_result_t cbm_cross_repo_match_cancellable(const char *project,
             result.partial_results = run.mutated;
             break;
         }
-        result.projects_scanned++;
+        if (strcmp(resolved[i], project) != 0) {
+            result.projects_scanned++;
+        }
     }
 
     cbm_store_close(src_store);

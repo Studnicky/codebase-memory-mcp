@@ -18,6 +18,23 @@
 #include <stdlib.h>
 #include <string.h>
 
+enum {
+    CBM_SVC_PATH_FIRST_SEGMENT_OFFSET = 1,
+    CBM_SVC_VERSION_PREFIX_INDEX = 1,
+    CBM_SVC_VERSION_DIGIT_INDEX = 2,
+    CBM_SVC_VERSION_SUFFIX_INDEX = 3,
+    CBM_SVC_EXTENSION_PREFIX_OFFSET = 1,
+    CBM_SVC_EXTENSION_CAPACITY = 32,
+    CBM_SVC_CPP_SCOPE_SUFFIX_INDEX = 2,
+    CBM_SVC_TRIM_LAST_CHARACTER_OFFSET = 1,
+    CBM_SVC_QUOTED_DELIMITER_BYTES = 2,
+    CBM_SVC_ROUTE_LITERAL_CAPACITY = 1024,
+    CBM_SVC_CACHE_INITIAL_CAPACITY = 8192,
+};
+
+static const char CBM_SVC_HTTP_SCHEME[] = "http://";
+static const char CBM_SVC_HTTPS_SCHEME[] = "https://";
+
 /* ── Library identifier → edge type ────────────────────────────── */
 
 typedef struct {
@@ -551,12 +568,28 @@ static const lib_pattern_t *match_qn(const char *qn, const lib_pattern_t *patter
     return NULL;
 }
 
+static const lib_pattern_t *const service_pattern_groups[] = {
+    route_reg_libraries, http_libraries,    async_libraries, config_libraries,
+    grpc_libraries,      graphql_libraries, trpc_libraries,
+};
+
+static const lib_pattern_t *match_service_pattern(const char *resolved_qn) {
+    for (size_t group = 0; group < sizeof(service_pattern_groups) / sizeof(*service_pattern_groups);
+         group++) {
+        const lib_pattern_t *match = match_qn(resolved_qn, service_pattern_groups[group]);
+        if (match) {
+            return match;
+        }
+    }
+    return NULL;
+}
+
 static bool starts_with_segment(const char *path, const char *segment) {
     if (!path || path[0] != '/' || !segment) {
         return false;
     }
     size_t seg_len = strlen(segment);
-    const char *p = path + 1;
+    const char *p = path + CBM_SVC_PATH_FIRST_SEGMENT_OFFSET;
     return strncmp(p, segment, seg_len) == 0 && (p[seg_len] == '\0' || p[seg_len] == '/');
 }
 
@@ -585,8 +618,10 @@ static bool has_http_route_marker(const char *path) {
         starts_with_segment(path, "metrics")) {
         return true;
     }
-    return path && path[0] == '/' && path[1] == 'v' && is_digit_char(path[2]) &&
-           (path[3] == '\0' || path[3] == '/');
+    return path && path[0] == '/' && path[CBM_SVC_VERSION_PREFIX_INDEX] == 'v' &&
+           is_digit_char(path[CBM_SVC_VERSION_DIGIT_INDEX]) &&
+           (path[CBM_SVC_VERSION_SUFFIX_INDEX] == '\0' ||
+            path[CBM_SVC_VERSION_SUFFIX_INDEX] == '/');
 }
 
 static bool has_filesystem_root(const char *path) {
@@ -632,15 +667,15 @@ static bool has_filesystem_extension(const char *path) {
         }
     }
     const char *dot = NULL;
-    for (const char *p = last_slash + 1; p < end; p++) {
+    for (const char *p = last_slash + CBM_SVC_PATH_FIRST_SEGMENT_OFFSET; p < end; p++) {
         if (*p == '.') {
             dot = p;
         }
     }
-    if (!dot || dot == end - 1) {
+    if (!dot || dot == end - CBM_SVC_EXTENSION_PREFIX_OFFSET) {
         return false;
     }
-    char ext[32];
+    char ext[CBM_SVC_EXTENSION_CAPACITY];
     size_t ext_len = (size_t)(end - dot);
     if (ext_len >= sizeof(ext)) {
         return false;
@@ -672,11 +707,11 @@ static bool callee_is_delimiter_or_filesystem_builder(const char *callee_name) {
     const char *last_dot = strrchr(callee_name, '.');
     const char *last_colon = strstr(callee_name, "::");
     const char *method = callee_name;
-    if (last_dot && last_dot[1]) {
-        method = last_dot + 1;
+    if (last_dot && last_dot[CBM_SVC_PATH_FIRST_SEGMENT_OFFSET]) {
+        method = last_dot + CBM_SVC_PATH_FIRST_SEGMENT_OFFSET;
     }
-    if (last_colon && last_colon[2]) {
-        method = last_colon + 2;
+    if (last_colon && last_colon[CBM_SVC_CPP_SCOPE_SUFFIX_INDEX]) {
+        method = last_colon + CBM_SVC_CPP_SCOPE_SUFFIX_INDEX;
     }
     if (strcmp(method, "split") == 0 || strcmp(method, "rsplit") == 0 ||
         strcmp(method, "partition") == 0 || strcmp(method, "join") == 0) {
@@ -694,14 +729,17 @@ static const char *strip_string_delimiters(const char *literal, char *buf, size_
         start++;
     }
     size_t len = strlen(start);
-    while (len > 0 && (start[len - 1] == ' ' || start[len - 1] == '\t' || start[len - 1] == '\n' ||
-                       start[len - 1] == '\r')) {
+    while (len > 0 && (start[len - CBM_SVC_TRIM_LAST_CHARACTER_OFFSET] == ' ' ||
+                       start[len - CBM_SVC_TRIM_LAST_CHARACTER_OFFSET] == '\t' ||
+                       start[len - CBM_SVC_TRIM_LAST_CHARACTER_OFFSET] == '\n' ||
+                       start[len - CBM_SVC_TRIM_LAST_CHARACTER_OFFSET] == '\r')) {
         len--;
     }
-    if (len >= 2 && (start[0] == '"' || start[0] == '\'' || start[0] == '`') &&
-        start[len - 1] == start[0]) {
+    if (len >= CBM_SVC_QUOTED_DELIMITER_BYTES &&
+        (start[0] == '"' || start[0] == '\'' || start[0] == '`') &&
+        start[len - CBM_SVC_TRIM_LAST_CHARACTER_OFFSET] == start[0]) {
         start++;
-        len -= 2;
+        len -= CBM_SVC_QUOTED_DELIMITER_BYTES;
     }
     if (len == 0 || len >= buf_sz) {
         return NULL;
@@ -712,12 +750,13 @@ static const char *strip_string_delimiters(const char *literal, char *buf, size_
 }
 
 bool cbm_service_pattern_is_http_route_literal(const char *literal, const char *callee_name) {
-    char path_buf[1024];
+    char path_buf[CBM_SVC_ROUTE_LITERAL_CAPACITY];
     const char *path = strip_string_delimiters(literal, path_buf, sizeof(path_buf));
     if (!path || !path[0]) {
         return false;
     }
-    if (strncmp(path, "http://", 7) == 0 || strncmp(path, "https://", 8) == 0) {
+    if (strncmp(path, CBM_SVC_HTTP_SCHEME, strlen(CBM_SVC_HTTP_SCHEME)) == 0 ||
+        strncmp(path, CBM_SVC_HTTPS_SCHEME, strlen(CBM_SVC_HTTPS_SCHEME)) == 0) {
         return true;
     }
     if (strstr(path, "://") != NULL) {
@@ -750,13 +789,14 @@ bool cbm_service_pattern_is_http_route_literal(const char *literal, const char *
 #include "foundation/hash_table.h"
 #include "foundation/compat.h"
 
-static CBM_TLS CBMHashTable *_svc_cache = NULL;
-/* Encode the enum + 1 in the pointer so 0/NULL means "miss". */
-static inline void *svc_enum_to_ptr(cbm_svc_kind_t k) {
-    return (void *)(uintptr_t)((unsigned)k + 1U);
-}
-static inline cbm_svc_kind_t svc_ptr_to_enum(void *p) {
-    return (cbm_svc_kind_t)((uintptr_t)p - 1U);
+static CBM_TLS CBMHashTable *svc_cache = NULL;
+static cbm_svc_kind_t svc_cached_kinds[] = {
+    CBM_SVC_NONE,      CBM_SVC_HTTP, CBM_SVC_ASYNC,   CBM_SVC_CONFIG,
+    CBM_SVC_ROUTE_REG, CBM_SVC_GRPC, CBM_SVC_GRAPHQL, CBM_SVC_TRPC,
+};
+
+static cbm_svc_kind_t *svc_cached_kind(cbm_svc_kind_t kind) {
+    return &svc_cached_kinds[kind];
 }
 
 static void svc_cache_free_key(const char *key, void *val, void *ud) {
@@ -771,19 +811,19 @@ static void svc_cache_free_key(const char *key, void *val, void *ud) {
 }
 
 void cbm_service_pattern_cache_begin(void) {
-    if (_svc_cache) {
+    if (svc_cache) {
         return; /* idempotent */
     }
-    _svc_cache = cbm_ht_create(8192);
+    svc_cache = cbm_ht_create(CBM_SVC_CACHE_INITIAL_CAPACITY);
 }
 
 void cbm_service_pattern_cache_end(void) {
-    if (!_svc_cache) {
+    if (!svc_cache) {
         return;
     }
-    cbm_ht_foreach(_svc_cache, svc_cache_free_key, NULL);
-    cbm_ht_free(_svc_cache);
-    _svc_cache = NULL;
+    cbm_ht_foreach(svc_cache, svc_cache_free_key, NULL);
+    cbm_ht_free(svc_cache);
+    svc_cache = NULL;
 }
 
 void cbm_service_patterns_init(void) {
@@ -799,38 +839,26 @@ cbm_svc_kind_t cbm_service_pattern_match(const char *resolved_qn) {
         return CBM_SVC_NONE;
     }
 
-    if (_svc_cache) {
-        void *cached = cbm_ht_get(_svc_cache, resolved_qn);
+    if (svc_cache) {
+        void *cached = cbm_ht_get(svc_cache, resolved_qn);
         if (cached) {
-            return svc_ptr_to_enum(cached);
+            return *(const cbm_svc_kind_t *)cached;
         }
     }
 
     cbm_svc_kind_t result = CBM_SVC_NONE;
-    const lib_pattern_t *p;
 
     /* Route registration checked first — prevents gin/echo from matching
      * as HTTP clients (both have .get/.post suffixes). */
-    if ((p = match_qn(resolved_qn, route_reg_libraries))) {
-        result = p->kind;
-    } else if ((p = match_qn(resolved_qn, http_libraries))) {
-        result = p->kind;
-    } else if ((p = match_qn(resolved_qn, async_libraries))) {
-        result = p->kind;
-    } else if ((p = match_qn(resolved_qn, config_libraries))) {
-        result = p->kind;
-    } else if ((p = match_qn(resolved_qn, grpc_libraries))) {
-        result = p->kind;
-    } else if ((p = match_qn(resolved_qn, graphql_libraries))) {
-        result = p->kind;
-    } else if ((p = match_qn(resolved_qn, trpc_libraries))) {
-        result = p->kind;
+    const lib_pattern_t *match = match_service_pattern(resolved_qn);
+    if (match) {
+        result = match->kind;
     }
 
-    if (_svc_cache) {
+    if (svc_cache) {
         char *kdup = strdup(resolved_qn);
         if (kdup) {
-            cbm_ht_set(_svc_cache, kdup, svc_enum_to_ptr(result));
+            cbm_ht_set(svc_cache, kdup, svc_cached_kind(result));
         }
     }
     return result;

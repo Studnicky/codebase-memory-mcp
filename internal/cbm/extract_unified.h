@@ -104,6 +104,7 @@ typedef struct {
 } CBMLexicalBinding;
 
 typedef enum {
+    CBM_PYTHON_DIRECTIVE_NONE = 0,
     CBM_PYTHON_DIRECTIVE_GLOBAL = 1,
     CBM_PYTHON_DIRECTIVE_NONLOCAL,
 } CBMPythonDirectiveKind;

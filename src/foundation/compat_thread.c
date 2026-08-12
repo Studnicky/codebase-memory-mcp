@@ -175,7 +175,7 @@ int cbm_thread_create(cbm_thread_t *t, size_t stack_size, void *(*fn)(void *), v
 int cbm_thread_join(cbm_thread_t *t) {
     int rc = pthread_join(t->handle, NULL);
     if (rc == 0) {
-        memset(&t->handle, 0, sizeof(t->handle));
+        memset(t, 0, sizeof(*t));
     }
     return rc;
 }
@@ -183,7 +183,7 @@ int cbm_thread_join(cbm_thread_t *t) {
 int cbm_thread_detach(cbm_thread_t *t) {
     int rc = pthread_detach(t->handle);
     if (rc == 0) {
-        memset(&t->handle, 0, sizeof(t->handle));
+        memset(t, 0, sizeof(*t));
     }
     return rc;
 }

@@ -209,6 +209,69 @@ typedef struct {
 
 enum { SIM_CAND_CAP = 4096 };
 
+typedef enum {
+    SIM_CANDIDATE_SKIPPED = 0,
+    SIM_CANDIDATE_EMITTED = 1,
+    SIM_CANDIDATE_CAPACITY_REACHED = 2,
+} sim_candidate_outcome_t;
+
+static bool sim_candidate_has_matching_pair(const fp_entry_t *source,
+                                            const cbm_lsh_entry_t *candidate) {
+    if (candidate->node_id == cbm_node_id_value(source->node_id)) {
+        return false;
+    }
+    if (strcmp(source->ext, candidate->file_ext) != 0) {
+        return false;
+    }
+    return source->qn && candidate->qualified_name &&
+           strcmp(source->qn, candidate->qualified_name) < 0;
+}
+
+static sim_candidate_outcome_t sim_score_candidate(sim_query_ctx_t *context,
+                                                   sim_edge_buf_t *edge_buffer,
+                                                   const fp_entry_t *source,
+                                                   const cbm_lsh_entry_t *candidate,
+                                                   int entry_index, int emitted) {
+    if (!sim_candidate_has_matching_pair(source, candidate)) {
+        return SIM_CANDIDATE_SKIPPED;
+    }
+    int current = atomic_load_explicit(&context->edge_counts[entry_index], memory_order_relaxed);
+    if (current + emitted >= CBM_MINHASH_MAX_EDGES_PER_NODE) {
+        return SIM_CANDIDATE_CAPACITY_REACHED;
+    }
+    double jaccard = cbm_minhash_jaccard(&source->fp, candidate->fingerprint);
+    if (jaccard < CBM_MINHASH_JACCARD_THRESHOLD) {
+        return SIM_CANDIDATE_SKIPPED;
+    }
+    bool same_file = source->file_path && candidate->file_path &&
+                     strcmp(source->file_path, candidate->file_path) == 0;
+    sim_edge_buf_push(edge_buffer, source->node_id, cbm_node_id(candidate->node_id), jaccard,
+                      same_file);
+    return SIM_CANDIDATE_EMITTED;
+}
+
+static int sim_query_entry(sim_query_ctx_t *context, sim_edge_buf_t *edge_buffer, int entry_index,
+                           const cbm_lsh_entry_t **candidates) {
+    int edge_count = atomic_load_explicit(&context->edge_counts[entry_index], memory_order_relaxed);
+    if (edge_count >= CBM_MINHASH_MAX_EDGES_PER_NODE) {
+        return 0;
+    }
+    const fp_entry_t *source = &context->entries[entry_index];
+    int candidate_count = cbm_lsh_query_into(context->lsh, &source->fp, candidates, SIM_CAND_CAP);
+    int emitted = 0;
+    for (int candidate_index = 0; candidate_index < candidate_count; candidate_index++) {
+        sim_candidate_outcome_t outcome = sim_score_candidate(
+            context, edge_buffer, source, candidates[candidate_index], entry_index, emitted);
+        if (outcome == SIM_CANDIDATE_CAPACITY_REACHED) {
+            break;
+        }
+        if (outcome == SIM_CANDIDATE_EMITTED) {
+            emitted++;
+        }
+    }
+    return emitted;
+}
+
 static void sim_query_worker(int worker_id, void *ctx_ptr) {
     sim_query_ctx_t *sc = ctx_ptr;
     sim_edge_buf_t *my_buf = &sc->worker_bufs[worker_id];
@@ -222,46 +285,7 @@ static void sim_query_worker(int worker_id, void *ctx_ptr) {
             break;
         }
 
-        int ec = atomic_load_explicit(&sc->edge_counts[i], memory_order_relaxed);
-        if (ec >= CBM_MINHASH_MAX_EDGES_PER_NODE) {
-            continue;
-        }
-
-        const fp_entry_t *src = &sc->entries[i];
-        int cand_count = cbm_lsh_query_into(sc->lsh, &src->fp, cands, SIM_CAND_CAP);
-
-        int emitted = 0;
-        for (int c = 0; c < cand_count; c++) {
-            const cbm_lsh_entry_t *cand = cands[c];
-            if (cand->node_id == cbm_node_id_value(src->node_id)) {
-                continue;
-            }
-            if (strcmp(src->ext, cand->file_ext) != 0) {
-                continue;
-            }
-            /* Pair ownership by canonical QN order, not node id: ids are
-             * assigned in parallel-merge order and vary run to run, which
-             * flipped which side owned a pair and (with the per-source edge
-             * cap) flickered the emitted set (determinism). */
-            if (!src->qn || !cand->qualified_name || strcmp(src->qn, cand->qualified_name) >= 0) {
-                continue;
-            }
-
-            int cur = atomic_load_explicit(&sc->edge_counts[i], memory_order_relaxed);
-            if (cur + emitted >= CBM_MINHASH_MAX_EDGES_PER_NODE) {
-                break;
-            }
-
-            double jaccard = cbm_minhash_jaccard(&src->fp, cand->fingerprint);
-            if (jaccard < CBM_MINHASH_JACCARD_THRESHOLD) {
-                continue;
-            }
-
-            bool same_file =
-                src->file_path && cand->file_path && strcmp(src->file_path, cand->file_path) == 0;
-            sim_edge_buf_push(my_buf, src->node_id, cbm_node_id(cand->node_id), jaccard, same_file);
-            emitted++;
-        }
+        int emitted = sim_query_entry(sc, my_buf, i, cands);
         if (emitted > 0) {
             atomic_fetch_add_explicit(&sc->edge_counts[i], emitted, memory_order_relaxed);
         }

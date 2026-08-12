@@ -169,7 +169,8 @@ TEST(gi_null_safe_free) {
 /* ── Load from file ────────────────────────────────────────────── */
 
 TEST(gi_load_file) {
-    char path[256]; snprintf(path, sizeof(path), "%s/test_gitignore_file", cbm_tmpdir());
+    char path[256];
+    snprintf(path, sizeof(path), "%s/test_gitignore_file", cbm_tmpdir());
     FILE *f = fopen(path, "w");
     ASSERT_NOT_NULL(f);
     fprintf(f, "*.o\nbuild/\n");
@@ -196,7 +197,7 @@ TEST(gi_load_nonexistent) {
 
 TEST(gi_merge_patterns) {
     cbm_gitignore_t *base_gi = cbm_gitignore_parse("*.log\n");
-    cbm_gitignore_t *extra   = cbm_gitignore_parse("tmp/\nbuild/\n");
+    cbm_gitignore_t *extra = cbm_gitignore_parse("tmp/\nbuild/\n");
     ASSERT_NOT_NULL(base_gi);
     ASSERT_NOT_NULL(extra);
 
@@ -230,8 +231,8 @@ TEST(gi_merge_into_empty) {
 
 TEST(gi_merge_null_safe) {
     cbm_gitignore_t *gi = cbm_gitignore_parse("*.log\n");
-    cbm_gitignore_merge(gi, NULL);  /* should not crash */
-    cbm_gitignore_merge(NULL, gi);  /* should not crash */
+    cbm_gitignore_merge(gi, NULL); /* should not crash */
+    cbm_gitignore_merge(NULL, gi); /* should not crash */
     cbm_gitignore_free(gi);
     PASS();
 }
@@ -242,8 +243,6 @@ TEST(gi_merge_null_safe) {
  * others. The seam below injects a strdup failure on the 2nd src pattern.
  * Without the atomic rollback this test is RED: the first src pattern ("a/")
  * leaks into dst, so `matches(dst, "a", true)` is true. */
-extern char *(*cbm_gitignore_merge_dup_hook_for_test)(const char *);
-
 static int gi_dup_calls;
 static int gi_dup_fail_at;
 static char *gi_failing_dup(const char *s) {
@@ -261,11 +260,11 @@ TEST(gi_merge_atomic_on_alloc_failure) {
 
     gi_dup_calls = 0;
     gi_dup_fail_at = 1; /* first src pattern copies; second fails */
-    cbm_gitignore_merge_dup_hook_for_test = gi_failing_dup;
+    cbm_gitignore_test_set_merge_dup_hook(gi_failing_dup);
 
     bool ok = cbm_gitignore_merge(dst, src);
 
-    cbm_gitignore_merge_dup_hook_for_test = NULL; /* restore for other tests */
+    cbm_gitignore_test_set_merge_dup_hook(NULL); /* restore for other tests */
 
     ASSERT_FALSE(ok); /* failure is signalled, not silent */
     /* dst unchanged: its own pattern still matches, and the partially copied

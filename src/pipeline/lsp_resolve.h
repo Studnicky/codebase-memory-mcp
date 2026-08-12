@@ -37,6 +37,18 @@
  * (Go, C/C++, Python, PHP). */
 #define CBM_LSP_CONFIDENCE_FLOOR 0.6
 
+enum {
+    CBM_LSP_COMPARE_LESS = -1,
+    CBM_LSP_COMPARE_GREATER = 1,
+    CBM_LSP_SITE_RANK_LEGACY = 1,
+    CBM_LSP_SITE_RANK_EXACT = 2,
+    CBM_LSP_BINARY_SEARCH_DIVISOR = 2,
+    CBM_LSP_PROJECT_QN_SEPARATOR_BYTES = 1,
+    CBM_LSP_PROJECT_QN_TERMINATOR_BYTES = 1,
+    CBM_LSP_PROJECT_QN_EXTRA_BYTES =
+        CBM_LSP_PROJECT_QN_SEPARATOR_BYTES + CBM_LSP_PROJECT_QN_TERMINATOR_BYTES,
+};
+
 #if defined(CBM_CALL_REFERENCE_LOOKUP_TEST_API) && CBM_CALL_REFERENCE_LOOKUP_TEST_API
 /* Test-build-only operation counter implemented by pass_usages.c. Keeping the
  * increment behind this seam lets the regression measure the real sequential
@@ -69,7 +81,7 @@ static inline const char *cbm_lsp_bare_segment(const char *name) {
          * closes the `->` arrow (preceded by '-'); a bare '>' closes a template
          * argument list ("identity<int>") and must NOT split, else the segment
          * would be the empty string after the trailing '>'. */
-        if (*p == '.' || *p == ':' || (*p == '>' && p != name && p[-1] == '-')) {
+        if (*p == '.' || *p == ':' || (*p == '>' && p != name && p[-SKIP_ONE] == '-')) {
             seg = p + SKIP_ONE;
         }
     }
@@ -96,7 +108,7 @@ static inline const char *cbm_pipeline_qn_class_method_tail(const char *qn) {
             if (second == qn) {
                 return qn;
             }
-            return second + 1;
+            return second + SKIP_ONE;
         }
     }
     return qn;
@@ -309,13 +321,15 @@ static inline int cbm_pipeline_invocation_site_rank(const CBMResolvedCall *resol
         return cbm_pipeline_source_occurrence_eq(call->site_start_byte, call->site_end_byte,
                                                  call->source_origin, resolved->site_start_byte,
                                                  resolved->site_end_byte, resolved->source_origin)
-                   ? 2
+                   ? CBM_LSP_SITE_RANK_EXACT
                    : 0;
     }
     if (!cbm_pipeline_source_site_legacy(resolved->site_start_byte, resolved->site_end_byte)) {
         return 0;
     }
-    return call->requires_lsp_resolution || call->source_origin != resolved->source_origin ? 0 : 1;
+    return call->requires_lsp_resolution || call->source_origin != resolved->source_origin
+               ? 0
+               : CBM_LSP_SITE_RANK_LEGACY;
 }
 
 static inline bool cbm_pipeline_invocation_reason_join_strategy(const char *strategy) {
@@ -342,8 +356,8 @@ static inline bool cbm_pipeline_invocation_leaf_matches(const CBMResolvedCall *r
 
     /* Destructors intentionally join by their exact delete-expression
      * occurrence because the parser carrier starts as a neutral "~" marker. */
-    if (site_rank == 2 && call->requires_lsp_resolution && resolved->strategy &&
-        strcmp(resolved->strategy, "lsp_destructor") == 0) {
+    if (site_rank == CBM_LSP_SITE_RANK_EXACT && call->requires_lsp_resolution &&
+        resolved->strategy && strcmp(resolved->strategy, "lsp_destructor") == 0) {
         return true;
     }
 
@@ -372,6 +386,96 @@ static inline bool cbm_pipeline_invocation_leaf_matches(const CBMResolvedCall *r
  *
  * The pointer returned aliases into `arr` and stays valid as long as the
  * underlying CBMFileResult is alive. */
+typedef struct {
+    const CBMResolvedCall *best;
+    int site_rank;
+    bool ambiguous;
+} cbm_pipeline_lsp_invocation_match_t;
+
+static inline bool cbm_pipeline_invocation_row_eligible(const CBMResolvedCall *row) {
+    return row->kind == CBM_RESOLVED_INVOCATION && row->caller_qn && row->callee_qn &&
+           row->confidence >= CBM_LSP_CONFIDENCE_FLOOR;
+}
+
+static inline void cbm_pipeline_update_invocation_match(cbm_pipeline_lsp_invocation_match_t *match,
+                                                        const CBMResolvedCall *row, int site_rank,
+                                                        const cbm_gbuf_t *gbuf,
+                                                        const char *project_name,
+                                                        bool allow_tail_match) {
+    if (!match->best || site_rank > match->site_rank) {
+        match->best = row;
+        match->site_rank = site_rank;
+        match->ambiguous = false;
+        return;
+    }
+    if (site_rank < match->site_rank) {
+        return;
+    }
+    if (!cbm_pipeline_invocation_targets_equal(match->best->callee_qn, row->callee_qn, gbuf,
+                                               project_name, allow_tail_match)) {
+        match->ambiguous = true;
+        return;
+    }
+    if (row->confidence > match->best->confidence) {
+        match->best = row;
+    }
+}
+
+static inline cbm_pipeline_lsp_invocation_match_t cbm_pipeline_find_exact_invocation_match(
+    const CBMResolvedCallArray *arr, const CBMCall *call, const cbm_gbuf_t *gbuf,
+    const char *project_name, bool allow_tail_match) {
+    cbm_pipeline_lsp_invocation_match_t match = {0};
+    for (int index = 0; index < arr->count; index++) {
+        const CBMResolvedCall *row = &arr->items[index];
+        if (!cbm_pipeline_invocation_row_eligible(row) ||
+            strcmp(row->caller_qn, call->enclosing_func_qn) != 0) {
+            continue;
+        }
+        int site_rank = cbm_pipeline_invocation_site_rank(row, call);
+        if (site_rank > 0 && cbm_pipeline_invocation_leaf_matches(row, call, site_rank)) {
+            cbm_pipeline_update_invocation_match(&match, row, site_rank, gbuf, project_name,
+                                                 allow_tail_match);
+        }
+    }
+    return match;
+}
+
+static inline bool cbm_pipeline_tail_invocation_caller_matches(const CBMResolvedCall *row,
+                                                               const CBMCall *call,
+                                                               const char *call_tail,
+                                                               int site_rank) {
+    if (call_tail && cbm_pipeline_qn_class_method_tail_eq(row->caller_qn, call_tail)) {
+        return true;
+    }
+    if (site_rank != CBM_LSP_SITE_RANK_EXACT) {
+        return false;
+    }
+    const char *resolved_caller = cbm_lsp_bare_segment(row->caller_qn);
+    const char *source_caller = cbm_lsp_bare_segment(call->enclosing_func_qn);
+    return resolved_caller && source_caller && strcmp(resolved_caller, source_caller) == 0;
+}
+
+static inline void cbm_pipeline_find_tail_invocation_matches(
+    const CBMResolvedCallArray *arr, const CBMCall *call, const char *call_tail,
+    const cbm_gbuf_t *gbuf, const char *project_name, cbm_pipeline_lsp_invocation_match_t *exact,
+    cbm_pipeline_lsp_invocation_match_t *legacy) {
+    for (int index = 0; index < arr->count; index++) {
+        const CBMResolvedCall *row = &arr->items[index];
+        if (!cbm_pipeline_invocation_row_eligible(row)) {
+            continue;
+        }
+        int site_rank = cbm_pipeline_invocation_site_rank(row, call);
+        if (site_rank == 0 ||
+            !cbm_pipeline_tail_invocation_caller_matches(row, call, call_tail, site_rank) ||
+            !cbm_pipeline_invocation_leaf_matches(row, call, site_rank)) {
+            continue;
+        }
+        cbm_pipeline_lsp_invocation_match_t *match =
+            site_rank == CBM_LSP_SITE_RANK_EXACT ? exact : legacy;
+        cbm_pipeline_update_invocation_match(match, row, site_rank, gbuf, project_name, true);
+    }
+}
+
 static inline const CBMResolvedCall *cbm_pipeline_find_lsp_resolution_in_graph(
     const CBMResolvedCallArray *arr, const CBMCall *call, bool allow_tail_match,
     const cbm_gbuf_t *gbuf, const char *project_name) {
@@ -382,47 +486,10 @@ static inline const CBMResolvedCall *cbm_pipeline_find_lsp_resolution_in_graph(
         return NULL;
     }
 
-    const CBMResolvedCall *best_exact_caller = NULL;
-    int best_exact_caller_rank = 0;
-    bool exact_caller_ambiguous = false;
-    for (int i = 0; i < arr->count; i++) {
-        const CBMResolvedCall *rc = &arr->items[i];
-        if (rc->kind != CBM_RESOLVED_INVOCATION) {
-            continue;
-        }
-        if (!rc->caller_qn || !rc->callee_qn) {
-            continue;
-        }
-        if (rc->confidence < CBM_LSP_CONFIDENCE_FLOOR) {
-            continue;
-        }
-        if (strcmp(rc->caller_qn, call->enclosing_func_qn) != 0) {
-            continue;
-        }
-        int site_rank = cbm_pipeline_invocation_site_rank(rc, call);
-        if (site_rank == 0 || !cbm_pipeline_invocation_leaf_matches(rc, call, site_rank)) {
-            continue;
-        }
-        if (!best_exact_caller || site_rank > best_exact_caller_rank) {
-            best_exact_caller = rc;
-            best_exact_caller_rank = site_rank;
-            exact_caller_ambiguous = false;
-            continue;
-        }
-        if (site_rank < best_exact_caller_rank) {
-            continue;
-        }
-        if (!cbm_pipeline_invocation_targets_equal(best_exact_caller->callee_qn, rc->callee_qn,
-                                                   gbuf, project_name, allow_tail_match)) {
-            exact_caller_ambiguous = true;
-            continue;
-        }
-        if (rc->confidence > best_exact_caller->confidence) {
-            best_exact_caller = rc;
-        }
-    }
-    if (best_exact_caller) {
-        return exact_caller_ambiguous ? NULL : best_exact_caller;
+    cbm_pipeline_lsp_invocation_match_t exact =
+        cbm_pipeline_find_exact_invocation_match(arr, call, gbuf, project_name, allow_tail_match);
+    if (exact.best) {
+        return exact.ambiguous ? NULL : exact.best;
     }
     if (!allow_tail_match) {
         return NULL;
@@ -430,56 +497,14 @@ static inline const CBMResolvedCall *cbm_pipeline_find_lsp_resolution_in_graph(
 
     const char *call_tail = cbm_pipeline_qn_class_method_tail(call->enclosing_func_qn);
 
-    const CBMResolvedCall *best_tail_exact = NULL;
-    const CBMResolvedCall *best_tail_legacy = NULL;
-    bool tail_exact_ambiguous = false;
-    bool tail_legacy_ambiguous = false;
-    for (int i = 0; i < arr->count; i++) {
-        const CBMResolvedCall *rc = &arr->items[i];
-        if (rc->kind != CBM_RESOLVED_INVOCATION) {
-            continue;
-        }
-        if (!rc->caller_qn || !rc->callee_qn) {
-            continue;
-        }
-        if (rc->confidence < CBM_LSP_CONFIDENCE_FLOOR) {
-            continue;
-        }
-        int site_rank = cbm_pipeline_invocation_site_rank(rc, call);
-        if (site_rank == 0) {
-            continue;
-        }
-        bool caller_matches =
-            call_tail && cbm_pipeline_qn_class_method_tail_eq(rc->caller_qn, call_tail);
-        if (!caller_matches && site_rank == 2) {
-            const char *resolved_caller = cbm_lsp_bare_segment(rc->caller_qn);
-            const char *source_caller = cbm_lsp_bare_segment(call->enclosing_func_qn);
-            caller_matches =
-                resolved_caller && source_caller && strcmp(resolved_caller, source_caller) == 0;
-        }
-        if (!caller_matches || !cbm_pipeline_invocation_leaf_matches(rc, call, site_rank)) {
-            continue;
-        }
-
-        const CBMResolvedCall **best = site_rank == 2 ? &best_tail_exact : &best_tail_legacy;
-        bool *ambiguous = site_rank == 2 ? &tail_exact_ambiguous : &tail_legacy_ambiguous;
-        if (!*best) {
-            *best = rc;
-            continue;
-        }
-        if (!cbm_pipeline_invocation_targets_equal((*best)->callee_qn, rc->callee_qn, gbuf,
-                                                   project_name, allow_tail_match)) {
-            *ambiguous = true;
-            continue;
-        }
-        if (rc->confidence > (*best)->confidence) {
-            *best = rc;
-        }
+    cbm_pipeline_lsp_invocation_match_t tail_exact = {0};
+    cbm_pipeline_lsp_invocation_match_t tail_legacy = {0};
+    cbm_pipeline_find_tail_invocation_matches(arr, call, call_tail, gbuf, project_name, &tail_exact,
+                                              &tail_legacy);
+    if (tail_exact.best) {
+        return tail_exact.ambiguous ? NULL : tail_exact.best;
     }
-    if (best_tail_exact) {
-        return tail_exact_ambiguous ? NULL : best_tail_exact;
-    }
-    return tail_legacy_ambiguous ? NULL : best_tail_legacy;
+    return tail_legacy.ambiguous ? NULL : tail_legacy.best;
 }
 
 /* Graph-free compatibility entry point for resolver unit tests. Raw distinct
@@ -584,18 +609,22 @@ static inline int cbm_pipeline_lsp_reference_index_entry_cmp(const void *left_pt
     const cbm_pipeline_lsp_reference_index_entry_t *right =
         (const cbm_pipeline_lsp_reference_index_entry_t *)right_ptr;
     if (left->row->source_origin != right->row->source_origin) {
-        return left->row->source_origin < right->row->source_origin ? -1 : 1;
+        return left->row->source_origin < right->row->source_origin ? CBM_LSP_COMPARE_LESS
+                                                                    : CBM_LSP_COMPARE_GREATER;
     }
     if (left->row->site_start_byte != right->row->site_start_byte) {
-        return left->row->site_start_byte < right->row->site_start_byte ? -1 : 1;
+        return left->row->site_start_byte < right->row->site_start_byte ? CBM_LSP_COMPARE_LESS
+                                                                        : CBM_LSP_COMPARE_GREATER;
     }
     if (left->row->site_end_byte != right->row->site_end_byte) {
-        return left->row->site_end_byte < right->row->site_end_byte ? -1 : 1;
+        return left->row->site_end_byte < right->row->site_end_byte ? CBM_LSP_COMPARE_LESS
+                                                                    : CBM_LSP_COMPARE_GREATER;
     }
     if (left->original_index == right->original_index) {
         return 0;
     }
-    return left->original_index < right->original_index ? -1 : 1;
+    return left->original_index < right->original_index ? CBM_LSP_COMPARE_LESS
+                                                        : CBM_LSP_COMPARE_GREATER;
 }
 
 /* Build one compact pointer index per extracted file. Invocation rows cannot
@@ -660,13 +689,16 @@ static inline void cbm_pipeline_lsp_reference_index_free(
 static inline int cbm_pipeline_lsp_reference_site_cmp_usage(const CBMResolvedCall *row,
                                                             const CBMUsage *usage) {
     if (row->source_origin != usage->source_origin) {
-        return row->source_origin < usage->source_origin ? -1 : 1;
+        return row->source_origin < usage->source_origin ? CBM_LSP_COMPARE_LESS
+                                                         : CBM_LSP_COMPARE_GREATER;
     }
     if (row->site_start_byte != usage->site_start_byte) {
-        return row->site_start_byte < usage->site_start_byte ? -1 : 1;
+        return row->site_start_byte < usage->site_start_byte ? CBM_LSP_COMPARE_LESS
+                                                             : CBM_LSP_COMPARE_GREATER;
     }
     if (row->site_end_byte != usage->site_end_byte) {
-        return row->site_end_byte < usage->site_end_byte ? -1 : 1;
+        return row->site_end_byte < usage->site_end_byte ? CBM_LSP_COMPARE_LESS
+                                                         : CBM_LSP_COMPARE_GREATER;
     }
     return 0;
 }
@@ -691,6 +723,63 @@ static inline const CBMResolvedCall *cbm_pipeline_lsp_reference_view_row(
  * `entries` is either NULL for the original full-array fallback or a sorted
  * occurrence slice. The matching body is deliberately shared so indexing
  * cannot diverge on caller, reason, ambiguity, target identity, or confidence. */
+static inline bool cbm_pipeline_reference_row_eligible(const CBMResolvedCall *row,
+                                                       const char *reference_leaf) {
+    if (row->kind != CBM_RESOLVED_CALL_REFERENCE || !row->caller_qn || !row->callee_qn ||
+        row->confidence < CBM_LSP_CONFIDENCE_FLOOR) {
+        return false;
+    }
+    return strcmp(cbm_lsp_bare_segment(row->callee_qn), reference_leaf) == 0 ||
+           cbm_pipeline_reference_reason_matches(row, reference_leaf);
+}
+
+static inline void cbm_pipeline_update_reference_match(const CBMResolvedCall **best,
+                                                       bool *ambiguous, const CBMResolvedCall *row,
+                                                       const cbm_gbuf_t *gbuf,
+                                                       const char *project_name,
+                                                       bool allow_tail_match) {
+    if (!*best) {
+        *best = row;
+        return;
+    }
+    if (!cbm_pipeline_reference_targets_equal((*best)->callee_qn, row->callee_qn, gbuf,
+                                              project_name, allow_tail_match)) {
+        *ambiguous = true;
+        return;
+    }
+    if (row->confidence > (*best)->confidence) {
+        *best = row;
+    }
+}
+
+static inline const CBMResolvedCall *cbm_pipeline_find_reference_match(
+    const CBMResolvedCallArray *arr, const cbm_pipeline_lsp_reference_index_entry_t *entries,
+    int first, int row_count, const CBMUsage *usage, const char *reference_leaf,
+    const char *caller_qn, bool require_exact_caller, const cbm_gbuf_t *gbuf,
+    const char *project_name, bool allow_tail_match, bool *ambiguous) {
+    const CBMResolvedCall *best = NULL;
+    for (int index = 0; index < row_count; index++) {
+        cbm_pipeline_lsp_reference_lookup_test_note_row();
+        const CBMResolvedCall *row =
+            cbm_pipeline_lsp_reference_view_row(arr, entries, first, index);
+        if (!cbm_pipeline_reference_row_eligible(row, reference_leaf)) {
+            continue;
+        }
+        bool caller_matches = require_exact_caller
+                                  ? strcmp(row->caller_qn, caller_qn) == 0
+                                  : cbm_pipeline_qn_class_method_tail_eq(row->caller_qn, caller_qn);
+        if (!caller_matches ||
+            !cbm_pipeline_source_occurrence_eq(usage->site_start_byte, usage->site_end_byte,
+                                               usage->source_origin, row->site_start_byte,
+                                               row->site_end_byte, row->source_origin)) {
+            continue;
+        }
+        cbm_pipeline_update_reference_match(&best, ambiguous, row, gbuf, project_name,
+                                            allow_tail_match);
+    }
+    return best;
+}
+
 static inline const CBMResolvedCall *cbm_pipeline_find_lsp_reference_view_in_graph(
     const CBMResolvedCallArray *arr, const cbm_pipeline_lsp_reference_index_entry_t *entries,
     int first, int row_count, const CBMUsage *usage, bool allow_tail_match, const cbm_gbuf_t *gbuf,
@@ -705,39 +794,10 @@ static inline const CBMResolvedCall *cbm_pipeline_find_lsp_reference_view_in_gra
         return NULL;
     }
 
-    const CBMResolvedCall *best_exact = NULL;
     bool exact_ambiguous = false;
-    for (int i = 0; i < row_count; i++) {
-        cbm_pipeline_lsp_reference_lookup_test_note_row();
-        const CBMResolvedCall *rc = cbm_pipeline_lsp_reference_view_row(arr, entries, first, i);
-        if (rc->kind != CBM_RESOLVED_CALL_REFERENCE || !rc->caller_qn || !rc->callee_qn ||
-            rc->confidence < CBM_LSP_CONFIDENCE_FLOOR) {
-            continue;
-        }
-        if (strcmp(rc->caller_qn, usage->enclosing_func_qn) != 0 ||
-            !cbm_pipeline_source_occurrence_eq(usage->site_start_byte, usage->site_end_byte,
-                                               usage->source_origin, rc->site_start_byte,
-                                               rc->site_end_byte, rc->source_origin)) {
-            continue;
-        }
-        bool name_matches = strcmp(cbm_lsp_bare_segment(rc->callee_qn), ref_leaf) == 0;
-        bool semantic_reason_matches = cbm_pipeline_reference_reason_matches(rc, ref_leaf);
-        if (!name_matches && !semantic_reason_matches) {
-            continue;
-        }
-        if (!best_exact) {
-            best_exact = rc;
-            continue;
-        }
-        if (!cbm_pipeline_reference_targets_equal(best_exact->callee_qn, rc->callee_qn, gbuf,
-                                                  project_name, allow_tail_match)) {
-            exact_ambiguous = true;
-            continue;
-        }
-        if (rc->confidence > best_exact->confidence) {
-            best_exact = rc;
-        }
-    }
+    const CBMResolvedCall *best_exact = cbm_pipeline_find_reference_match(
+        arr, entries, first, row_count, usage, ref_leaf, usage->enclosing_func_qn, true, gbuf,
+        project_name, allow_tail_match, &exact_ambiguous);
     if (best_exact || !allow_tail_match) {
         return exact_ambiguous ? NULL : best_exact;
     }
@@ -747,39 +807,10 @@ static inline const CBMResolvedCall *cbm_pipeline_find_lsp_reference_view_in_gra
         return NULL;
     }
 
-    const CBMResolvedCall *best_tail = NULL;
     bool tail_ambiguous = false;
-    for (int i = 0; i < row_count; i++) {
-        cbm_pipeline_lsp_reference_lookup_test_note_row();
-        const CBMResolvedCall *rc = cbm_pipeline_lsp_reference_view_row(arr, entries, first, i);
-        if (rc->kind != CBM_RESOLVED_CALL_REFERENCE || !rc->caller_qn || !rc->callee_qn ||
-            rc->confidence < CBM_LSP_CONFIDENCE_FLOOR) {
-            continue;
-        }
-        if (!cbm_pipeline_qn_class_method_tail_eq(rc->caller_qn, caller_tail) ||
-            !cbm_pipeline_source_occurrence_eq(usage->site_start_byte, usage->site_end_byte,
-                                               usage->source_origin, rc->site_start_byte,
-                                               rc->site_end_byte, rc->source_origin)) {
-            continue;
-        }
-        bool name_matches = strcmp(cbm_lsp_bare_segment(rc->callee_qn), ref_leaf) == 0;
-        bool semantic_reason_matches = cbm_pipeline_reference_reason_matches(rc, ref_leaf);
-        if (!name_matches && !semantic_reason_matches) {
-            continue;
-        }
-        if (!best_tail) {
-            best_tail = rc;
-            continue;
-        }
-        if (!cbm_pipeline_reference_targets_equal(best_tail->callee_qn, rc->callee_qn, gbuf,
-                                                  project_name, allow_tail_match)) {
-            tail_ambiguous = true;
-            continue;
-        }
-        if (rc->confidence > best_tail->confidence) {
-            best_tail = rc;
-        }
-    }
+    const CBMResolvedCall *best_tail = cbm_pipeline_find_reference_match(
+        arr, entries, first, row_count, usage, ref_leaf, caller_tail, false, gbuf, project_name,
+        allow_tail_match, &tail_ambiguous);
     return tail_ambiguous ? NULL : best_tail;
 }
 
@@ -811,9 +842,9 @@ static inline const CBMResolvedCall *cbm_pipeline_find_lsp_reference_indexed_in_
     int low = 0;
     int high = index->count;
     while (low < high) {
-        int middle = low + ((high - low) / 2);
+        int middle = low + ((high - low) / CBM_LSP_BINARY_SEARCH_DIVISOR);
         if (cbm_pipeline_lsp_reference_site_cmp_usage(index->entries[middle].row, usage) < 0) {
-            low = middle + 1;
+            low = middle + SKIP_ONE;
         } else {
             high = middle;
         }
@@ -821,9 +852,9 @@ static inline const CBMResolvedCall *cbm_pipeline_find_lsp_reference_indexed_in_
     int first = low;
     high = index->count;
     while (low < high) {
-        int middle = low + ((high - low) / 2);
+        int middle = low + ((high - low) / CBM_LSP_BINARY_SEARCH_DIVISOR);
         if (cbm_pipeline_lsp_reference_site_cmp_usage(index->entries[middle].row, usage) <= 0) {
-            low = middle + 1;
+            low = middle + SKIP_ONE;
         } else {
             high = middle;
         }
@@ -856,6 +887,70 @@ static inline const CBMResolvedCall *cbm_pipeline_find_lsp_reference(
  *      graph's file-shaped QN, accept one globally unique callable short name.
  *
  * Returns the matching node, or NULL if neither lookup hits. */
+static inline const cbm_gbuf_node_t *cbm_pipeline_lsp_project_prefixed_target(
+    const cbm_gbuf_t *gbuf, const char *project_name, const char *callee_qn) {
+    if (!project_name || !project_name[0]) {
+        return NULL;
+    }
+    size_t project_length = strlen(project_name);
+    if (strncmp(callee_qn, project_name, project_length) == 0 && callee_qn[project_length] == '.') {
+        return NULL;
+    }
+    size_t callee_length = strlen(callee_qn);
+    if (project_length > SIZE_MAX - callee_length - CBM_LSP_PROJECT_QN_EXTRA_BYTES) {
+        return NULL;
+    }
+    size_t prefixed_length = project_length + CBM_LSP_PROJECT_QN_SEPARATOR_BYTES + callee_length;
+    char *prefixed_qn = (char *)malloc(prefixed_length + CBM_LSP_PROJECT_QN_TERMINATOR_BYTES);
+    if (!prefixed_qn) {
+        return NULL;
+    }
+    memcpy(prefixed_qn, project_name, project_length);
+    prefixed_qn[project_length] = '.';
+    memcpy(prefixed_qn + project_length + CBM_LSP_PROJECT_QN_SEPARATOR_BYTES, callee_qn,
+           callee_length + CBM_LSP_PROJECT_QN_TERMINATOR_BYTES);
+    const cbm_gbuf_node_t *target = cbm_gbuf_find_by_qn(gbuf, prefixed_qn);
+    free(prefixed_qn);
+    return target;
+}
+
+static inline bool cbm_pipeline_lsp_callable_node(const cbm_gbuf_node_t *node) {
+    return node && node->label && node->qualified_name &&
+           (strcmp(node->label, "Function") == 0 || strcmp(node->label, "Method") == 0);
+}
+
+typedef struct {
+    const cbm_gbuf_node_t *tail_match;
+    const cbm_gbuf_node_t *unique_callable;
+    bool tail_ambiguous;
+    bool callable_ambiguous;
+} cbm_pipeline_lsp_target_candidates_t;
+
+static inline cbm_pipeline_lsp_target_candidates_t cbm_pipeline_lsp_find_target_candidates(
+    const cbm_gbuf_node_t *const *hits, int hit_count, const char *callee_tail) {
+    cbm_pipeline_lsp_target_candidates_t candidates = {0};
+    for (int index = 0; index < hit_count; index++) {
+        const cbm_gbuf_node_t *candidate = hits[index];
+        if (!cbm_pipeline_lsp_callable_node(candidate)) {
+            continue;
+        }
+        if (!candidates.unique_callable) {
+            candidates.unique_callable = candidate;
+        } else if (!cbm_node_id_eq(candidates.unique_callable->id, candidate->id)) {
+            candidates.callable_ambiguous = true;
+        }
+        if (!cbm_pipeline_qn_class_method_tail_eq(candidate->qualified_name, callee_tail)) {
+            continue;
+        }
+        if (candidates.tail_match && !cbm_node_id_eq(candidates.tail_match->id, candidate->id)) {
+            candidates.tail_ambiguous = true;
+            continue;
+        }
+        candidates.tail_match = candidate;
+    }
+    return candidates;
+}
+
 static inline const cbm_gbuf_node_t *cbm_pipeline_lsp_target_node_policy(
     const cbm_gbuf_t *gbuf, const char *project_name, const char *callee_qn, bool allow_tail_match,
     bool allow_unique_callable_fallback) {
@@ -866,25 +961,10 @@ static inline const cbm_gbuf_node_t *cbm_pipeline_lsp_target_node_policy(
     if (direct) {
         return direct;
     }
-    if (project_name && project_name[0]) {
-        size_t proj_len = strlen(project_name);
-        if (!(strncmp(callee_qn, project_name, proj_len) == 0 && callee_qn[proj_len] == '.')) {
-            size_t callee_len = strlen(callee_qn);
-            if (proj_len <= SIZE_MAX - callee_len - 2U) {
-                size_t prefixed_len = proj_len + 1U + callee_len;
-                char *prefixed_qn = (char *)malloc(prefixed_len + 1U);
-                if (prefixed_qn) {
-                    memcpy(prefixed_qn, project_name, proj_len);
-                    prefixed_qn[proj_len] = '.';
-                    memcpy(prefixed_qn + proj_len + 1U, callee_qn, callee_len + 1U);
-                    const cbm_gbuf_node_t *prefixed = cbm_gbuf_find_by_qn(gbuf, prefixed_qn);
-                    free(prefixed_qn);
-                    if (prefixed) {
-                        return prefixed;
-                    }
-                }
-            }
-        }
+    const cbm_gbuf_node_t *prefixed =
+        cbm_pipeline_lsp_project_prefixed_target(gbuf, project_name, callee_qn);
+    if (prefixed) {
+        return prefixed;
     }
     if (!allow_tail_match) {
         return NULL;
@@ -902,39 +982,15 @@ static inline const cbm_gbuf_node_t *cbm_pipeline_lsp_target_node_policy(
         return NULL;
     }
 
-    const cbm_gbuf_node_t *match = NULL;
-    const cbm_gbuf_node_t *unique_callable = NULL;
-    bool tail_ambiguous = false;
-    bool callable_ambiguous = false;
-    for (int i = 0; i < hit_count; i++) {
-        const cbm_gbuf_node_t *cand = hits[i];
-        if (!cand || !cand->label || !cand->qualified_name) {
-            continue;
-        }
-        if (strcmp(cand->label, "Function") != 0 && strcmp(cand->label, "Method") != 0) {
-            continue;
-        }
-        if (!unique_callable) {
-            unique_callable = cand;
-        } else if (!cbm_node_id_eq(unique_callable->id, cand->id)) {
-            callable_ambiguous = true;
-        }
-        if (!cbm_pipeline_qn_class_method_tail_eq(cand->qualified_name, callee_tail)) {
-            continue;
-        }
-        if (match && !cbm_node_id_eq(match->id, cand->id)) {
-            tail_ambiguous = true;
-            continue;
-        }
-        match = cand;
-    }
-    if (match) {
-        return tail_ambiguous ? NULL : match;
+    cbm_pipeline_lsp_target_candidates_t candidates =
+        cbm_pipeline_lsp_find_target_candidates(hits, hit_count, callee_tail);
+    if (candidates.tail_match) {
+        return candidates.tail_ambiguous ? NULL : candidates.tail_match;
     }
     if (!allow_unique_callable_fallback) {
         return NULL;
     }
-    return callable_ambiguous ? NULL : unique_callable;
+    return candidates.callable_ambiguous ? NULL : candidates.unique_callable;
 }
 
 #endif /* CBM_PIPELINE_LSP_RESOLVE_H */

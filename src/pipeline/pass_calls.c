@@ -12,7 +12,15 @@
 #include "discover/discover.h"
 #include "foundation/constants.h"
 
-enum { PC_RING = 4, PC_RING_MASK = 3, PC_SIG_SCAN = 15, PC_REGEX_GRP = 2 };
+enum {
+    PC_RING = 4,
+    PC_RING_MASK = 3,
+    PC_SIG_SCAN = 15,
+    PC_REGEX_GRP = 2,
+    PC_CONFIDENCE_DECIMALS = 2,
+    PC_EXACT_CANDIDATE_COUNT = 1,
+};
+static const char PC_RETURN_TYPE_JSON_KEY[] = "\"return_type\":";
 /* Confidence for a service-pattern HTTP/ASYNC edge emitted when registry
  * resolution is empty (external, unindexed client library) — see #523. */
 #define PC_SVC_PATTERN_CONF 0.5
@@ -348,7 +356,7 @@ static void calls_build_resolution_props(cbm_gbuf_prop_t *props, const char *cal
     props[n++] = (cbm_gbuf_prop_t){.key = "confidence",
                                    .kind = CBM_EDGE_PROP_NUMBER,
                                    .number = res->confidence,
-                                   .decimals = 2};
+                                   .decimals = PC_CONFIDENCE_DECIMALS};
     props[n++] = (cbm_gbuf_prop_t){.key = "strategy",
                                    .kind = CBM_EDGE_PROP_STRING,
                                    .text = res->strategy ? res->strategy : "unknown"};
@@ -444,7 +452,7 @@ static void emit_classified_edge(cbm_pipeline_ctx_t *ctx, const CBMCall *call,
             {.key = "confidence",
              .kind = CBM_EDGE_PROP_NUMBER,
              .number = res->confidence,
-             .decimals = 2},
+             .decimals = PC_CONFIDENCE_DECIMALS},
         };
         calls_emit_edge(ctx->gbuf, source->id, target->id, "CONFIGURES", props,
                         CONFIGURES_PROP_COUNT, call);
@@ -481,16 +489,11 @@ static const cbm_gbuf_node_t *calls_find_source(cbm_pipeline_ctx_t *ctx, const c
     return src;
 }
 
-/* Resolve one call and emit the appropriate edge. Returns 1 if resolved, 0 if not. */
-static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call,
-                               const CBMResolvedCallArray *lsp_calls, const char *rel,
-                               const char *module_qn, const char **imp_keys, const char **imp_vals,
-                               int imp_count, CBMLanguage lang) {
-    const cbm_gbuf_node_t *source_node = calls_find_source(ctx, rel, call->enclosing_func_qn);
-    if (!source_node) {
-        return 0;
-    }
-
+static bool calls_emit_lsp_resolution(cbm_pipeline_ctx_t *ctx, const CBMCall *call,
+                                      const CBMResolvedCallArray *lsp_calls,
+                                      const cbm_gbuf_node_t *source_node, const char *module_qn,
+                                      const char **imp_keys, const char **imp_vals, int imp_count,
+                                      CBMLanguage lang) {
     /* LSP-resolved calls take precedence over registry-textual matching.
      * Unique-tail fallbacks are JVM-only (see cbm_pipeline_lsp_allow_tail_match). */
     bool allow_tail = cbm_pipeline_lsp_allow_tail_match(lang);
@@ -511,11 +514,75 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call,
             res.qualified_name = target_node->qualified_name;
             res.confidence = (double)lsp->confidence;
             res.strategy = lsp->strategy;
-            res.candidate_count = 1;
+            res.candidate_count = PC_EXACT_CANDIDATE_COUNT;
             emit_classified_edge(ctx, call, source_node, target_node, &res, module_qn, imp_keys,
                                  imp_vals, imp_count, false);
-            return SKIP_ONE;
+            return true;
         }
+    }
+    return false;
+}
+
+static bool calls_has_service_target(const CBMCall *call, cbm_svc_kind_t service) {
+    const char *target = call->first_string_arg;
+    return target && target[0] != '\0' &&
+           (target[0] == '/' || strstr(target, "://") != NULL ||
+            (service == CBM_SVC_ASYNC && strlen(target) > PAIR_LEN));
+}
+
+static cbm_resolution_t calls_service_resolution(const CBMCall *call) {
+    return (cbm_resolution_t){.qualified_name = call->callee_name,
+                              .confidence = PC_SVC_PATTERN_CONF,
+                              .strategy = "service_pattern",
+                              .candidate_count = 0};
+}
+
+static bool calls_emit_service_edge(cbm_pipeline_ctx_t *ctx, const CBMCall *call,
+                                    const cbm_gbuf_node_t *source_node,
+                                    const cbm_resolution_t *resolution, cbm_svc_kind_t service) {
+    if (service != CBM_SVC_HTTP && service != CBM_SVC_ASYNC) {
+        return false;
+    }
+    if (!calls_has_service_target(call, service)) {
+        return false;
+    }
+    emit_http_async_edge(ctx, call, source_node, NULL, resolution, service, false);
+    return true;
+}
+
+static bool calls_handle_unresolved_route(cbm_pipeline_ctx_t *ctx, const CBMCall *call,
+                                          const cbm_gbuf_node_t *source_node, const char *module_qn,
+                                          const char **imp_keys, const char **imp_vals,
+                                          int imp_count) {
+    if (cbm_service_pattern_route_method(call->callee_name) == NULL || !call->first_string_arg ||
+        call->first_string_arg[0] != '/') {
+        return false;
+    }
+    handle_route_registration(ctx, call, source_node, module_qn, imp_keys, imp_vals, imp_count);
+    return true;
+}
+
+static cbm_svc_kind_t calls_unresolved_service_kind(const CBMCall *call) {
+    cbm_svc_kind_t service = cbm_service_pattern_match(call->callee_name);
+    if (service == CBM_SVC_NONE && cbm_service_pattern_is_global_fetch(call->callee_name)) {
+        return CBM_SVC_HTTP;
+    }
+    return service;
+}
+
+/* Resolve one call and emit the appropriate edge. Returns 1 if resolved, 0 if not. */
+static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call,
+                               const CBMResolvedCallArray *lsp_calls, const char *rel,
+                               const char *module_qn, const char **imp_keys, const char **imp_vals,
+                               int imp_count, CBMLanguage lang) {
+    const cbm_gbuf_node_t *source_node = calls_find_source(ctx, rel, call->enclosing_func_qn);
+    if (!source_node) {
+        return 0;
+    }
+
+    if (calls_emit_lsp_resolution(ctx, call, lsp_calls, source_node, module_qn, imp_keys, imp_vals,
+                                  imp_count, lang)) {
+        return SKIP_ONE;
     }
 
     /* Synthetic semantic candidates (currently implicit C++ operators) are
@@ -536,19 +603,9 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call,
      * callee_name FIRST so the HTTP_CALLS/ASYNC_CALLS edge is emitted regardless
      * (target is a synthesized route node, not the unindexed library). (#523) */
     cbm_svc_kind_t csvc = cbm_service_pattern_match(call->callee_name);
-    if (csvc == CBM_SVC_HTTP || csvc == CBM_SVC_ASYNC) {
-        const char *cu = call->first_string_arg;
-        bool chas_url = cu && cu[0] != '\0' &&
-                        (cu[0] == '/' || strstr(cu, "://") != NULL ||
-                         (csvc == CBM_SVC_ASYNC && strlen(cu) > PAIR_LEN));
-        if (chas_url) {
-            cbm_resolution_t svc_res = {.qualified_name = call->callee_name,
-                                        .confidence = PC_SVC_PATTERN_CONF,
-                                        .strategy = "service_pattern",
-                                        .candidate_count = 0};
-            emit_http_async_edge(ctx, call, source_node, NULL, &svc_res, csvc, false);
-            return SKIP_ONE;
-        }
+    cbm_resolution_t callee_service_resolution = calls_service_resolution(call);
+    if (calls_emit_service_edge(ctx, call, source_node, &callee_service_resolution, csvc)) {
+        return SKIP_ONE;
     }
 
     cbm_resolution_t res = cbm_registry_resolve(ctx->registry, call->callee_name, module_qn,
@@ -573,29 +630,14 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call,
          * apps. Classify by callee suffix + path-shaped first arg, exactly
          * like the parallel path's callee_suffix fallback; without this the
          * sequential path minted zero Route nodes for such files. */
-        if (cbm_service_pattern_route_method(call->callee_name) != NULL && call->first_string_arg &&
-            call->first_string_arg[0] == '/') {
-            handle_route_registration(ctx, call, source_node, module_qn, imp_keys, imp_vals,
-                                      imp_count);
+        if (calls_handle_unresolved_route(ctx, call, source_node, module_qn, imp_keys, imp_vals,
+                                          imp_count)) {
             return SKIP_ONE;
         }
-        cbm_svc_kind_t esvc = cbm_service_pattern_match(call->callee_name);
-        if (esvc == CBM_SVC_NONE && cbm_service_pattern_is_global_fetch(call->callee_name)) {
-            esvc = CBM_SVC_HTTP;
-        }
-        if (esvc == CBM_SVC_HTTP || esvc == CBM_SVC_ASYNC) {
-            const char *u = call->first_string_arg;
-            bool has_url_or_topic = u && u[0] != '\0' &&
-                                    (u[0] == '/' || strstr(u, "://") != NULL ||
-                                     (esvc == CBM_SVC_ASYNC && strlen(u) > PAIR_LEN));
-            if (has_url_or_topic) {
-                cbm_resolution_t svc_res = {.qualified_name = call->callee_name,
-                                            .confidence = PC_SVC_PATTERN_CONF,
-                                            .strategy = "service_pattern",
-                                            .candidate_count = 0};
-                emit_http_async_edge(ctx, call, source_node, NULL, &svc_res, esvc, false);
-                return SKIP_ONE;
-            }
+        cbm_svc_kind_t unresolved_service = calls_unresolved_service_kind(call);
+        if (calls_emit_service_edge(ctx, call, source_node, &callee_service_resolution,
+                                    unresolved_service)) {
+            return SKIP_ONE;
         }
         return 0;
     }
@@ -637,15 +679,8 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call,
      * is written and cross-repo matching finds nothing (#523). Emit directly
      * when the call carries a URL/topic first argument. */
     cbm_svc_kind_t svc = cbm_service_pattern_match(res.qualified_name);
-    if (svc == CBM_SVC_HTTP || svc == CBM_SVC_ASYNC) {
-        const char *u = call->first_string_arg;
-        bool has_url_or_topic = u && u[0] != '\0' &&
-                                (u[0] == '/' || strstr(u, "://") != NULL ||
-                                 (svc == CBM_SVC_ASYNC && strlen(u) > PAIR_LEN));
-        if (has_url_or_topic) {
-            emit_http_async_edge(ctx, call, source_node, NULL, &res, svc, false);
-            return SKIP_ONE;
-        }
+    if (calls_emit_service_edge(ctx, call, source_node, &res, svc)) {
+        return SKIP_ONE;
     }
 
     const cbm_gbuf_node_t *target_node = cbm_gbuf_find_by_qn(ctx->gbuf, res.qualified_name);
@@ -655,6 +690,58 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call,
     emit_classified_edge(ctx, call, source_node, target_node, &res, module_qn, imp_keys, imp_vals,
                          imp_count, tsjs_drop_plain_call);
     return SKIP_ONE;
+}
+
+static bool calls_return_type_from_node(const cbm_gbuf_node_t *node, char return_type[CBM_SZ_256]) {
+    if (!node->qualified_name || !node->properties_json) {
+        return false;
+    }
+    const char *type_start = strstr(node->properties_json, PC_RETURN_TYPE_JSON_KEY);
+    if (!type_start) {
+        return false;
+    }
+    type_start += sizeof(PC_RETURN_TYPE_JSON_KEY) - SKIP_ONE;
+    while (*type_start == ' ') {
+        type_start++;
+    }
+    if (*type_start != '"') {
+        return false;
+    }
+    type_start++;
+    const char *type_end = strchr(type_start, '"');
+    if (!type_end) {
+        return false;
+    }
+    int length = (int)(type_end - type_start);
+    if (length <= 0 || length >= CBM_SZ_256) {
+        return false;
+    }
+    memcpy(return_type, type_start, (size_t)length);
+    return_type[length] = '\0';
+    return true;
+}
+
+static bool calls_return_type_is_scalar(const char *return_type) {
+    static const char *scalar_types[] = {"%String",    "%Integer", "%Float", "%Boolean",
+                                         "%Status",    "%Numeric", "%Date",  "%Time",
+                                         "%TimeStamp", "%Binary",  NULL};
+    for (int i = 0; scalar_types[i]; i++) {
+        if (strcmp(return_type, scalar_types[i]) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void calls_add_return_type(CBMReturnTypeTable *table, const cbm_gbuf_node_t *node) {
+    char return_type[CBM_SZ_256];
+    if (!calls_return_type_from_node(node, return_type) ||
+        calls_return_type_is_scalar(return_type)) {
+        return;
+    }
+    table->entries[table->count].method_qn = node->qualified_name;
+    table->entries[table->count].return_type = strdup(return_type);
+    table->count++;
 }
 
 /* ObjectScript: build a method-QN -> return-type table from the Method nodes
@@ -672,60 +759,13 @@ static CBMReturnTypeTable *build_return_type_table(const cbm_gbuf_t *gbuf) {
         return NULL;
     }
 
-    CBMReturnTypeTable *rtt = (CBMReturnTypeTable *)calloc(1, sizeof(CBMReturnTypeTable));
+    CBMReturnTypeTable *rtt =
+        (CBMReturnTypeTable *)calloc(CBM_ALLOC_ONE, sizeof(CBMReturnTypeTable));
     if (!rtt) {
         return NULL;
     }
-
-    static const char *scalar_types[] = {"%String",    "%Integer", "%Float", "%Boolean",
-                                         "%Status",    "%Numeric", "%Date",  "%Time",
-                                         "%TimeStamp", "%Binary",  NULL};
-
     for (int i = 0; i < method_count && rtt->count < CBM_RETURN_TYPE_TABLE_CAP; i++) {
-        const cbm_gbuf_node_t *n = method_nodes[i];
-        if (!n->qualified_name || !n->properties_json) {
-            continue;
-        }
-
-        const char *p = strstr(n->properties_json, "\"return_type\":");
-        if (!p) {
-            continue;
-        }
-        p += 14; /* strlen("\"return_type\":") */
-        while (*p == ' ') {
-            p++;
-        }
-        if (*p != '"') {
-            continue;
-        }
-        p++;
-        const char *end = strchr(p, '"');
-        if (!end) {
-            continue;
-        }
-        int rtlen = (int)(end - p);
-        if (rtlen <= 0 || rtlen > 255) {
-            continue;
-        }
-
-        char rt_buf[256];
-        memcpy(rt_buf, p, (size_t)rtlen);
-        rt_buf[rtlen] = '\0';
-
-        bool is_scalar = false;
-        for (int si = 0; scalar_types[si]; si++) {
-            if (strcmp(rt_buf, scalar_types[si]) == 0) {
-                is_scalar = true;
-                break;
-            }
-        }
-        if (is_scalar) {
-            continue;
-        }
-
-        rtt->entries[rtt->count].method_qn = n->qualified_name;
-        rtt->entries[rtt->count].return_type = strdup(rt_buf);
-        rtt->count++;
+        calls_add_return_type(rtt, method_nodes[i]);
     }
     if (rtt->count == 0) {
         free(rtt);
@@ -900,7 +940,7 @@ static int scan_depends_in_sig(cbm_pipeline_ctx_t *ctx, const cbm_regex_t *re, c
                     {.key = "confidence",
                      .kind = CBM_EDGE_PROP_NUMBER,
                      .number = PC_DEPENDS_CONFIDENCE,
-                     .decimals = 2},
+                     .decimals = PC_CONFIDENCE_DECIMALS},
                     {.key = "strategy", .kind = CBM_EDGE_PROP_STRING, .text = "fastapi_depends"},
                 };
                 cbm_gbuf_insert_edge_props(

@@ -59,50 +59,6 @@ struct cbm_gitignore {
  * globs finish in tens of steps. */
 enum { GI_MATCH_MAX_STEPS = 20000 };
 
-/* Forward declaration for recursive calls. */
-static bool glob_match(const char *pat, const char *str,
-                       int *budget); // NOLINT(misc-no-recursion)
-
-/* Match a ** (doublestar-slash) pattern: try rest at every / boundary. */
-static bool glob_match_doublestar_slash(const char *pat, // NOLINT(misc-no-recursion)
-                                        const char *str, int *budget) {
-    if (glob_match(pat, str, budget)) {
-        return true;
-    }
-    for (const char *s = str; *s; s++) {
-        if (*s == '/' && glob_match(pat, s + SKIP_ONE, budget)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-/* Match a ** (doublestar) followed by non-slash: try at every position. */
-static bool glob_match_doublestar_any(const char *pat, // NOLINT(misc-no-recursion)
-                                      const char *str, int *budget) {
-    for (const char *s = str;; s++) {
-        if (glob_match(pat, s, budget)) {
-            return true;
-        }
-        if (!*s) {
-            return false;
-        }
-    }
-}
-
-/* Match a * (single star): match any sequence not containing /. */
-static bool glob_match_star(const char *pat, const char *str,
-                            int *budget) { // NOLINT(misc-no-recursion)
-    for (const char *s = str;; s++) {
-        if (glob_match(pat, s, budget)) {
-            return true;
-        }
-        if (!*s || *s == '/') {
-            return false;
-        }
-    }
-}
-
 /* Match a [...] character class at current position.
  * Returns true if matched. Advances *pat_out past the closing ']'. */
 static bool glob_match_charclass(const char *pat, char ch, const char **pat_out) {
@@ -140,62 +96,70 @@ static bool glob_match_charclass(const char *pat, char ch, const char **pat_out)
  * Match a glob pattern against a string.
  * Handles: * (non-slash), ** (any path), ? (single non-slash), [class]
  */
-/* Handle ** at current position. Returns match result. */
-static bool glob_match_doublestar(const char *pat, const char *str,
-                                  int *budget) { // NOLINT(misc-no-recursion)
-    if (pat[GI_CHAR_IDX2] == '/') {
-        return glob_match_doublestar_slash(pat + GI_SKIP3, str, budget);
-    }
-    if (pat[GI_CHAR_IDX2] == '\0') {
-        return true;
-    }
-    return glob_match_doublestar_any(pat + GI_CHAR_IDX2, str, budget);
+typedef struct {
+    const char *pattern;
+    const char *text;
+} glob_state_t;
+
+static void glob_push(glob_state_t *stack, int *top, const char *pattern, const char *text) {
+    stack[(*top)++] = (glob_state_t){.pattern = pattern, .text = text};
 }
 
-static bool glob_match(const char *pat, const char *str,
-                       int *budget) { // NOLINT(misc-no-recursion)
-    if (--*budget <= 0) {
-        return false; /* budget exhausted — see GI_MATCH_MAX_STEPS */
+static void glob_expand_star(glob_state_t *stack, int *top, const char *pattern, const char *text) {
+    bool double_star = pattern[GI_CHAR_IDX1] == '*';
+    const char *next = pattern + (double_star ? GI_CHAR_IDX2 : SKIP_ONE);
+    if (double_star && *next == '/') {
+        next++;
     }
-    while (*pat && *str) {
-        if (pat[0] == '*' && pat[GI_CHAR_IDX1] == '*') {
-            return glob_match_doublestar(pat, str, budget);
-        }
+    if (*top + GI_CHAR_IDX2 >= GI_MATCH_MAX_STEPS) {
+        return;
+    }
+    glob_push(stack, top, next, text);
+    if (*text && (double_star || *text != '/')) {
+        glob_push(stack, top, pattern, text + SKIP_ONE);
+    }
+}
 
+static void glob_advance_literal(glob_state_t *stack, int *top, const char *pattern,
+                                 const char *text) {
+    if (*pattern == '[') {
+        const char *next = NULL;
+        if (glob_match_charclass(pattern + SKIP_ONE, *text, &next)) {
+            glob_push(stack, top, next, text + SKIP_ONE);
+        }
+        return;
+    }
+    bool matches_question = *pattern == '?' && *text != '/';
+    bool matches_literal = *pattern == *text;
+    if (matches_question || matches_literal) {
+        glob_push(stack, top, pattern + SKIP_ONE, text + SKIP_ONE);
+    }
+}
+
+static bool glob_match(const char *pattern, const char *text, int *budget) {
+    glob_state_t stack[GI_MATCH_MAX_STEPS];
+    int top = 0;
+    stack[top++] = (glob_state_t){.pattern = pattern, .text = text};
+    while (top > 0 && --*budget > 0) {
+        glob_state_t state = stack[--top];
+        const char *pat = state.pattern;
+        const char *str = state.text;
+        if (*pat == '\0') {
+            if (*str == '\0') {
+                return true;
+            }
+            continue;
+        }
         if (*pat == '*') {
-            return glob_match_star(pat + SKIP_ONE, str, budget);
-        }
-
-        if (*pat == '?') {
-            if (*str == '/') {
-                return false;
-            }
-            pat++;
-            str++;
+            glob_expand_star(stack, &top, pat, str);
             continue;
         }
-
-        if (*pat == '[') {
-            const char *new_pat = NULL;
-            if (!glob_match_charclass(pat + SKIP_ONE, *str, &new_pat)) {
-                return false;
-            }
-            pat = new_pat;
-            str++;
+        if (*str == '\0') {
             continue;
         }
-
-        if (*pat != *str) {
-            return false;
-        }
-        pat++;
-        str++;
+        glob_advance_literal(stack, &top, pat, str);
     }
-
-    while (*pat == '*') {
-        pat++;
-    }
-    return *pat == '\0' && *str == '\0';
+    return false;
 }
 
 /* Match one pattern against one path with a fresh backtracking budget. Not
@@ -423,7 +387,11 @@ void cbm_gitignore_free(cbm_gitignore_t *gi) {
 
 /* Test seam: lets a unit test simulate strdup() failure mid-merge so the
  * atomic-rollback path can be exercised without real OOM. NULL = use strdup. */
-char *(*cbm_gitignore_merge_dup_hook_for_test)(const char *) = NULL;
+static char *(*cbm_gitignore_merge_dup_hook_for_test)(const char *) = NULL;
+
+void cbm_gitignore_test_set_merge_dup_hook(char *(*hook)(const char *)) {
+    cbm_gitignore_merge_dup_hook_for_test = hook;
+}
 
 bool cbm_gitignore_merge(cbm_gitignore_t *dst, const cbm_gitignore_t *src) {
     if (!dst) {

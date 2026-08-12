@@ -17,6 +17,12 @@ enum {
     INIT_FILE_LEN = 8,  /* strlen("__init__") */
     INDEX_FILE_LEN = 5, /* strlen("index") */
     NOT_FOUND = -1,
+    KS_SYMBOL_WORD_BITS = CBM_SZ_64,
+    KS_SYMBOL_WORD_SHIFT = CBM_SZ_6,
+    KS_SYMBOL_WORD_MASK = CBM_SZ_64 - SKIP_ONE,
+    KS_TYPE_HASH_SHIFT = CBM_SZ_4,
+    KS_LANGUAGE_HASH_SHIFT = CBM_SZ_3,
+    KS_SECOND_TYPE_HASH_SHIFT = 13,
 };
 
 /* Prefix length helper for strncmp with string literals. */
@@ -403,7 +409,8 @@ static ks_slot_t *ks_build(const TSLanguage *lang, const char *const *types, ks_
     if (nsyms == 0) {
         return s; /* fall back to strcmp */
     }
-    uint64_t *bits = calloc(((size_t)nsyms + 63) / 64, sizeof(uint64_t));
+    uint64_t *bits =
+        calloc(((size_t)nsyms + KS_SYMBOL_WORD_MASK) / KS_SYMBOL_WORD_BITS, sizeof(uint64_t));
     if (!bits) {
         return s;
     }
@@ -416,11 +423,13 @@ static ks_slot_t *ks_build(const TSLanguage *lang, const char *const *types, ks_
         TSSymbol sa = ts_language_symbol_for_name(lang, *t, len, false);
         bool any = false;
         if (sn != 0 && sn < nsyms) {
-            bits[sn >> 6] |= (uint64_t)1 << (sn & 63);
+            bits[sn >> KS_SYMBOL_WORD_SHIFT] |= (uint64_t)CBM_ALLOC_ONE
+                                                << (sn & KS_SYMBOL_WORD_MASK);
             any = true;
         }
         if (sa != 0 && sa < nsyms) {
-            bits[sa >> 6] |= (uint64_t)1 << (sa & 63);
+            bits[sa >> KS_SYMBOL_WORD_SHIFT] |= (uint64_t)CBM_ALLOC_ONE
+                                                << (sa & KS_SYMBOL_WORD_MASK);
             any = true;
         }
         if (!any) {
@@ -440,7 +449,9 @@ static ks_slot_t *ks_build(const TSLanguage *lang, const char *const *types, ks_
 /* Find or build the cache slot for (lang, types). Returns NULL only if the
  * thread-local table is saturated at this hash (extremely rare → strcmp). */
 static ks_slot_t *ks_get(const TSLanguage *lang, const char *const *types) {
-    uintptr_t h = ((uintptr_t)types >> 4) ^ ((uintptr_t)lang >> 3) ^ ((uintptr_t)types >> 13);
+    uintptr_t h = ((uintptr_t)types >> KS_TYPE_HASH_SHIFT) ^
+                  ((uintptr_t)lang >> KS_LANGUAGE_HASH_SHIFT) ^
+                  ((uintptr_t)types >> KS_SECOND_TYPE_HASH_SHIFT);
     for (int probe = 0; probe < KS_PROBE; probe++) {
         ks_slot_t *s = &ks_cache[(size_t)(h + (uintptr_t)probe) & KS_SLOT_MASK];
         if (s->lang == NULL) {
@@ -462,7 +473,9 @@ bool cbm_kind_in_set(TSNode node, const char **types) {
         ks_slot_t *s = ks_get(lang, (const char *const *)types);
         if (s && s->exact && s->bits) {
             TSSymbol sym = ts_node_symbol(node);
-            return sym < s->nsyms && (((s->bits[sym >> 6] >> (sym & 63)) & 1U) != 0);
+            return sym < s->nsyms &&
+                   (((s->bits[sym >> KS_SYMBOL_WORD_SHIFT] >> (sym & KS_SYMBOL_WORD_MASK)) &
+                     CBM_ALLOC_ONE) != 0);
         }
     }
     return kind_in_set_strcmp(node, (const char *const *)types);
@@ -642,15 +655,15 @@ void cbm_compute_complexity(TSNode node, const char **branching_types, cbm_compl
          * so each consecutive access node deepens the chain; non-access nodes reset it. */
         int child_a = 0;
         if (ts_node_is_named(f.node) && is_member_access_node(kind)) {
-            child_a = f.adepth + 1;
+            child_a = f.adepth + SKIP_ONE;
             if (child_a > out->max_access_depth) {
                 out->max_access_depth = child_a;
             }
         }
         if (is_branch) {
             out->cyclomatic++;
-            out->cognitive += 1 + f.bdepth; /* +1 plus nesting penalty (Campbell) */
-            child_b = f.bdepth + 1;
+            out->cognitive += SKIP_ONE + f.bdepth; /* +1 plus nesting penalty (Campbell) */
+            child_b = f.bdepth + SKIP_ONE;
         }
         /* Only *named* nodes count as loops. In many grammars (Go, C, …) the
          * loop's `for`/`while` keyword is an anonymous child token whose node
@@ -659,7 +672,7 @@ void cbm_compute_complexity(TSNode node, const char **branching_types, cbm_compl
          * (e.g. Ruby's `while`/`until`/`for`) still match correctly. */
         if (ts_node_is_named(f.node) && cbm_is_loop_node_type(kind)) {
             out->loop_count++;
-            int d = f.ldepth + 1;
+            int d = f.ldepth + SKIP_ONE;
             if (d > out->loop_depth) {
                 out->loop_depth = d;
             }
@@ -859,7 +872,7 @@ char *cbm_func_name_node_text(CBMArena *a, TSNode name_node, const char *source,
     if (text && strcmp(ts_node_type(name_node), "operator_cast") == 0) {
         char *paren = strchr(text, '(');
         if (paren) {
-            while (paren > text && (paren[-1] == ' ' || paren[-1] == '\t')) {
+            while (paren > text && (paren[-SKIP_ONE] == ' ' || paren[-SKIP_ONE] == '\t')) {
                 paren--;
             }
             *paren = '\0';
@@ -1036,24 +1049,52 @@ const char *cbm_nix_qn_name(CBMArena *a, TSNode func_node, const char *source, c
     return scope ? cbm_arena_sprintf(a, "%s.%s", scope, name) : name;
 }
 
+static bool wolfram_function_assignment(const char *node_kind) {
+    return strcmp(node_kind, "set_delayed_top") == 0 || strcmp(node_kind, "set_top") == 0 ||
+           strcmp(node_kind, "set_delayed") == 0 || strcmp(node_kind, "set") == 0;
+}
+
+static const char *wolfram_function_name(CBMArena *arena, TSNode func_node, const char *source) {
+    if (ts_node_named_child_count(func_node) == 0) {
+        return NULL;
+    }
+    TSNode lhs = ts_node_named_child(func_node, 0);
+    if (strcmp(ts_node_type(lhs), "apply") != 0 || ts_node_named_child_count(lhs) == 0) {
+        return NULL;
+    }
+    TSNode head = ts_node_named_child(lhs, 0);
+    return strcmp(ts_node_type(head), "user_symbol") == 0 ? cbm_node_text(arena, head, source)
+                                                          : NULL;
+}
+
+static const char *arrow_function_name(CBMArena *arena, TSNode func_node, const char *source) {
+    if (strcmp(ts_node_type(func_node), "arrow_function") != 0) {
+        return NULL;
+    }
+    TSNode parent = ts_node_parent(func_node);
+    if (ts_node_is_null(parent) || strcmp(ts_node_type(parent), "variable_declarator") != 0) {
+        return NULL;
+    }
+    TSNode variable_name = ts_node_child_by_field_name(parent, TS_FIELD("name"));
+    return ts_node_is_null(variable_name) ? NULL : cbm_node_text(arena, variable_name, source);
+}
+
+static const char *c_function_definition_name(CBMArena *arena, TSNode func_node, const char *source,
+                                              CBMLanguage lang) {
+    if (strcmp(ts_node_type(func_node), "function_definition") != 0) {
+        return NULL;
+    }
+    TSNode declarator_name = cbm_resolve_c_declarator_name_node(func_node);
+    return ts_node_is_null(declarator_name)
+               ? NULL
+               : cbm_func_name_node_text(arena, declarator_name, source, lang);
+}
+
 static const char *func_node_name(CBMArena *a, TSNode func_node, const char *source,
                                   CBMLanguage lang) {
     // Wolfram: set_delayed_top/set_top/set_delayed/set — LHS is apply(user_symbol("f"), ...)
-    if (lang == CBM_LANG_WOLFRAM) {
-        const char *nk = ts_node_type(func_node);
-        if (strcmp(nk, "set_delayed_top") == 0 || strcmp(nk, "set_top") == 0 ||
-            strcmp(nk, "set_delayed") == 0 || strcmp(nk, "set") == 0) {
-            if (ts_node_named_child_count(func_node) > 0) {
-                TSNode lhs = ts_node_named_child(func_node, 0);
-                if (strcmp(ts_node_type(lhs), "apply") == 0 && ts_node_named_child_count(lhs) > 0) {
-                    TSNode head = ts_node_named_child(lhs, 0);
-                    if (strcmp(ts_node_type(head), "user_symbol") == 0) {
-                        return cbm_node_text(a, head, source);
-                    }
-                }
-            }
-            return NULL;
-        }
+    if (lang == CBM_LANG_WOLFRAM && wolfram_function_assignment(ts_node_type(func_node))) {
+        return wolfram_function_name(a, func_node, source);
     }
 
     TSNode name_node = ts_node_child_by_field_name(func_node, TS_FIELD("name"));
@@ -1061,23 +1102,12 @@ static const char *func_node_name(CBMArena *a, TSNode func_node, const char *sou
         return cbm_node_text(a, name_node, source);
     }
     // Arrow functions: check parent variable_declarator
-    if (strcmp(ts_node_type(func_node), "arrow_function") == 0) {
-        TSNode parent = ts_node_parent(func_node);
-        if (!ts_node_is_null(parent) && strcmp(ts_node_type(parent), "variable_declarator") == 0) {
-            TSNode vname = ts_node_child_by_field_name(parent, TS_FIELD("name"));
-            if (!ts_node_is_null(vname)) {
-                return cbm_node_text(a, vname, source);
-            }
-        }
+    const char *arrow_name = arrow_function_name(a, func_node, source);
+    if (arrow_name) {
+        return arrow_name;
     }
     // C/C++/CUDA/GLSL: function_definition carries its name in the declarator chain.
-    if (strcmp(ts_node_type(func_node), "function_definition") == 0) {
-        TSNode dn = cbm_resolve_c_declarator_name_node(func_node);
-        if (!ts_node_is_null(dn)) {
-            return cbm_func_name_node_text(a, dn, source, lang);
-        }
-    }
-    return NULL;
+    return c_function_definition_name(a, func_node, source, lang);
 }
 
 const char *cbm_enclosing_func_qn(CBMArena *a, TSNode node, CBMLanguage lang, const char *source,

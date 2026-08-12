@@ -118,7 +118,7 @@ void cbm_sha256_update(cbm_sha256_ctx *c, const void *data, size_t len) {
         c->buf[c->buflen++] = p[i];
         if (c->buflen == SHA256_BLOCK_BYTES) {
             sha256_transform(c, c->buf);
-            c->bitlen += SHA256_BLOCK_BYTES * SHA256_BITS_PER_BYTE;
+            c->bitlen += (uint64_t)SHA256_BLOCK_BYTES * SHA256_BITS_PER_BYTE;
             c->buflen = 0;
         }
     }

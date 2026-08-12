@@ -1,6 +1,7 @@
 /* project_lock.c — Shared daemon/local-CLI project mutation leases. */
 #include "daemon/project_lock.h"
 #include "daemon/ipc.h"
+#include "foundation/constants.h"
 
 #include <stdbool.h>
 #include <stdint.h>

@@ -14,6 +14,22 @@ enum {
     USE_PREFIX_LEN = 4, /* strlen("use ") */
     MIN_WOLFRAM_CHILDREN = 2,
     SECOND_IDX = 1,
+    CSHARP_REVERSE_CHILD_OFFSET = 1,
+    EMBEDDED_REVERSE_CHILD_OFFSET = 1,
+    LISP_KEYWORD_PREFIX_LEN = 1,
+    LISP_LIST_EDGE_LEN = 1,
+    LISP_LIST_DELIMITER_LEN = 2,
+    LISP_CLAUSE_FIRST_MODULE_INDEX = 1,
+    LISP_HEAD_CHILD_COUNT = 1,
+    LISP_DECLARATION_NAME_INDEX = 1,
+    LISP_DEPENDENCY_CLAUSE_START_INDEX = 2,
+    LISP_IMPORT_ARGUMENT_START_INDEX = 1,
+    MESON_COMMAND_NAME_CHILD_COUNT = 1,
+    NIX_IMPORT_ARGUMENT_INDEX = 1,
+    NIX_IMPORT_ARGUMENT_CHILD_COUNT = 2,
+    NICKEL_IMPORT_NEXT_CHILD_OFFSET = 1,
+    PATH_TRAILING_CHARACTER_OFFSET = 1,
+    SMALI_DESCRIPTOR_TRAILING_SEPARATOR_OFFSET = 1,
 };
 
 // Field name length for ts_node_child_by_field_name() calls.
@@ -845,57 +861,60 @@ static void r_push_import(CBMExtractCtx *ctx, const char *raw) {
     cbm_imports_push(&ctx->result->imports, a, imp);
 }
 
+static void r_push_call_arguments(CBMExtractCtx *ctx, TSNode arguments, bool first_only) {
+    uint32_t count = ts_node_named_child_count(arguments);
+    for (uint32_t index = 0; index < count; ++index) {
+        TSNode argument = ts_node_named_child(arguments, index);
+        if (strcmp(ts_node_type(argument), "argument") != 0) {
+            continue;
+        }
+        TSNode value = ts_node_child_by_field_name(argument, TS_FIELD("value"));
+        if (!ts_node_is_null(value)) {
+            r_push_import(ctx, cbm_node_text(ctx->arena, value, ctx->source));
+        }
+        if (first_only) {
+            return;
+        }
+    }
+}
+
+static bool r_is_import_function(const char *name) {
+    return name && (strcmp(name, "library") == 0 || strcmp(name, "require") == 0 ||
+                    strcmp(name, "requireNamespace") == 0 || strcmp(name, "loadNamespace") == 0 ||
+                    strcmp(name, "source") == 0);
+}
+
+static void r_collect_call_imports(CBMExtractCtx *ctx, TSNode node) {
+    TSNode function = ts_node_child_by_field_name(node, TS_FIELD("function"));
+    TSNode arguments = ts_node_child_by_field_name(node, TS_FIELD("arguments"));
+    if (ts_node_is_null(function) || ts_node_is_null(arguments)) {
+        return;
+    }
+    if (strcmp(ts_node_type(function), "namespace_operator") == 0) {
+        TSNode left = ts_node_child_by_field_name(function, TS_FIELD("lhs"));
+        TSNode right = ts_node_child_by_field_name(function, TS_FIELD("rhs"));
+        char *left_text =
+            ts_node_is_null(left) ? NULL : cbm_node_text(ctx->arena, left, ctx->source);
+        char *right_text =
+            ts_node_is_null(right) ? NULL : cbm_node_text(ctx->arena, right, ctx->source);
+        if (left_text && right_text && strcmp(left_text, "box") == 0 &&
+            strcmp(right_text, "use") == 0) {
+            r_push_call_arguments(ctx, arguments, false);
+        }
+        return;
+    }
+    char *name = strcmp(ts_node_type(function), "identifier") == 0
+                     ? cbm_node_text(ctx->arena, function, ctx->source)
+                     : NULL;
+    if (r_is_import_function(name)) {
+        r_push_call_arguments(ctx, arguments, true);
+    }
+}
+
 // Recursively scan R for import-producing calls.
 static void r_collect_imports(CBMExtractCtx *ctx, TSNode node) { // NOLINT(misc-no-recursion)
     if (strcmp(ts_node_type(node), "call") == 0) {
-        TSNode fn = ts_node_child_by_field_name(node, TS_FIELD("function"));
-        TSNode args = ts_node_child_by_field_name(node, TS_FIELD("arguments"));
-        if (!ts_node_is_null(fn) && !ts_node_is_null(args)) {
-            const char *ft = ts_node_type(fn);
-            if (strcmp(ft, "namespace_operator") == 0) {
-                // box::use(mod[syms], pkg/path[syms], ...) — one IMPORTS per arg.
-                TSNode lhs = ts_node_child_by_field_name(fn, TS_FIELD("lhs"));
-                TSNode rhs = ts_node_child_by_field_name(fn, TS_FIELD("rhs"));
-                char *lt =
-                    ts_node_is_null(lhs) ? NULL : cbm_node_text(ctx->arena, lhs, ctx->source);
-                char *rt =
-                    ts_node_is_null(rhs) ? NULL : cbm_node_text(ctx->arena, rhs, ctx->source);
-                if (lt && rt && strcmp(lt, "box") == 0 && strcmp(rt, "use") == 0) {
-                    uint32_t na = ts_node_named_child_count(args);
-                    for (uint32_t i = 0; i < na; i++) {
-                        TSNode arg = ts_node_named_child(args, i);
-                        if (strcmp(ts_node_type(arg), "argument") != 0) {
-                            continue;
-                        }
-                        TSNode val = ts_node_child_by_field_name(arg, TS_FIELD("value"));
-                        if (!ts_node_is_null(val)) {
-                            r_push_import(ctx, cbm_node_text(ctx->arena, val, ctx->source));
-                        }
-                    }
-                }
-            } else if (strcmp(ft, "identifier") == 0) {
-                // library(pkg) / require(pkg) / requireNamespace("pkg") /
-                // loadNamespace("pkg") / source("file.R") — first arg is the module.
-                char *fname = cbm_node_text(ctx->arena, fn, ctx->source);
-                if (fname &&
-                    (strcmp(fname, "library") == 0 || strcmp(fname, "require") == 0 ||
-                     strcmp(fname, "requireNamespace") == 0 ||
-                     strcmp(fname, "loadNamespace") == 0 || strcmp(fname, "source") == 0)) {
-                    uint32_t na = ts_node_named_child_count(args);
-                    for (uint32_t i = 0; i < na; i++) {
-                        TSNode arg = ts_node_named_child(args, i);
-                        if (strcmp(ts_node_type(arg), "argument") != 0) {
-                            continue;
-                        }
-                        TSNode val = ts_node_child_by_field_name(arg, TS_FIELD("value"));
-                        if (!ts_node_is_null(val)) {
-                            r_push_import(ctx, cbm_node_text(ctx->arena, val, ctx->source));
-                        }
-                        break; // first positional argument only
-                    }
-                }
-            }
-        }
+        r_collect_call_imports(ctx, node);
     }
     uint32_t n = ts_node_named_child_count(node);
     for (uint32_t i = 0; i < n; i++) {
@@ -1099,8 +1118,8 @@ static void parse_zig_imports(CBMExtractCtx *ctx) {
         TSNode node = ts_nstack_pop(&stack);
         if (strcmp(ts_node_type(node), "builtin_function") == 0) {
             char *bf = cbm_node_text(a, node, ctx->source);
-            if (bf && (strncmp(bf, "@import", sizeof("@import") - 1) == 0 ||
-                       strncmp(bf, "@cImport", sizeof("@cImport") - 1) == 0)) {
+            if (bf && (strncmp(bf, "@import", sizeof("@import") - SKIP_ONE) == 0 ||
+                       strncmp(bf, "@cImport", sizeof("@cImport") - SKIP_ONE) == 0)) {
                 TSNode str = node;
                 if (find_first_descendant_of(node, "string", &str)) {
                     char *path = strip_quotes(a, cbm_node_text(a, str, ctx->source));
@@ -1311,7 +1330,7 @@ static void parse_csharp_imports(CBMExtractCtx *ctx) {
         TSNode path_node = node;
         bool found = false;
         uint32_t nc = ts_node_named_child_count(node);
-        for (int i = (int)nc - 1; i >= 0; i--) {
+        for (int i = (int)nc - CSHARP_REVERSE_CHILD_OFFSET; i >= 0; i--) {
             TSNode c = ts_node_named_child(node, (uint32_t)i);
             const char *ck = ts_node_type(c);
             if (strcmp(ck, "qualified_name") == 0 || strcmp(ck, "identifier") == 0 ||
@@ -1423,7 +1442,8 @@ static void embedded_collect_content_nodes(TSNode root, const CBMEmbeddedLangSpe
             continue;
         }
         uint32_t count = ts_node_child_count(node);
-        for (int i = (int)count - 1; i >= 0 && top < EMBED_STACK_CAP; i--) {
+        for (int i = (int)count - EMBEDDED_REVERSE_CHILD_OFFSET; i >= 0 && top < EMBED_STACK_CAP;
+             i--) {
             stack[top++] = ts_node_child(node, (uint32_t)i);
         }
     }
@@ -1595,6 +1615,49 @@ static void parse_pascal_imports(CBMExtractCtx *ctx) {
 // statement_list -> pipeline -> pipeline_chain. The module path is the LAST
 // generic_token child of command_elements (after the "module"/"namespace"/
 // "assembly" qualifier). DFS for such commands.
+static bool powershell_using_command(CBMExtractCtx *ctx, TSNode node) {
+    TSNode name = ts_node_child_by_field_name(node, TS_FIELD("command_name"));
+    char *text = ts_node_is_null(name) ? NULL : cbm_node_text(ctx->arena, name, ctx->source);
+    return text && strcmp(text, "using") == 0;
+}
+
+static bool powershell_import_token(const char *token) {
+    return token && token[0] && strcmp(token, "module") != 0 && strcmp(token, "namespace") != 0 &&
+           strcmp(token, "assembly") != 0;
+}
+
+static const char *powershell_last_import_token(CBMExtractCtx *ctx, TSNode command) {
+    TSNodeStack stack;
+    ts_nstack_init(&stack, ctx->arena, CBM_SZ_512);
+    ts_nstack_push(&stack, ctx->arena, command);
+    const char *last = NULL;
+    uint32_t last_start = 0;
+    while (stack.count > 0) {
+        TSNode node = ts_nstack_pop(&stack);
+        if (strcmp(ts_node_type(node), "generic_token") == 0) {
+            char *token = cbm_node_text(ctx->arena, node, ctx->source);
+            uint32_t start = ts_node_start_byte(node);
+            if (powershell_import_token(token) && (!last || start > last_start)) {
+                last = token;
+                last_start = start;
+            }
+        }
+        ts_nstack_push_children(&stack, ctx->arena, node);
+    }
+    return last;
+}
+
+static void powershell_collect_command(CBMExtractCtx *ctx, TSNode command) {
+    if (!powershell_using_command(ctx, command)) {
+        return;
+    }
+    const char *module = powershell_last_import_token(ctx, command);
+    if (module) {
+        CBMImport imported = {.local_name = path_last(ctx->arena, module), .module_path = module};
+        cbm_imports_push(&ctx->result->imports, ctx->arena, imported);
+    }
+}
+
 static void parse_powershell_imports(CBMExtractCtx *ctx) {
     CBMArena *a = ctx->arena;
     TSNodeStack stack;
@@ -1603,34 +1666,7 @@ static void parse_powershell_imports(CBMExtractCtx *ctx) {
     while (stack.count > 0) {
         TSNode node = ts_nstack_pop(&stack);
         if (strcmp(ts_node_type(node), "command") == 0) {
-            TSNode name = ts_node_child_by_field_name(node, TS_FIELD("command_name"));
-            char *nm = ts_node_is_null(name) ? NULL : cbm_node_text(a, name, ctx->source);
-            if (nm && strcmp(nm, "using") == 0) {
-                /* Find the last generic_token anywhere under the command — that
-                 * is the module path / namespace / assembly being imported. */
-                TSNodeStack inner;
-                ts_nstack_init(&inner, a, CBM_SZ_512);
-                ts_nstack_push(&inner, a, node);
-                const char *last_tok = NULL;
-                uint32_t last_start = 0;
-                while (inner.count > 0) {
-                    TSNode c = ts_nstack_pop(&inner);
-                    if (strcmp(ts_node_type(c), "generic_token") == 0) {
-                        char *t = cbm_node_text(a, c, ctx->source);
-                        uint32_t sb = ts_node_start_byte(c);
-                        if (t && t[0] && strcmp(t, "module") != 0 && strcmp(t, "namespace") != 0 &&
-                            strcmp(t, "assembly") != 0 && (last_tok == NULL || sb > last_start)) {
-                            last_tok = t;
-                            last_start = sb;
-                        }
-                    }
-                    ts_nstack_push_children(&inner, a, c);
-                }
-                if (last_tok && last_tok[0]) {
-                    CBMImport imp = {.local_name = path_last(a, last_tok), .module_path = last_tok};
-                    cbm_imports_push(&ctx->result->imports, a, imp);
-                }
-            }
+            powershell_collect_command(ctx, node);
             continue; /* commands don't nest imports further */
         }
         ts_nstack_push_children(&stack, a, node);
@@ -1653,7 +1689,7 @@ static void lisp_push_module(CBMExtractCtx *ctx, TSNode mod_node) {
         /* Clojure/Fennel keyword module refs carry a leading ':' (e.g. `:util`,
          * `(require :util)`); strip it so the name matches the sibling file. */
         if (mod && mod[0] == ':') {
-            mod = cbm_arena_strdup(a, mod + 1);
+            mod = cbm_arena_strdup(a, mod + LISP_KEYWORD_PREFIX_LEN);
         }
     } else if (strcmp(mk, "list") == 0 || strcmp(mk, "list_lit") == 0 ||
                strcmp(mk, "vec_lit") == 0) {
@@ -1663,8 +1699,9 @@ static void lisp_push_module(CBMExtractCtx *ctx, TSNode mod_node) {
         mod = cbm_node_text(a, mod_node, ctx->source);
         if (mod) {
             size_t len = strlen(mod);
-            if (len >= 2 && mod[0] == '(' && mod[len - 1] == ')') {
-                mod = cbm_arena_strndup(a, mod + 1, len - 2);
+            if (len >= LISP_LIST_DELIMITER_LEN && mod[0] == '(' &&
+                mod[len - LISP_LIST_EDGE_LEN] == ')') {
+                mod = cbm_arena_strndup(a, mod + LISP_LIST_EDGE_LEN, len - LISP_LIST_DELIMITER_LEN);
             }
         }
     }
@@ -1704,7 +1741,8 @@ static void lisp_set_namespace(CBMExtractCtx *ctx, TSNode name_node) {
  * `(:require ...)` / `(:use ...)` list. */
 static void lisp_push_clause_modules(CBMExtractCtx *ctx, TSNode clause) {
     uint32_t cc = ts_node_named_child_count(clause);
-    for (uint32_t j = 1; j < cc; j++) { /* skip the leading keyword head */
+    for (uint32_t j = LISP_CLAUSE_FIRST_MODULE_INDEX; j < cc;
+         j++) { /* skip the leading keyword head */
         TSNode item = ts_node_named_child(clause, j);
         const char *ik = ts_node_type(item);
         /* `[app.util :as u]` — the module is the vector's first symbol. */
@@ -1722,7 +1760,7 @@ static void lisp_push_clause_modules(CBMExtractCtx *ctx, TSNode clause) {
 
 /* The s-expression head symbol text, or NULL if the list has no symbol head. */
 static char *lisp_head_text(CBMExtractCtx *ctx, TSNode list, TSNode *out_head) {
-    if (ts_node_named_child_count(list) < 1) {
+    if (ts_node_named_child_count(list) < LISP_HEAD_CHILD_COUNT) {
         return NULL;
     }
     TSNode head = ts_node_named_child(list, 0);
@@ -1736,10 +1774,70 @@ static char *lisp_head_text(CBMExtractCtx *ctx, TSNode list, TSNode *out_head) {
     return cbm_node_text(ctx->arena, head, ctx->source);
 }
 
+static bool lisp_list_node(TSNode node) {
+    const char *kind = ts_node_type(node);
+    return strcmp(kind, "list_lit") == 0 || strcmp(kind, "list") == 0;
+}
+
+static void lisp_process_ns_form(CBMExtractCtx *ctx, TSNode node, uint32_t count) {
+    if (count < LISP_LIST_DELIMITER_LEN) {
+        return;
+    }
+    lisp_set_namespace(ctx, ts_node_named_child(node, LISP_DECLARATION_NAME_INDEX));
+    for (uint32_t index = LISP_DEPENDENCY_CLAUSE_START_INDEX; index < count; ++index) {
+        TSNode clause = ts_node_named_child(node, index);
+        if (lisp_list_node(clause)) {
+            lisp_push_clause_modules(ctx, clause);
+        }
+    }
+}
+
+static bool lisp_package_clause_imports(CBMExtractCtx *ctx, TSNode clause) {
+    char *head = lisp_head_text(ctx, clause, NULL);
+    if (head && (strcmp(head, ":use") == 0 || strstr(head, "import-from"))) {
+        return true;
+    }
+    if (ts_node_named_child_count(clause) == 0) {
+        return false;
+    }
+    TSNode first = ts_node_named_child(clause, 0);
+    if (strcmp(ts_node_type(first), "kwd_lit") != 0) {
+        return false;
+    }
+    char *keyword = cbm_node_text(ctx->arena, first, ctx->source);
+    return keyword && (strstr(keyword, "use") || strstr(keyword, "import-from"));
+}
+
+static void lisp_process_package_form(CBMExtractCtx *ctx, TSNode node, uint32_t count) {
+    if (count < LISP_LIST_DELIMITER_LEN) {
+        return;
+    }
+    lisp_set_namespace(ctx, ts_node_named_child(node, LISP_DECLARATION_NAME_INDEX));
+    for (uint32_t index = LISP_DEPENDENCY_CLAUSE_START_INDEX; index < count; ++index) {
+        TSNode clause = ts_node_named_child(node, index);
+        if (lisp_list_node(clause) && lisp_package_clause_imports(ctx, clause)) {
+            lisp_push_clause_modules(ctx, clause);
+        }
+    }
+}
+
+static void lisp_process_plain_import(CBMExtractCtx *ctx, TSNode node, uint32_t count) {
+    for (uint32_t index = LISP_IMPORT_ARGUMENT_START_INDEX; index < count; ++index) {
+        TSNode module = ts_node_named_child(node, index);
+        const char *kind = ts_node_type(module);
+        bool quoted = (strcmp(kind, "quote") == 0 || strcmp(kind, "quoting_lit") == 0) &&
+                      ts_node_named_child_count(module) > 0;
+        lisp_push_module(ctx, quoted ? ts_node_named_child(module, 0) : module);
+    }
+}
+
+static bool lisp_import_form(const char *head) {
+    return strcmp(head, "import") == 0 || strcmp(head, "require") == 0 ||
+           strcmp(head, "load") == 0 || strcmp(head, "use") == 0 || strcmp(head, "include") == 0;
+}
+
 /* Process one s-expression list as a potential import/namespace form. */
 static void lisp_process_list(CBMExtractCtx *ctx, TSNode node) {
-    CBMArena *a = ctx->arena;
-    (void)a;
     TSNode head = node;
     char *hn = lisp_head_text(ctx, node, &head);
     if (!hn) {
@@ -1747,71 +1845,20 @@ static void lisp_process_list(CBMExtractCtx *ctx, TSNode node) {
     }
     uint32_t nc = ts_node_named_child_count(node);
 
-    /* Clojure namespace form: `(ns app.core (:require ...) (:use ...))`.
-     * 2nd child is the namespace symbol; later keyword-headed lists are
-     * dependency clauses. */
-    if (strcmp(hn, "ns") == 0 && nc >= 2) {
-        lisp_set_namespace(ctx, ts_node_named_child(node, 1));
-        for (uint32_t j = 2; j < nc; j++) {
-            TSNode clause = ts_node_named_child(node, j);
-            const char *ck = ts_node_type(clause);
-            if (strcmp(ck, "list_lit") == 0 || strcmp(ck, "list") == 0) {
-                lisp_push_clause_modules(ctx, clause);
-            }
-        }
+    if (strcmp(hn, "ns") == 0) {
+        lisp_process_ns_form(ctx, node, nc);
         return;
     }
-
-    /* Common Lisp package form: `(defpackage :main (:use :cl :util) ...)`.
-     * 2nd child is the package name keyword; nested `(:use ...)` lists name the
-     * imported packages. */
-    if (strcmp(hn, "defpackage") == 0 && nc >= 2) {
-        lisp_set_namespace(ctx, ts_node_named_child(node, 1));
-        for (uint32_t j = 2; j < nc; j++) {
-            TSNode clause = ts_node_named_child(node, j);
-            const char *ck = ts_node_type(clause);
-            if (strcmp(ck, "list_lit") != 0 && strcmp(ck, "list") != 0) {
-                continue;
-            }
-            /* Only `:use` / `:import-from` clauses denote dependencies. */
-            char *chn = lisp_head_text(ctx, clause, NULL);
-            if (chn && (strcmp(chn, ":use") == 0 || strstr(chn, "import-from"))) {
-                lisp_push_clause_modules(ctx, clause);
-            } else if (ts_node_named_child_count(clause) > 0) {
-                TSNode ch0 = ts_node_named_child(clause, 0);
-                const char *c0k = ts_node_type(ch0);
-                /* CL `(:use ...)` head is a `kwd_lit`, not a symbol. */
-                if (strcmp(c0k, "kwd_lit") == 0) {
-                    char *kw = cbm_node_text(ctx->arena, ch0, ctx->source);
-                    if (kw && (strstr(kw, "use") || strstr(kw, "import-from"))) {
-                        lisp_push_clause_modules(ctx, clause);
-                    }
-                }
-            }
-        }
+    if (strcmp(hn, "defpackage") == 0) {
+        lisp_process_package_form(ctx, node, nc);
         return;
     }
-
-    /* Common Lisp `(in-package :util)` also declares the file's package. */
-    if (strcmp(hn, "in-package") == 0 && nc >= 2) {
-        lisp_set_namespace(ctx, ts_node_named_child(node, 1));
+    if (strcmp(hn, "in-package") == 0 && nc >= LISP_LIST_DELIMITER_LEN) {
+        lisp_set_namespace(ctx, ts_node_named_child(node, LISP_DECLARATION_NAME_INDEX));
         return;
     }
-
-    /* Plain import head: `(require :util)`, `(import ...)`, `(use ...)`. */
-    if (strcmp(hn, "import") == 0 || strcmp(hn, "require") == 0 || strcmp(hn, "load") == 0 ||
-        strcmp(hn, "use") == 0 || strcmp(hn, "include") == 0) {
-        for (uint32_t j = 1; j < nc; j++) {
-            TSNode mod_node = ts_node_named_child(node, j);
-            const char *mk = ts_node_type(mod_node);
-            /* (require 'json) — the quoted datum is a `quote` wrapping a symbol. */
-            if ((strcmp(mk, "quote") == 0 || strcmp(mk, "quoting_lit") == 0) &&
-                ts_node_named_child_count(mod_node) > 0) {
-                lisp_push_module(ctx, ts_node_named_child(mod_node, 0));
-            } else {
-                lisp_push_module(ctx, mod_node);
-            }
-        }
+    if (lisp_import_form(hn)) {
+        lisp_process_plain_import(ctx, node, nc);
     }
 }
 
@@ -1837,6 +1884,44 @@ static void parse_lisp_imports(CBMExtractCtx *ctx) {
 // --- Starlark imports ---
 // load("//pkg:file.bzl", "sym", ...) — an expression_statement -> call whose
 // function identifier is "load"; the first string argument is the module path.
+static char *import_string_node_text(CBMExtractCtx *ctx, TSNode string_node) {
+    CBMArena *arena = ctx->arena;
+    char *path = strip_quotes(arena, cbm_node_text(arena, string_node, ctx->source));
+    if (path && path[0] && (path[0] == '"' || path[0] == '\'')) {
+        TSNode content = string_node;
+        if (find_first_descendant_of(string_node, "string_content", &content)) {
+            path = cbm_node_text(arena, content, ctx->source);
+        }
+    }
+    return path;
+}
+
+static void push_string_import(CBMExtractCtx *ctx, TSNode string_node) {
+    char *path = import_string_node_text(ctx, string_node);
+    if (path && path[0]) {
+        CBMImport imported = {.local_name = path_last(ctx->arena, path), .module_path = path};
+        cbm_imports_push(&ctx->result->imports, ctx->arena, imported);
+    }
+}
+
+static bool starlark_load_call(CBMExtractCtx *ctx, TSNode node) {
+    TSNode function = ts_node_child_by_field_name(node, TS_FIELD("function"));
+    char *name =
+        ts_node_is_null(function) ? NULL : cbm_node_text(ctx->arena, function, ctx->source);
+    return name && strcmp(name, "load") == 0;
+}
+
+static void starlark_collect_call(CBMExtractCtx *ctx, TSNode call) {
+    if (!starlark_load_call(ctx, call)) {
+        return;
+    }
+    TSNode arguments = ts_node_child_by_field_name(call, TS_FIELD("arguments"));
+    TSNode string = arguments;
+    if (!ts_node_is_null(arguments) && find_first_descendant_of(arguments, "string", &string)) {
+        push_string_import(ctx, string);
+    }
+}
+
 static void parse_starlark_imports(CBMExtractCtx *ctx) {
     CBMArena *a = ctx->arena;
     TSNodeStack stack;
@@ -1845,29 +1930,7 @@ static void parse_starlark_imports(CBMExtractCtx *ctx) {
     while (stack.count > 0) {
         TSNode node = ts_nstack_pop(&stack);
         if (strcmp(ts_node_type(node), "call") == 0) {
-            TSNode fn = ts_node_child_by_field_name(node, TS_FIELD("function"));
-            char *fname = ts_node_is_null(fn) ? NULL : cbm_node_text(a, fn, ctx->source);
-            if (fname && strcmp(fname, "load") == 0) {
-                TSNode args = ts_node_child_by_field_name(node, TS_FIELD("arguments"));
-                if (!ts_node_is_null(args)) {
-                    TSNode str = args;
-                    if (find_first_descendant_of(args, "string", &str)) {
-                        char *path = strip_quotes(a, cbm_node_text(a, str, ctx->source));
-                        /* string node may carry string_start/_content/_end; if the
-                         * stripped text still has quotes, fall back to content. */
-                        if (path && path[0] && (path[0] == '"' || path[0] == '\'')) {
-                            TSNode content = str;
-                            if (find_first_descendant_of(str, "string_content", &content)) {
-                                path = cbm_node_text(a, content, ctx->source);
-                            }
-                        }
-                        if (path && path[0]) {
-                            CBMImport imp = {.local_name = path_last(a, path), .module_path = path};
-                            cbm_imports_push(&ctx->result->imports, a, imp);
-                        }
-                    }
-                }
-            }
+            starlark_collect_call(ctx, node);
         }
         ts_nstack_push_children(&stack, a, node);
     }
@@ -1877,6 +1940,27 @@ static void parse_starlark_imports(CBMExtractCtx *ctx) {
 // source path / package require name — `command` nodes whose `name` field is
 // "source" (file include) or "package" (package require). Take the first
 // simple_word argument as the module.
+static bool tcl_source_command(CBMExtractCtx *ctx, TSNode command) {
+    TSNode name = ts_node_child_by_field_name(command, TS_FIELD("name"));
+    char *text = ts_node_is_null(name) ? NULL : cbm_node_text(ctx->arena, name, ctx->source);
+    return text && strcmp(text, "source") == 0;
+}
+
+static void tcl_push_first_argument(CBMExtractCtx *ctx, TSNode command) {
+    TSNode arguments = ts_node_child_by_field_name(command, TS_FIELD("arguments"));
+    uint32_t count = ts_node_is_null(arguments) ? 0 : ts_node_named_child_count(arguments);
+    for (uint32_t index = 0; index < count; ++index) {
+        TSNode argument = ts_node_named_child(arguments, index);
+        char *module = strip_quotes(ctx->arena, cbm_node_text(ctx->arena, argument, ctx->source));
+        if (module && module[0]) {
+            CBMImport imported = {.local_name = path_last(ctx->arena, module),
+                                  .module_path = module};
+            cbm_imports_push(&ctx->result->imports, ctx->arena, imported);
+            return;
+        }
+    }
+}
+
 static void parse_tcl_imports(CBMExtractCtx *ctx) {
     CBMArena *a = ctx->arena;
     TSNodeStack stack;
@@ -1885,22 +1969,8 @@ static void parse_tcl_imports(CBMExtractCtx *ctx) {
     while (stack.count > 0) {
         TSNode node = ts_nstack_pop(&stack);
         if (strcmp(ts_node_type(node), "command") == 0) {
-            TSNode name = ts_node_child_by_field_name(node, TS_FIELD("name"));
-            char *nm = ts_node_is_null(name) ? NULL : cbm_node_text(a, name, ctx->source);
-            if (nm && strcmp(nm, "source") == 0) {
-                TSNode args = ts_node_child_by_field_name(node, TS_FIELD("arguments"));
-                if (!ts_node_is_null(args)) {
-                    uint32_t nc = ts_node_named_child_count(args);
-                    for (uint32_t j = 0; j < nc; j++) {
-                        TSNode c = ts_node_named_child(args, j);
-                        char *mod = strip_quotes(a, cbm_node_text(a, c, ctx->source));
-                        if (mod && mod[0]) {
-                            CBMImport imp = {.local_name = path_last(a, mod), .module_path = mod};
-                            cbm_imports_push(&ctx->result->imports, a, imp);
-                            break;
-                        }
-                    }
-                }
+            if (tcl_source_command(ctx, node)) {
+                tcl_push_first_argument(ctx, node);
             }
         }
         ts_nstack_push_children(&stack, a, node);
@@ -1911,6 +1981,23 @@ static void parse_tcl_imports(CBMExtractCtx *ctx) {
 // Teal is a typed Lua dialect: `local m = require("mod")` — a function_call
 // whose called_object identifier is "require"; the first string argument is the
 // module. DFS for such calls (mirrors the Lua require pattern at AST level).
+static bool teal_require_call(CBMExtractCtx *ctx, TSNode node) {
+    TSNode callee = ts_node_child_by_field_name(node, TS_FIELD("called_object"));
+    char *name = ts_node_is_null(callee) ? NULL : cbm_node_text(ctx->arena, callee, ctx->source);
+    return name && strcmp(name, "require") == 0;
+}
+
+static void teal_collect_call(CBMExtractCtx *ctx, TSNode call) {
+    if (!teal_require_call(ctx, call)) {
+        return;
+    }
+    TSNode arguments = ts_node_child_by_field_name(call, TS_FIELD("arguments"));
+    TSNode string = arguments;
+    if (!ts_node_is_null(arguments) && find_first_descendant_of(arguments, "string", &string)) {
+        push_string_import(ctx, string);
+    }
+}
+
 static void parse_teal_imports(CBMExtractCtx *ctx) {
     CBMArena *a = ctx->arena;
     TSNodeStack stack;
@@ -1919,25 +2006,7 @@ static void parse_teal_imports(CBMExtractCtx *ctx) {
     while (stack.count > 0) {
         TSNode node = ts_nstack_pop(&stack);
         if (strcmp(ts_node_type(node), "function_call") == 0) {
-            TSNode callee = ts_node_child_by_field_name(node, "called_object", 13);
-            char *cn = ts_node_is_null(callee) ? NULL : cbm_node_text(a, callee, ctx->source);
-            if (cn && strcmp(cn, "require") == 0) {
-                TSNode args = ts_node_child_by_field_name(node, TS_FIELD("arguments"));
-                TSNode str = ts_node_is_null(args) ? node : args;
-                if (!ts_node_is_null(args) && find_first_descendant_of(args, "string", &str)) {
-                    char *mod = strip_quotes(a, cbm_node_text(a, str, ctx->source));
-                    if (mod && mod[0] && (mod[0] == '"' || mod[0] == '\'')) {
-                        TSNode content = str;
-                        if (find_first_descendant_of(str, "string_content", &content)) {
-                            mod = cbm_node_text(a, content, ctx->source);
-                        }
-                    }
-                    if (mod && mod[0]) {
-                        CBMImport imp = {.local_name = path_last(a, mod), .module_path = mod};
-                        cbm_imports_push(&ctx->result->imports, a, imp);
-                    }
-                }
-            }
+            teal_collect_call(ctx, node);
         }
         ts_nstack_push_children(&stack, a, node);
     }
@@ -2082,7 +2151,9 @@ static void push_path_import(CBMExtractCtx *ctx, TSNode node) {
         path++;
     }
     size_t len = strlen(path);
-    while (len > 0 && (path[len - 1] == ' ' || path[len - 1] == '\t' || path[len - 1] == '\n')) {
+    while (len > 0 && (path[len - PATH_TRAILING_CHARACTER_OFFSET] == ' ' ||
+                       path[len - PATH_TRAILING_CHARACTER_OFFSET] == '\t' ||
+                       path[len - PATH_TRAILING_CHARACTER_OFFSET] == '\n')) {
         path[--len] = '\0';
     }
     if (!path[0]) {
@@ -2180,7 +2251,7 @@ static void parse_meson_imports(CBMExtractCtx *ctx) {
          * arguments) and string arguments as `string`. */
         if (strcmp(k, "normal_command") == 0) {
             uint32_t nc = ts_node_named_child_count(node);
-            if (nc >= 1) {
+            if (nc >= MESON_COMMAND_NAME_CHILD_COUNT) {
                 TSNode fn = ts_node_named_child(node, 0);
                 char *fname = cbm_node_text(a, fn, ctx->source);
                 if (fname && strcmp(fname, "subdir") == 0) {
@@ -2256,8 +2327,9 @@ static void parse_nix_imports(CBMExtractCtx *ctx) {
              * the argument a path_expression / path_fragment / string. */
             TSNode fn = ts_node_named_child_count(node) > 0 ? ts_node_named_child(node, 0) : node;
             char *fname = cbm_node_text(a, fn, ctx->source);
-            if (fname && strcmp(fname, "import") == 0 && ts_node_named_child_count(node) > 1) {
-                TSNode arg = ts_node_named_child(node, 1);
+            if (fname && strcmp(fname, "import") == 0 &&
+                ts_node_named_child_count(node) >= NIX_IMPORT_ARGUMENT_CHILD_COUNT) {
+                TSNode arg = ts_node_named_child(node, NIX_IMPORT_ARGUMENT_INDEX);
                 TSNode frag = arg;
                 if (find_first_descendant_of(arg, "path_fragment", &frag) ||
                     find_first_descendant_of(arg, "string_content", &frag)) {
@@ -2316,11 +2388,11 @@ static void parse_nickel_imports(CBMExtractCtx *ctx) {
          * preceding sibling text is "import". Simpler: scan children for the
          * "import" keyword token and take the next static_string. */
         uint32_t nc = ts_node_child_count(node);
-        for (uint32_t j = 0; j + 1 < nc; j++) {
+        for (uint32_t j = 0; j + NICKEL_IMPORT_NEXT_CHILD_OFFSET < nc; j++) {
             TSNode c = ts_node_child(node, j);
             char *t = cbm_node_text(a, c, ctx->source);
             if (t && strcmp(t, "import") == 0) {
-                for (uint32_t m = j + 1; m < nc; m++) {
+                for (uint32_t m = j + NICKEL_IMPORT_NEXT_CHILD_OFFSET; m < nc; m++) {
                     TSNode s = ts_node_child(node, m);
                     if (strcmp(ts_node_type(s), "static_string") == 0) {
                         push_string_descendant_import(ctx, s);
@@ -2522,12 +2594,9 @@ static void parse_move_imports(CBMExtractCtx *ctx) {
         TSNode node = ts_nstack_pop(&stack);
         if (strcmp(ts_node_type(node), "use_declaration") == 0) {
             TSNode arg = ts_node_child_by_field_name(node, TS_FIELD("argument"));
-            char *mod = NULL;
-            if (!ts_node_is_null(arg)) {
-                mod = cbm_node_text(a, arg, ctx->source);
-            } else if (find_first_descendant_of(node, "identifier", &arg)) {
-                mod = cbm_node_text(a, arg, ctx->source);
-            }
+            bool found =
+                !ts_node_is_null(arg) || find_first_descendant_of(node, "identifier", &arg);
+            char *mod = found ? cbm_node_text(a, arg, ctx->source) : NULL;
             if (mod && mod[0]) {
                 CBMImport imp = {.local_name = path_last(a, mod), .module_path = mod};
                 cbm_imports_push(&ctx->result->imports, a, imp);
@@ -2551,7 +2620,7 @@ static char *smali_demangle_descriptor(CBMArena *a, const char *desc) {
         start++;
     }
     size_t len = strlen(start);
-    if (len > 0 && start[len - 1] == ';') {
+    if (len > 0 && start[len - SMALI_DESCRIPTOR_TRAILING_SEPARATOR_OFFSET] == ';') {
         len--;
     }
     char *out = cbm_arena_strndup(a, start, len);

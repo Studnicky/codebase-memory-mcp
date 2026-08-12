@@ -483,7 +483,7 @@ void cbm_lsh_query(const cbm_lsh_index_t *idx, const cbm_minhash_t *fp,
      * idx as read-only. memcpy the pointer value rather than cast away
      * const, matching safe_str_free's convention in foundation/platform.h. */
     cbm_lsh_index_t *mut_idx;
-    memcpy(&mut_idx, &idx, sizeof(mut_idx));
+    memcpy(&mut_idx, &idx, sizeof(cbm_lsh_index_t *));
     mut_idx->result_count = 0;
 
     /* O(1) dedup via open-addressing hash set */

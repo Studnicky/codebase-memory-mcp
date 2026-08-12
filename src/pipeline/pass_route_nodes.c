@@ -28,6 +28,9 @@ enum {
     RN_PROPS_MARGIN = 100,
     RN_CALLEE_SKIP = 14, /* strlen('"callee_args":[') - 1 */
     DF_MAX_PROPS = 6,    /* via, route, edge_type, via_infra, handler_params, caller_args */
+    RN_STRING_CHAR_WIDTH = 1,
+    RN_TEMPLATE_INTERPOLATION_PREFIX_WIDTH = 2,
+    RN_CANONICAL_PARAMETER_TOKEN_WIDTH = 2,
 };
 
 #define SLEN(s) (sizeof(s) - 1)
@@ -43,6 +46,36 @@ enum {
 /* True for characters that may appear in a ":name" route parameter. */
 static inline bool is_route_ident_char(char c) {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+}
+
+static size_t route_skip_delimited_parameter(const char *input, size_t index, char delimiter) {
+    while (input[index] != '\0' && input[index] != delimiter && input[index] != '/') {
+        index++;
+    }
+    return input[index] == delimiter ? index + RN_STRING_CHAR_WIDTH : index;
+}
+
+static bool route_parameter_end(const char *input, size_t *index, bool segment_start) {
+    char current = input[*index];
+    if (current == ':' && segment_start &&
+        is_route_ident_char(input[*index + RN_STRING_CHAR_WIDTH])) {
+        *index += RN_STRING_CHAR_WIDTH;
+        while (is_route_ident_char(input[*index])) {
+            (*index)++;
+        }
+        return true;
+    }
+    if (current == '{' || current == '<') {
+        *index = route_skip_delimited_parameter(input, *index + RN_STRING_CHAR_WIDTH,
+                                                current == '{' ? '}' : '>');
+        return true;
+    }
+    if (current == '$' && input[*index + RN_STRING_CHAR_WIDTH] == '{') {
+        *index = route_skip_delimited_parameter(
+            input, *index + RN_TEMPLATE_INTERPOLATION_PREFIX_WIDTH, '}');
+        return true;
+    }
+    return false;
 }
 
 /* Canonicalize route-path parameter placeholders to a single "{}" token so that
@@ -76,46 +109,9 @@ const char *cbm_route_canon_path(const char *in, char *out, size_t out_sz) {
     size_t i = 0;
     while (in[i] != '\0' && oi < last) {
         char c = in[i];
-        bool at_seg_start = (oi == 0) || (out[oi - 1] == '/');
-        bool is_param = false;
-
-        if (c == ':' && at_seg_start && is_route_ident_char(in[i + 1])) {
-            i++;
-            while (in[i] != '\0' && is_route_ident_char(in[i])) {
-                i++;
-            }
-            is_param = true;
-        } else if (c == '{') {
-            i++;
-            while (in[i] != '\0' && in[i] != '}' && in[i] != '/') {
-                i++;
-            }
-            if (in[i] == '}') {
-                i++;
-            }
-            is_param = true;
-        } else if (c == '<') {
-            i++;
-            while (in[i] != '\0' && in[i] != '>' && in[i] != '/') {
-                i++;
-            }
-            if (in[i] == '>') {
-                i++;
-            }
-            is_param = true;
-        } else if (c == '$' && in[i + 1] == '{') {
-            i += 2;
-            while (in[i] != '\0' && in[i] != '}' && in[i] != '/') {
-                i++;
-            }
-            if (in[i] == '}') {
-                i++;
-            }
-            is_param = true;
-        }
-
-        if (is_param) {
-            if (oi + 2 > last) {
+        bool at_seg_start = (oi == 0) || (out[oi - RN_STRING_CHAR_WIDTH] == '/');
+        if (route_parameter_end(in, &i, at_seg_start)) {
+            if (oi + RN_CANONICAL_PARAMETER_TOKEN_WIDTH > last) {
                 break;
             }
             out[oi++] = '{';
@@ -1009,6 +1005,16 @@ enum {
     SKR_PATH_BUF = 1024,
     SKR_NAME_BUF = 64,
     SVK_MAX_HANDLES_PROPS = 3, /* handler, framework, optional via */
+    SVK_REQUIRED_HANDLES_PROPS = 2,
+    SVK_FILE_KIND_SERVER = 1,
+    SVK_FILE_KIND_PAGE_SERVER = 2,
+    SVK_FILE_KIND_LAYOUT_SERVER = 3,
+    SVK_PATH_CHAR_WIDTH = 1,
+    SVK_ROUTE_ROOT_OUTPUT_LENGTH = 1,
+    SVK_MIN_ROUTE_BUFFER_SIZE = 2,
+    SVK_DELIMITED_SEGMENT_BOUNDARY_WIDTH = 2,
+    SVK_REST_PARAMETER_PREFIX_WIDTH = 3,
+    SVK_OUTPUT_TERMINATOR_WIDTH = 1,
 };
 
 /* Detect the SvelteKit kind of a file path. Returns 1 for +server,
@@ -1025,17 +1031,52 @@ static int sveltekit_file_kind(const char *file_path) {
         return 0;
     }
     const char *slash = strrchr(file_path, '/');
-    const char *base = slash ? slash + 1 : file_path;
+    const char *base = slash ? slash + SVK_PATH_CHAR_WIDTH : file_path;
     if (strcmp(base, "+server.ts") == 0 || strcmp(base, "+server.js") == 0) {
-        return 1;
+        return SVK_FILE_KIND_SERVER;
     }
     if (strcmp(base, "+page.server.ts") == 0 || strcmp(base, "+page.server.js") == 0) {
-        return 2;
+        return SVK_FILE_KIND_PAGE_SERVER;
     }
     if (strcmp(base, "+layout.server.ts") == 0 || strcmp(base, "+layout.server.js") == 0) {
-        return 3;
+        return SVK_FILE_KIND_LAYOUT_SERVER;
     }
     return 0;
+}
+
+static void sveltekit_append(char *out, int outsz, int *position, const char *text, size_t length) {
+    int available = outsz - SVK_OUTPUT_TERMINATOR_WIDTH - *position;
+    if (available <= 0) {
+        return;
+    }
+    if ((int)length > available) {
+        length = (size_t)available;
+    }
+    memcpy(out + *position, text, length);
+    *position += (int)length;
+    out[*position] = '\0';
+}
+
+static void sveltekit_append_segment(char *out, int outsz, int *position, const char *segment,
+                                     size_t length) {
+    sveltekit_append(out, outsz, position, "/", SVK_PATH_CHAR_WIDTH);
+    if (length >= SVK_DELIMITED_SEGMENT_BOUNDARY_WIDTH && segment[0] == '[' &&
+        segment[length - SVK_PATH_CHAR_WIDTH] == ']') {
+        const char *inner = segment + SVK_PATH_CHAR_WIDTH;
+        size_t inner_length = length - SVK_DELIMITED_SEGMENT_BOUNDARY_WIDTH;
+        bool rest = inner_length >= SVK_REST_PARAMETER_PREFIX_WIDTH &&
+                    strncmp(inner, "...", SVK_REST_PARAMETER_PREFIX_WIDTH) == 0;
+        sveltekit_append(out, outsz, position, rest ? "*" : ":", SVK_PATH_CHAR_WIDTH);
+        if (rest) {
+            inner += SVK_REST_PARAMETER_PREFIX_WIDTH;
+            inner_length -= SVK_REST_PARAMETER_PREFIX_WIDTH;
+        }
+        const char *matcher = memchr(inner, '=', inner_length);
+        sveltekit_append(out, outsz, position, inner,
+                         matcher ? (size_t)(matcher - inner) : inner_length);
+        return;
+    }
+    sveltekit_append(out, outsz, position, segment, length);
 }
 
 /* Compute the URL route path for a SvelteKit file path. Writes into
@@ -1045,7 +1086,7 @@ static int sveltekit_file_kind(const char *file_path) {
  * params `[slug]` become `:slug`, and rest params `[...slug]` become
  * `*slug` so the result is recognisable as a path pattern. */
 static const char *sveltekit_route_path(const char *file_path, char *out, int outsz) {
-    if (!file_path || !out || outsz <= 1) {
+    if (!file_path || !out || outsz < SVK_MIN_ROUTE_BUFFER_SIZE) {
         return NULL;
     }
     const char *routes_seg = strstr(file_path, "/routes/");
@@ -1058,7 +1099,7 @@ static const char *sveltekit_route_path(const char *file_path, char *out, int ou
     if (!last_slash || last_slash < p) {
         /* File is directly under /routes/ — root route. */
         out[0] = '/';
-        out[1] = '\0';
+        out[SVK_ROUTE_ROOT_OUTPUT_LENGTH] = '\0';
         return out;
     }
     /* p points at first char after /routes/, last_slash points at the
@@ -1072,54 +1113,13 @@ static const char *sveltekit_route_path(const char *file_path, char *out, int ou
         }
         size_t seg_len = (size_t)(seg_end - p);
         if (seg_len > 0) {
-            /* Group `(name)` — skip entirely. */
-            if (p[0] == '(' && p[seg_len - 1] == ')') {
-                p = seg_end + 1;
+            if (p[0] == '(' && p[seg_len - SVK_PATH_CHAR_WIDTH] == ')') {
+                p = seg_end + SVK_PATH_CHAR_WIDTH;
                 continue;
             }
-            /* Emit "/" then rewritten segment. */
-            if (pos + 1 < outsz - 1) {
-                out[pos++] = '/';
-            }
-            /* Dynamic param: `[slug]` → `:slug`, `[...slug]` → `*slug`. */
-            if (seg_len >= 2 && p[0] == '[' && p[seg_len - 1] == ']') {
-                const char *inner = p + 1;
-                size_t inner_len = seg_len - 2;
-                if (inner_len >= 3 && strncmp(inner, "...", 3) == 0) {
-                    if (pos < outsz - 1) {
-                        out[pos++] = '*';
-                    }
-                    inner += 3;
-                    inner_len -= 3;
-                } else {
-                    if (pos < outsz - 1) {
-                        out[pos++] = ':';
-                    }
-                }
-                /* Strip an optional `=matcher` suffix after the param name. */
-                size_t copy_len = inner_len;
-                for (size_t i = 0; i < inner_len; i++) {
-                    if (inner[i] == '=') {
-                        copy_len = i;
-                        break;
-                    }
-                }
-                if ((int)copy_len > outsz - 1 - pos) {
-                    copy_len = (size_t)(outsz - 1 - pos);
-                }
-                memcpy(out + pos, inner, copy_len);
-                pos += (int)copy_len;
-            } else {
-                size_t copy_len = seg_len;
-                if ((int)copy_len > outsz - 1 - pos) {
-                    copy_len = (size_t)(outsz - 1 - pos);
-                }
-                memcpy(out + pos, p, copy_len);
-                pos += (int)copy_len;
-            }
-            out[pos] = '\0';
+            sveltekit_append_segment(out, outsz, &pos, p, seg_len);
         }
-        p = seg_end + 1;
+        p = seg_end + SVK_PATH_CHAR_WIDTH;
     }
     if (pos == 0) {
         out[pos++] = '/';
@@ -1157,6 +1157,55 @@ typedef struct {
     int files_seen;
 } sveltekit_ctx_t;
 
+static const char *sveltekit_handler_method(int kind, const cbm_gbuf_node_t *child,
+                                            bool *is_actions) {
+    bool function = strcmp(child->label, "Function") == 0;
+    if (kind == SVK_FILE_KIND_SERVER) {
+        return sveltekit_server_method(child->name);
+    }
+    if (kind == SVK_FILE_KIND_PAGE_SERVER && strcmp(child->name, "actions") == 0) {
+        *is_actions = strcmp(child->label, "Variable") == 0;
+        return "ACTIONS";
+    }
+    if ((kind == SVK_FILE_KIND_PAGE_SERVER || kind == SVK_FILE_KIND_LAYOUT_SERVER) && function &&
+        strcmp(child->name, "load") == 0) {
+        return "LOAD";
+    }
+    return NULL;
+}
+
+static void sveltekit_emit_handler(sveltekit_ctx_t *ctx, const cbm_gbuf_node_t *child,
+                                   const char *route_path, const char *method, bool is_actions) {
+    char route_qn[CBM_ROUTE_QN_SIZE];
+    char cpath[CBM_SZ_256];
+    snprintf(route_qn, sizeof(route_qn), "__route__%s__%s", method,
+             cbm_route_canon_path(route_path, cpath, sizeof(cpath)));
+    char route_props[CBM_SZ_256];
+    snprintf(route_props, sizeof(route_props), "{\"method\":\"%s\",\"framework\":\"sveltekit\"}",
+             method);
+    cbm_node_id_t route_id =
+        cbm_gbuf_upsert_node(ctx->gb, "Route", route_path, route_qn, "", 0, 0, route_props);
+    if (!cbm_node_id_valid(route_id)) {
+        return;
+    }
+    ctx->routes_created++;
+    cbm_gbuf_prop_t properties[SVK_MAX_HANDLES_PROPS] = {
+        {.key = "handler",
+         .kind = CBM_EDGE_PROP_STRING,
+         .text = child->qualified_name ? child->qualified_name : child->name},
+        {.key = "framework", .kind = CBM_EDGE_PROP_STRING, .text = "sveltekit"},
+    };
+    int property_count = SVK_REQUIRED_HANDLES_PROPS;
+    if (is_actions) {
+        properties[property_count++] =
+            (cbm_gbuf_prop_t){.key = "via", .kind = CBM_EDGE_PROP_STRING, .text = "actions_object"};
+    }
+    cbm_gbuf_insert_edge_props(ctx->gb,
+                               (cbm_edge_endpoints_t){.source = child->id, .target = route_id},
+                               "HANDLES", properties, property_count);
+    ctx->handles_created++;
+}
+
 /* Process one File node: if it matches a SvelteKit server-side file,
  * synthesise a Route node and HANDLES edges from any handler functions
  * (or actions Variable) defined in the file. */
@@ -1190,65 +1239,15 @@ static void sveltekit_file_visitor(const cbm_gbuf_node_t *node, void *userdata) 
         if (!child || !child->name || !child->label) {
             continue;
         }
-        bool is_fn = strcmp(child->label, "Function") == 0;
-        bool is_var = strcmp(child->label, "Variable") == 0;
-        if (!is_fn && !is_var) {
+        if (strcmp(child->label, "Function") != 0 && strcmp(child->label, "Variable") != 0) {
             continue;
         }
-
-        const char *method = NULL;
         bool is_actions = false;
-        if (kind == 1) {
-            method = sveltekit_server_method(child->name);
-        } else if (kind == 2) {
-            if (is_fn && strcmp(child->name, "load") == 0) {
-                method = "LOAD";
-            } else if (strcmp(child->name, "actions") == 0) {
-                /* SvelteKit form actions: emit a single Route at this
-                 * path with method=ACTIONS; finer-grained action names
-                 * aren't exposed as top-level identifiers. */
-                method = "ACTIONS";
-                is_actions = is_var;
-            }
-        } else if (kind == 3) {
-            if (is_fn && strcmp(child->name, "load") == 0) {
-                method = "LOAD";
-            }
-        }
+        const char *method = sveltekit_handler_method(kind, child, &is_actions);
         if (!method) {
             continue;
         }
-
-        char route_qn[CBM_ROUTE_QN_SIZE];
-        char cpath[CBM_SZ_256];
-        snprintf(route_qn, sizeof(route_qn), "__route__%s__%s", method,
-                 cbm_route_canon_path(route_path, cpath, sizeof(cpath)));
-        char route_props[CBM_SZ_256];
-        snprintf(route_props, sizeof(route_props),
-                 "{\"method\":\"%s\",\"framework\":\"sveltekit\"}", method);
-        cbm_node_id_t route_id =
-            cbm_gbuf_upsert_node(ctx->gb, "Route", route_path, route_qn, "", 0, 0, route_props);
-        if (!cbm_node_id_valid(route_id)) {
-            continue;
-        }
-        ctx->routes_created++;
-
-        cbm_gbuf_prop_t hprops[SVK_MAX_HANDLES_PROPS];
-        int hprop_count = 0;
-        hprops[hprop_count++] =
-            (cbm_gbuf_prop_t){.key = "handler",
-                              .kind = CBM_EDGE_PROP_STRING,
-                              .text = child->qualified_name ? child->qualified_name : child->name};
-        hprops[hprop_count++] = (cbm_gbuf_prop_t){
-            .key = "framework", .kind = CBM_EDGE_PROP_STRING, .text = "sveltekit"};
-        if (is_actions) {
-            hprops[hprop_count++] = (cbm_gbuf_prop_t){
-                .key = "via", .kind = CBM_EDGE_PROP_STRING, .text = "actions_object"};
-        }
-        cbm_gbuf_insert_edge_props(ctx->gb,
-                                   (cbm_edge_endpoints_t){.source = child->id, .target = route_id},
-                                   "HANDLES", hprops, hprop_count);
-        ctx->handles_created++;
+        sveltekit_emit_handler(ctx, child, route_path, method, is_actions);
     }
 }
 

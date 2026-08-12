@@ -90,15 +90,7 @@ void cbm_cli_progress_finish(FILE *out, const char *tool_name, bool success, uin
     (void)fflush(stream);
 }
 
-/* Extract one string field from the logger's compact JSON format. Keys are
- * accepted only at object boundaries so worker-controlled values cannot spoof
- * a progress event by merely containing a key-shaped substring. */
-static const char *extract_json_field(const char *line, const char *key, char *buf, int buf_len) {
-    char needle[CBM_SZ_64];
-    int needle_len = snprintf(needle, sizeof(needle), "\"%s\":", key);
-    if (needle_len <= 0 || needle_len >= (int)sizeof(needle)) {
-        return NULL;
-    }
+static const char *json_field_value_start(const char *line, const char *needle, int needle_len) {
     const char *candidate = line;
     while ((candidate = strstr(candidate, needle)) != NULL) {
         const char *before = candidate;
@@ -109,49 +101,61 @@ static const char *extract_json_field(const char *line, const char *key, char *b
             candidate += needle_len;
             continue;
         }
-        const char *value = candidate + needle_len;
-        while (*value == ' ' || *value == '\t') {
-            value++;
-        }
-        if (*value++ != '\"') {
-            return NULL;
-        }
-        int offset = 0;
-        bool escaped = false;
-        while (*value && offset < buf_len - SKIP_ONE) {
-            if (!escaped && *value == '\"') {
-                buf[offset] = '\0';
-                return buf;
-            }
-            if (!escaped && *value == '\\') {
-                escaped = true;
-                value++;
-                continue;
-            }
-            if (escaped) {
-                switch (*value) {
-                case 'n':
-                    buf[offset++] = '\n';
-                    break;
-                case 'r':
-                    buf[offset++] = '\r';
-                    break;
-                case 't':
-                    buf[offset++] = '\t';
-                    break;
-                default:
-                    buf[offset++] = *value;
-                    break;
-                }
-                escaped = false;
-            } else {
-                buf[offset++] = *value;
-            }
-            value++;
-        }
-        return NULL;
+        return candidate + needle_len;
     }
     return NULL;
+}
+
+static char json_escape_character(char value) {
+    switch (value) {
+    case 'n':
+        return '\n';
+    case 'r':
+        return '\r';
+    case 't':
+        return '\t';
+    default:
+        return value;
+    }
+}
+
+static const char *json_decode_string(const char *value, char *buf, int buf_len) {
+    while (*value == ' ' || *value == '\t') {
+        value++;
+    }
+    if (*value++ != '\"') {
+        return NULL;
+    }
+    int offset = 0;
+    bool escaped = false;
+    while (*value && offset < buf_len - SKIP_ONE) {
+        if (!escaped && *value == '\"') {
+            buf[offset] = '\0';
+            return buf;
+        }
+        if (!escaped && *value == '\\') {
+            escaped = true;
+            value++;
+            continue;
+        }
+        buf[offset++] = escaped ? json_escape_character(*value) : *value;
+        escaped = false;
+        value++;
+    }
+    return NULL;
+}
+
+/* Extract one string field from the logger's compact JSON format. Keys are
+ * accepted only at object boundaries so worker-controlled values cannot spoof
+ * a progress event by merely containing a key-shaped substring. */
+static const char *extract_json_field(const char *line, const char *key, char *buf, int buf_len) {
+    char needle[CBM_SZ_64];
+    int needle_len = snprintf(needle, sizeof(needle), "\"%s\":", key);
+    if (needle_len <= 0 || needle_len >= (int)sizeof(needle)) {
+        return NULL;
+    }
+    const char *value = json_field_value_start(line, needle, needle_len);
+    return value ? json_decode_string(value, buf, buf_len) : NULL;
 }
 
 /* Extract a field from either structured text or JSON worker logs. */

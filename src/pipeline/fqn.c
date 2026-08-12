@@ -31,6 +31,24 @@
  * deep CJK path can triple past 255 and make the DB file un-openable (#624). */
 #define FQN_MAX_NAME_LEN 200
 
+enum {
+    FQN_PATH_BUF = 1024,
+    FQN_SEP_LEN = 1, /* one byte for the '/' separator */
+    FQN_NUL_LEN = 1, /* one byte for the terminating NUL */
+    FQN_DOTDOT_LEN = 2,
+    FQN_MIN_PY_DOTS = 1, /* first leading dot is "current package", not a pop */
+    FQN_REL_KIND_NONE = 0,
+    FQN_REL_KIND_PYTHON = 1,
+    FQN_REL_KIND_JS = 2,
+    FQN_HEX_CHARS_PER_BYTE = 2,
+};
+
+static const uint32_t FQN_FNV1A_OFFSET_BASIS = UINT32_C(2166136261);
+static const uint32_t FQN_FNV1A_PRIME = UINT32_C(16777619);
+static const unsigned char FQN_UTF8_CONTINUATION_MIN = 0x80U;
+static const unsigned int FQN_HEX_NIBBLE_WIDTH = 4U;
+static const unsigned int FQN_HEX_NIBBLE_MASK = 0x0FU;
+
 /* ── Internal helpers ─────────────────────────────────────────────── */
 
 /* Build a dot-joined string from segments. Returns heap-allocated string. */
@@ -172,7 +190,7 @@ char *cbm_pipeline_fqn_module_dir(const char *project, const char *rel_path, boo
         return cbm_pipeline_fqn_folder(project, "");
     }
     size_t dir_len = (size_t)(last_sep - src);
-    char *dir = (char *)malloc(dir_len + 1); /* +1 for NUL */
+    char *dir = (char *)malloc(dir_len + FQN_NUL_LEN);
     if (!dir) {
         return NULL;
     }
@@ -182,17 +200,6 @@ char *cbm_pipeline_fqn_module_dir(const char *project, const char *rel_path, boo
     free(dir);
     return res;
 }
-
-enum {
-    FQN_PATH_BUF = 1024,
-    FQN_SEP_LEN = 1, /* one byte for the '/' separator */
-    FQN_NUL_LEN = 1, /* one byte for the terminating NUL */
-    FQN_DOTDOT_LEN = 2,
-    FQN_MIN_PY_DOTS = 1, /* first leading dot is "current package", not a pop */
-    FQN_REL_KIND_NONE = 0,
-    FQN_REL_KIND_PYTHON = 1,
-    FQN_REL_KIND_JS = 2,
-};
 
 /* Append a single path segment to a mutable buffer that already holds a
  * normalized slash-separated path.  Adds a '/' separator when needed,
@@ -390,10 +397,10 @@ static char *fqn_bound_name_len(char *name) {
     if (n <= FQN_MAX_NAME_LEN) {
         return name; /* within cap → unchanged, no drift */
     }
-    uint32_t h = 2166136261U; /* FNV-1a offset basis over the FULL name */
+    uint32_t h = FQN_FNV1A_OFFSET_BASIS;
     for (size_t i = 0; i < n; i++) {
         h ^= (unsigned char)name[i];
-        h *= 16777619U;
+        h *= FQN_FNV1A_PRIME;
     }
     /* Keep first (CAP-9) bytes + "-" + 8 hex = CAP total. The buffer holds n+1
      * bytes and n > CAP, so writing 9 chars + NUL at offset (CAP-9) fits. */
@@ -413,14 +420,7 @@ static bool path_is_root_syntax(const char *path) {
     return true;
 }
 
-char *cbm_project_name_from_path(const char *abs_path) {
-    if (!abs_path || !abs_path[0]) {
-        return strdup("root");
-    }
-    if (path_is_root_syntax(abs_path)) {
-        return strdup("root");
-    }
-
+static char *fqn_normalized_project_path(const char *abs_path) {
     char real[CBM_SZ_4K];
     const char *name_path = abs_path;
     /* Wide-path canonicalization — the ANSI _access/_fullpath pair corrupted
@@ -429,16 +429,80 @@ char *cbm_project_name_from_path(const char *abs_path) {
         cbm_normalize_path_sep(real);
         name_path = real;
     }
-
-    /* Work on mutable copy */
     char *path = strdup(name_path);
+    if (path) {
+        cbm_normalize_path_sep(path);
+    }
+    return path;
+}
+
+static bool fqn_project_name_byte_is_safe(unsigned char byte) {
+    return (byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z') ||
+           (byte >= '0' && byte <= '9') || byte == '.' || byte == '_' || byte == '-';
+}
+
+static char *fqn_map_project_path(const char *path) {
+    static const char hex_digits[] = "0123456789abcdef";
+    size_t length = strlen(path);
+    char *mapped = malloc((length * FQN_HEX_CHARS_PER_BYTE) + FQN_NUL_LEN);
+    if (!mapped) {
+        return NULL;
+    }
+    size_t mapped_length = 0;
+    for (size_t i = 0; i < length; i++) {
+        unsigned char byte = (unsigned char)path[i];
+        if (fqn_project_name_byte_is_safe(byte)) {
+            mapped[mapped_length++] = (char)byte;
+        } else if (byte >= FQN_UTF8_CONTINUATION_MIN) {
+            mapped[mapped_length++] =
+                hex_digits[(byte >> FQN_HEX_NIBBLE_WIDTH) & FQN_HEX_NIBBLE_MASK];
+            mapped[mapped_length++] = hex_digits[byte & FQN_HEX_NIBBLE_MASK];
+        } else {
+            mapped[mapped_length++] = '-';
+        }
+    }
+    mapped[mapped_length] = '\0';
+    return mapped;
+}
+
+static bool fqn_project_name_char_repeats(char current, char previous) {
+    return (current == '-' && previous == '-') || (current == '.' && previous == '.');
+}
+
+static char *fqn_trim_project_name(char *path) {
+    char *destination = path;
+    char previous = 0;
+    for (char *source = path; *source; source++) {
+        if (!fqn_project_name_char_repeats(*source, previous)) {
+            *destination++ = *source;
+            previous = *source;
+        }
+    }
+    *destination = '\0';
+
+    char *start = path;
+    while (*start == '-' || *start == '.') {
+        start++;
+    }
+    size_t length = strlen(start);
+    while (length > 0 && start[length - SKIP_ONE] == '-') {
+        start[--length] = '\0';
+    }
+    return start;
+}
+
+char *cbm_project_name_from_path(const char *abs_path) {
+    if (!abs_path || !abs_path[0]) {
+        return strdup("root");
+    }
+    if (path_is_root_syntax(abs_path)) {
+        return strdup("root");
+    }
+
+    char *path = fqn_normalized_project_path(abs_path);
     if (!path) {
         return NULL;
     }
-    size_t len = strlen(path);
-
-    /* Normalize path separators */
-    cbm_normalize_path_sep(path);
 
     /* Map every character that is unsafe for portable project DB names. We
      * keep derived names in [A-Za-z0-9._-], so anything else — path
@@ -453,63 +517,20 @@ char *cbm_project_name_from_path(const char *abs_path) {
      * unrecognizable / colliding names (#571). Instead each non-ASCII byte is
      * transliterated to its two lowercase hex digits, which use only [0-9a-f]
      * and therefore stay validator-safe while preserving the segment. */
-    static const char hex_digits[] = "0123456789abcdef";
-    char *mapped = malloc((len * 2) + 1); /* worst case: every byte → 2 hex chars */
+    char *mapped = fqn_map_project_path(path);
+    free(path);
     if (!mapped) {
-        free(path);
         return strdup("root");
     }
-    size_t mlen = 0;
-    for (size_t i = 0; i < len; i++) {
-        unsigned char c = (unsigned char)path[i];
-        bool safe = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
-                    c == '.' || c == '_' || c == '-';
-        if (safe) {
-            mapped[mlen++] = (char)c;
-        } else if (c >= 0x80) {
-            mapped[mlen++] = hex_digits[(c >> 4) & 0xF];
-            mapped[mlen++] = hex_digits[c & 0xF];
-        } else {
-            mapped[mlen++] = '-';
-        }
-    }
-    mapped[mlen] = '\0';
-    free(path);
-    path = mapped;
-    len = mlen;
-
-    /* Collapse consecutive dashes, and consecutive dots (the validator also
-     * rejects any ".." sequence). */
-    char *dst = path;
-    char prev = 0;
-    for (size_t i = 0; i < len; i++) {
-        if ((path[i] == '-' && prev == '-') || (path[i] == '.' && prev == '.')) {
-            continue;
-        }
-        *dst++ = path[i];
-        prev = path[i];
-    }
-    *dst = '\0';
-
-    /* Trim leading dashes and dots (the validator rejects a leading dot). */
-    char *start = path;
-    while (*start == '-' || *start == '.') {
-        start++;
-    }
-
-    /* Trim trailing dashes */
-    size_t slen = strlen(start);
-    while (slen > 0 && start[slen - SKIP_ONE] == '-') {
-        start[--slen] = '\0';
-    }
+    char *start = fqn_trim_project_name(mapped);
 
     if (*start == '\0') {
-        free(path);
+        free(mapped);
         return strdup("root");
     }
 
     char *result = strdup(start);
-    free(path);
+    free(mapped);
     if (result) {
         result = fqn_bound_name_len(result); /* #624: cap filename-component length */
     }

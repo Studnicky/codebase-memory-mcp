@@ -93,6 +93,9 @@ CBM_BIN="$ROOT/build/c/codebase-memory-mcp"
 [ -x "$CBM_BIN" ] || CBM_BIN="$ROOT/build/c/codebase-memory-mcp.exe"
 if [ -x "$CBM_BIN" ]; then
     echo "=== complexity ratchet (live graph vs. complexity.allow) ==="
+    CBM_LINT_CACHE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/cbm-lint-cache.XXXXXX")"
+    trap 'rm -rf "$CBM_LINT_CACHE_DIR"' EXIT
+    export CBM_CACHE_DIR="$CBM_LINT_CACHE_DIR"
     "$CBM_BIN" cli index_repository --repo-path "$ROOT" --mode full
     python3 "$ROOT/scripts/check-complexity.py" --binary "$CBM_BIN"
 else

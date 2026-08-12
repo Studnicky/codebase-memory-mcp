@@ -109,11 +109,14 @@ static int cbm_powershell_quote_word(const char *value, char *out, size_t out_si
 #include <sys/stat.h> // mode_t, S_IXUSR
 #include <time.h>
 #include <wchar.h>
+#ifdef CBM_CLI_ENABLE_TEST_API
 /* ZLIB_CONST retypes z_stream.next_in as `const Bytef *`, which is what it
  * has always meant — inflate() never writes through it. Without this the
  * field is non-const and every input pointer needs its qualifier removed
  * to assign it. Must precede <zlib.h>. */
 #define ZLIB_CONST
+#include <zlib.h>
+#endif
 #ifdef _WIN32
 #include <io.h>
 #include "foundation/win_utf8.h"
@@ -126,6 +129,39 @@ static int cbm_powershell_quote_word(const char *value, char *out, size_t out_si
 
 /* Directory permissions: rwxr-x--- */
 #define DIR_PERMS 0750
+
+enum {
+    CLI_C_STRING_TERMINATOR_BYTES = 1,
+    CLI_FILE_ITEM_SIZE_BYTES = 1,
+    CLI_ARRAY_INDEX_FIRST = 0,
+    CLI_ARRAY_INDEX_SECOND = 1,
+    CLI_ARRAY_INDEX_THIRD = 2,
+    CLI_ARRAY_LENGTH_ONE = 1,
+    CLI_ARRAY_LENGTH_TWO = 2,
+    CLI_ARRAY_LENGTH_THREE = 3,
+    CLI_JSON_PATH_DEPTH_ROOT = 0,
+    CLI_JSON_PATH_DEPTH_ONE = 1,
+    CLI_JSON_PATH_DEPTH_TWO = 2,
+    CLI_JSON_PATH_DEPTH_THREE = 3,
+    CLI_STATUS_SUCCESS = 0,
+    CLI_STATUS_PRESENT = 1,
+    CLI_STATUS_FAILURE = -1,
+    CLI_FILE_REPLACE_EXISTING = 1,
+    CLI_DIRECTORY_PERMS_OWNER_ONLY = 0700,
+    CLI_ABI_VERSION_INITIAL = 1,
+    CLI_UINT64_MAX_SAFE_OFFSET = 1,
+    CLI_UINT32_MAX_SAFE_VALUE = 1,
+    CLI_ASCII_CONTROL_FIRST_PRINTABLE = 0x20,
+    CLI_ASCII_DELETE = 0x7f,
+    CLI_HEX_DIGIT_BITS = 4,
+    CLI_HEX_DIGIT_MASK = 0x0f,
+    CLI_HEX_LETTER_OFFSET = 10,
+    CLI_SHA256_HEX_CHAR_WIDTH = 2,
+    CLI_CAPACITY_GROWTH_FACTOR = 2,
+    CLI_DECIMAL_RADIX = 10,
+    CLI_RELEASED_DOCUMENT_CAPACITY = 3,
+    CLI_EDIT_DISTANCE_MINIMUM_LIMIT = 2,
+};
 
 /* Decompression buffer cap (500 MB) */
 #define DECOMPRESS_MAX_BYTES ((size_t)500 * CLI_BUF_1K * CBM_SZ_1K)
@@ -167,7 +203,7 @@ typedef struct {
     cbm_daemon_build_identity_t identity;
     char source_build[CBM_DAEMON_BUILD_FINGERPRINT_SIZE];
     char canonical_cache[CLI_BUF_4K];
-    char cache_fingerprint[CBM_SHA256_HEX_LEN + 1];
+    char cache_fingerprint[CBM_SHA256_HEX_LEN + CLI_C_STRING_TERMINATOR_BYTES];
     char *original_cache_environment;
     cbm_daemon_runtime_activation_action_t action;
     cbm_daemon_runtime_activation_result_t daemon_result;
@@ -224,7 +260,7 @@ int cbm_cli_activation_guard_with_ops(const cbm_cli_activation_ops_t *ops,
 
     cbm_cli_activation_lock_t mutation_lease = NULL;
     int reserve_status = ops->reserve_for_mutation(ops->context, &mutation_lease);
-    if (reserve_status != 1 || !mutation_lease) {
+    if (reserve_status != CLI_STATUS_PRESENT || !mutation_lease) {
         /* A failed reservation must not normally return authority, but the
          * boundary is injectable and production can surface cleanup-only
          * state after an I/O failure. Never strand such a lease. */
@@ -278,8 +314,8 @@ static const char *cli_activation_action_text(cbm_daemon_runtime_activation_acti
 
 static uint64_t cli_activation_deadline_after(uint32_t timeout_ms) {
     uint64_t now = cbm_now_ms();
-    if (now >= UINT64_MAX - (uint64_t)timeout_ms - 1U) {
-        return UINT64_MAX - 1U;
+    if (now >= UINT64_MAX - (uint64_t)timeout_ms - CLI_UINT64_MAX_SAFE_OFFSET) {
+        return UINT64_MAX - CLI_UINT64_MAX_SAFE_OFFSET;
     }
     return now + (uint64_t)timeout_ms;
 }
@@ -334,7 +370,8 @@ static bool cli_activation_log_event(cli_activation_production_context_t *contex
     size_t json_size = 0;
     char *json = encoded ? yyjson_mut_write(document, 0, &json_size) : NULL;
     bool written =
-        json && json_size > 0 && fwrite(json, 1, json_size, context->activation_log) == json_size &&
+        json && json_size > 0 &&
+        fwrite(json, CLI_FILE_ITEM_SIZE_BYTES, json_size, context->activation_log) == json_size &&
         fputc('\n', context->activation_log) != EOF && fflush(context->activation_log) == 0;
     if (written) {
         int descriptor = cbm_fileno(context->activation_log);
@@ -354,14 +391,14 @@ static int cli_activation_startup_lock_acquire(cli_activation_production_context
         return CLI_ERR;
     }
     if (context->startup_lock) {
-        return 1;
+        return CLI_STATUS_PRESENT;
     }
     do {
         cbm_daemon_ipc_startup_lock_t *lock = NULL;
         int status = cbm_daemon_ipc_startup_lock_try_acquire(context->endpoint, &lock);
-        if (status == 1 && lock) {
+        if (status == CLI_STATUS_PRESENT && lock) {
             context->startup_lock = lock;
-            return 1;
+            return CLI_STATUS_PRESENT;
         }
         if (status < 0) {
             return CLI_ERR;
@@ -403,10 +440,10 @@ static uint32_t cli_activation_remaining_timeout(
     const cli_activation_production_context_t *context) {
     uint64_t now = cbm_now_ms();
     if (!context || now >= context->control_deadline_ms) {
-        return 1U;
+        return CLI_UINT32_MAX_SAFE_VALUE;
     }
     uint64_t remaining = context->control_deadline_ms - now;
-    return remaining >= UINT32_MAX ? UINT32_MAX - 1U : (uint32_t)remaining;
+    return remaining >= UINT32_MAX ? UINT32_MAX - CLI_UINT32_MAX_SAFE_VALUE : (uint32_t)remaining;
 }
 
 static uint64_t cli_activation_count_add(uint64_t left, uint64_t right) {
@@ -504,7 +541,8 @@ static int cli_activation_production_reserve(void *opaque, cbm_cli_activation_lo
      * maintenance+admission+lifetime are all held EX may activation acquire
      * startup in the final global order and retain it through mutation. */
     context->control_deadline_ms = cli_activation_deadline_after(CLI_ACTIVATION_CONTROL_TIMEOUT_MS);
-    if (!context->startup_lock && cli_activation_startup_lock_acquire(context) != 1) {
+    if (!context->startup_lock &&
+        cli_activation_startup_lock_acquire(context) != CLI_STATUS_PRESENT) {
         cli_activation_release_cleanup_lease(context, &lease);
         context->cohort_lease = lease;
         return CLI_ERR;
@@ -515,7 +553,7 @@ static int cli_activation_production_reserve(void *opaque, cbm_cli_activation_lo
         cli_activation_startup_lock_release_complete(context);
         cli_activation_release_cleanup_lease(context, &lease);
         context->cohort_lease = lease;
-        return generation == 1 ? 0 : CLI_ERR;
+        return generation == CLI_STATUS_PRESENT ? CLI_STATUS_SUCCESS : CLI_ERR;
     }
 
     context->cohort_lease = lease;
@@ -529,7 +567,7 @@ static int cli_activation_production_reserve(void *opaque, cbm_cli_activation_lo
     }
     context->mutation_authorized = true;
     *lease_out = lease;
-    return 1;
+    return CLI_STATUS_PRESENT;
 }
 
 static void cli_activation_production_release(void *opaque, cbm_cli_activation_lock_t lease) {
@@ -584,7 +622,7 @@ static bool cli_activation_production_context_init(cli_activation_production_con
                        cbm_canonical_path(requested_cache, context->canonical_cache,
                                           sizeof(context->canonical_cache));
     if (!cache_ready && requested_cache && requested_cache[0] &&
-        cbm_mkdir_p(requested_cache, 0700)) {
+        cbm_mkdir_p(requested_cache, CLI_DIRECTORY_PERMS_OWNER_ONLY)) {
         cache_ready = cbm_canonical_path(requested_cache, context->canonical_cache,
                                          sizeof(context->canonical_cache));
     }
@@ -593,7 +631,7 @@ static bool cli_activation_production_context_init(cli_activation_production_con
         return false;
     }
     cbm_normalize_path_sep(context->canonical_cache);
-    if (cbm_setenv("CBM_CACHE_DIR", context->canonical_cache, 1) != 0) {
+    if (cbm_setenv("CBM_CACHE_DIR", context->canonical_cache, CLI_FILE_REPLACE_EXISTING) != 0) {
         return false;
     }
     context->cache_environment_overridden = true;
@@ -619,8 +657,8 @@ static bool cli_activation_production_context_init(cli_activation_production_con
         .build_fingerprint = context->source_build,
         .cache_fingerprint = context->cache_fingerprint,
         .protocol_abi = CBM_DAEMON_RUNTIME_WIRE_ABI,
-        .store_abi = 1,
-        .feature_abi = 1,
+        .store_abi = CLI_ABI_VERSION_INITIAL,
+        .feature_abi = CLI_ABI_VERSION_INITIAL,
     };
     char log_dir[CLI_BUF_4K + CLI_BUF_16];
     int written = snprintf(log_dir, sizeof(log_dir), "%s/logs", context->canonical_cache);
@@ -659,10 +697,10 @@ static void cli_activation_production_context_close(cli_activation_production_co
     cbm_daemon_ipc_endpoint_free(context->endpoint);
     context->endpoint = NULL;
     if (context->cache_environment_overridden) {
-        int restore_result =
-            context->original_cache_environment_present
-                ? cbm_setenv("CBM_CACHE_DIR", context->original_cache_environment, 1)
-                : cbm_unsetenv("CBM_CACHE_DIR");
+        int restore_result = context->original_cache_environment_present
+                                 ? cbm_setenv("CBM_CACHE_DIR", context->original_cache_environment,
+                                              CLI_FILE_REPLACE_EXISTING)
+                                 : cbm_unsetenv("CBM_CACHE_DIR");
         if (restore_result != 0) {
             context->cleanup_ok = false;
         }
@@ -1563,16 +1601,17 @@ static char *cbm_build_json_mcp_entry(const char *binary_path, cbm_json_mcp_sche
     return json;
 }
 
-static size_t cbm_json_mcp_ownership_fields(cbm_json_mcp_schema_t schema, const char *argument,
-                                            cbm_json_like_object_field_t fields[3]) {
-    fields[0] = (cbm_json_like_object_field_t){
+static size_t cbm_json_mcp_ownership_fields(
+    cbm_json_mcp_schema_t schema, const char *argument,
+    cbm_json_like_object_field_t fields[CLI_ARRAY_LENGTH_THREE]) {
+    fields[CLI_ARRAY_INDEX_FIRST] = (cbm_json_like_object_field_t){
         .key = "command",
         .shape = cbm_json_mcp_command_is_array(schema) ? CBM_JSON_LIKE_VALUE_SINGLE_STRING_ARRAY
                                                        : CBM_JSON_LIKE_VALUE_STRING,
         .expected_string = NULL,
         .flags = CBM_JSON_LIKE_FIELD_REQUIRED | CBM_JSON_LIKE_FIELD_CAPTURE_STRING,
     };
-    fields[1] = (cbm_json_like_object_field_t){
+    fields[CLI_ARRAY_INDEX_SECOND] = (cbm_json_like_object_field_t){
         .key = "args",
         .shape =
             argument ? CBM_JSON_LIKE_VALUE_SINGLE_STRING_ARRAY : CBM_JSON_LIKE_VALUE_EMPTY_ARRAY,
@@ -1581,15 +1620,15 @@ static size_t cbm_json_mcp_ownership_fields(cbm_json_mcp_schema_t schema, const 
     };
     const char *type = cbm_json_mcp_required_type(schema);
     if (!type) {
-        return 2U;
+        return CLI_ARRAY_LENGTH_TWO;
     }
-    fields[2] = (cbm_json_like_object_field_t){
+    fields[CLI_ARRAY_INDEX_THIRD] = (cbm_json_like_object_field_t){
         .key = "type",
         .shape = CBM_JSON_LIKE_VALUE_STRING,
         .expected_string = type,
         .flags = CBM_JSON_LIKE_FIELD_REQUIRED,
     };
-    return 3U;
+    return CLI_ARRAY_LENGTH_THREE;
 }
 
 /* The running executable is trustworthy identity evidence: install/update can
@@ -1900,7 +1939,7 @@ static int cbm_json_mcp_snapshot_ownership(const char *document, size_t document
                                            cbm_json_mcp_schema_t schema, const char *entry_name,
                                            const char *argument, const char *expected_binary,
                                            const char *previous_managed_binary) {
-    cbm_json_like_object_field_t fields[3];
+    cbm_json_like_object_field_t fields[CLI_ARRAY_LENGTH_THREE];
     size_t field_count = cbm_json_mcp_ownership_fields(schema, argument, fields);
     char *command = NULL;
     int result = cbm_json_like_match_object_entry(document, document_length, object_path, path_len,
@@ -1951,8 +1990,8 @@ static int cbm_upsert_json_named_mcp(const char *binary_path, const char *config
         return CLI_ERR;
     }
     int edit_result = cbm_json_like_upsert_entry_if_unchanged(
-        config_path, object_path, path_len, entry_name, entry, read_result == 1 ? NULL : document,
-        document_length);
+        config_path, object_path, path_len, entry_name, entry,
+        read_result == CLI_STATUS_PRESENT ? NULL : document, document_length);
     free(entry);
     free(document);
     return edit_result == 0 ? CLI_OK : CLI_ERR;
@@ -1975,7 +2014,7 @@ static int cbm_remove_json_named_mcp(const char *config_path, const char *const 
     char *document = NULL;
     size_t document_length = 0U;
     int read_result = cbm_json_like_read_document(config_path, &document, &document_length);
-    if (read_result == 1) {
+    if (read_result == CLI_STATUS_PRESENT) {
         free(document);
         return CLI_OK;
     }
@@ -2012,7 +2051,8 @@ static int cbm_remove_json_mcp(const char *config_path, const char *const *objec
 
 int cbm_install_editor_mcp(const char *binary_path, const char *config_path) {
     static const char *const path[] = {"mcpServers"};
-    return cbm_upsert_json_mcp(binary_path, config_path, path, 1U, CBM_JSON_MCP_STANDARD);
+    return cbm_upsert_json_mcp(binary_path, config_path, path, CLI_JSON_PATH_DEPTH_ONE,
+                               CBM_JSON_MCP_STANDARD);
 }
 
 #ifdef CBM_CLI_ENABLE_TEST_API
@@ -2029,29 +2069,34 @@ int cbm_install_editor_mcp_with_previous_for_testing(const char *binary_path,
 
 int cbm_remove_editor_mcp(const char *config_path) {
     static const char *const path[] = {"mcpServers"};
-    return cbm_remove_json_mcp(config_path, path, 1U, CBM_JSON_MCP_STANDARD, NULL);
+    return cbm_remove_json_mcp(config_path, path, CLI_JSON_PATH_DEPTH_ONE, CBM_JSON_MCP_STANDARD,
+                               NULL);
 }
 
 int cbm_remove_editor_mcp_owned(const char *binary_path, const char *config_path) {
     static const char *const path[] = {"mcpServers"};
-    return cbm_remove_json_mcp(config_path, path, 1U, CBM_JSON_MCP_STANDARD, binary_path);
+    return cbm_remove_json_mcp(config_path, path, CLI_JSON_PATH_DEPTH_ONE, CBM_JSON_MCP_STANDARD,
+                               binary_path);
 }
 
 /* ── OpenClaw MCP (nested mcp.servers with command + args) ────── */
 
 int cbm_install_openclaw_mcp(const char *binary_path, const char *config_path) {
     static const char *const path[] = {"mcp", "servers"};
-    return cbm_upsert_json_mcp(binary_path, config_path, path, 2U, CBM_JSON_MCP_OPENCLAW);
+    return cbm_upsert_json_mcp(binary_path, config_path, path, CLI_JSON_PATH_DEPTH_TWO,
+                               CBM_JSON_MCP_OPENCLAW);
 }
 
 int cbm_remove_openclaw_mcp(const char *config_path) {
     static const char *const path[] = {"mcp", "servers"};
-    return cbm_remove_json_mcp(config_path, path, 2U, CBM_JSON_MCP_OPENCLAW, NULL);
+    return cbm_remove_json_mcp(config_path, path, CLI_JSON_PATH_DEPTH_TWO, CBM_JSON_MCP_OPENCLAW,
+                               NULL);
 }
 
 int cbm_remove_openclaw_mcp_owned(const char *binary_path, const char *config_path) {
     static const char *const path[] = {"mcp", "servers"};
-    return cbm_remove_json_mcp(config_path, path, 2U, CBM_JSON_MCP_OPENCLAW, binary_path);
+    return cbm_remove_json_mcp(config_path, path, CLI_JSON_PATH_DEPTH_TWO, CBM_JSON_MCP_OPENCLAW,
+                               binary_path);
 }
 
 static const char cbm_openclaw_compaction_section[] =
@@ -2059,7 +2104,8 @@ static const char cbm_openclaw_compaction_section[] =
 
 static int cbm_upsert_openclaw_compaction(const char *config_path) {
     static const char *const path[] = {"agents", "defaults", "compaction"};
-    return cbm_json_like_add_unique_string_at_path(config_path, path, 3U, "postCompactionSections",
+    return cbm_json_like_add_unique_string_at_path(config_path, path, CLI_JSON_PATH_DEPTH_THREE,
+                                                   "postCompactionSections",
                                                    cbm_openclaw_compaction_section) == 0
                ? CLI_OK
                : CLI_ERR;
@@ -2067,7 +2113,8 @@ static int cbm_upsert_openclaw_compaction(const char *config_path) {
 
 static int cbm_remove_openclaw_compaction(const char *config_path) {
     static const char *const path[] = {"agents", "defaults", "compaction"};
-    return cbm_json_like_remove_string_at_path(config_path, path, 3U, "postCompactionSections",
+    return cbm_json_like_remove_string_at_path(config_path, path, CLI_JSON_PATH_DEPTH_THREE,
+                                               "postCompactionSections",
                                                cbm_openclaw_compaction_section) == 0
                ? CLI_OK
                : CLI_ERR;
@@ -2077,34 +2124,40 @@ static int cbm_remove_openclaw_compaction(const char *config_path) {
 
 int cbm_install_vscode_mcp(const char *binary_path, const char *config_path) {
     static const char *const path[] = {"servers"};
-    return cbm_upsert_json_mcp(binary_path, config_path, path, 1U, CBM_JSON_MCP_VSCODE);
+    return cbm_upsert_json_mcp(binary_path, config_path, path, CLI_JSON_PATH_DEPTH_ONE,
+                               CBM_JSON_MCP_VSCODE);
 }
 
 int cbm_remove_vscode_mcp(const char *config_path) {
     static const char *const path[] = {"servers"};
-    return cbm_remove_json_mcp(config_path, path, 1U, CBM_JSON_MCP_VSCODE, NULL);
+    return cbm_remove_json_mcp(config_path, path, CLI_JSON_PATH_DEPTH_ONE, CBM_JSON_MCP_VSCODE,
+                               NULL);
 }
 
 int cbm_remove_vscode_mcp_owned(const char *binary_path, const char *config_path) {
     static const char *const path[] = {"servers"};
-    return cbm_remove_json_mcp(config_path, path, 1U, CBM_JSON_MCP_VSCODE, binary_path);
+    return cbm_remove_json_mcp(config_path, path, CLI_JSON_PATH_DEPTH_ONE, CBM_JSON_MCP_VSCODE,
+                               binary_path);
 }
 
 /* ── Zed MCP (context_servers with command + args) ────────────── */
 
 int cbm_install_zed_mcp(const char *binary_path, const char *config_path) {
     static const char *const path[] = {"context_servers"};
-    return cbm_upsert_json_mcp(binary_path, config_path, path, 1U, CBM_JSON_MCP_STANDARD);
+    return cbm_upsert_json_mcp(binary_path, config_path, path, CLI_JSON_PATH_DEPTH_ONE,
+                               CBM_JSON_MCP_STANDARD);
 }
 
 int cbm_remove_zed_mcp(const char *config_path) {
     static const char *const path[] = {"context_servers"};
-    return cbm_remove_json_mcp(config_path, path, 1U, CBM_JSON_MCP_STANDARD, NULL);
+    return cbm_remove_json_mcp(config_path, path, CLI_JSON_PATH_DEPTH_ONE, CBM_JSON_MCP_STANDARD,
+                               NULL);
 }
 
 int cbm_remove_zed_mcp_owned(const char *binary_path, const char *config_path) {
     static const char *const path[] = {"context_servers"};
-    return cbm_remove_json_mcp(config_path, path, 1U, CBM_JSON_MCP_STANDARD, binary_path);
+    return cbm_remove_json_mcp(config_path, path, CLI_JSON_PATH_DEPTH_ONE, CBM_JSON_MCP_STANDARD,
+                               binary_path);
 }
 
 /* ── Agent detection ──────────────────────────────────────────── */
@@ -2206,13 +2259,16 @@ static bool cbm_expand_user_path(const char *home_dir, const char *value, char *
     if (!home_dir || !home_dir[0] || !value || !value[0] || !out || out_sz == 0U) {
         return false;
     }
-    int written = -1;
+    int written = CLI_STATUS_FAILURE;
     if (strcmp(value, "~") == 0) {
         written = snprintf(out, out_sz, "%s", home_dir);
-    } else if (value[0] == '~' && (value[1] == '/' || value[1] == '\\')) {
-        written = snprintf(out, out_sz, "%s/%s", home_dir, value + 2);
-    } else if (value[0] == '/' || (isalpha((unsigned char)value[0]) && value[1] == ':' &&
-                                   (value[2] == '/' || value[2] == '\\'))) {
+    } else if (value[CLI_ARRAY_INDEX_FIRST] == '~' &&
+               (value[CLI_ARRAY_INDEX_SECOND] == '/' || value[CLI_ARRAY_INDEX_SECOND] == '\\')) {
+        written = snprintf(out, out_sz, "%s/%s", home_dir, value + CLI_ARRAY_LENGTH_TWO);
+    } else if (value[CLI_ARRAY_INDEX_FIRST] == '/' ||
+               (isalpha((unsigned char)value[CLI_ARRAY_INDEX_FIRST]) &&
+                value[CLI_ARRAY_INDEX_SECOND] == ':' &&
+                (value[CLI_ARRAY_INDEX_THIRD] == '/' || value[CLI_ARRAY_INDEX_THIRD] == '\\'))) {
         written = snprintf(out, out_sz, "%s", value);
     }
     return written >= 0 && (size_t)written < out_sz;
@@ -2321,8 +2377,8 @@ static bool cbm_openclaw_workspace_path(const char *home_dir, const char *config
     }
     static const char *const defaults_path[] = {"agents", "defaults"};
     char *configured = NULL;
-    int lookup =
-        cbm_json_like_get_string_at_path(config_path, defaults_path, 2U, "workspace", &configured);
+    int lookup = cbm_json_like_get_string_at_path(
+        config_path, defaults_path, CLI_JSON_PATH_DEPTH_TWO, "workspace", &configured);
     if (lookup == 0) {
         bool ok = cbm_expand_user_path(internal_home, configured, out, out_sz);
         free(configured);
@@ -2338,10 +2394,10 @@ static bool cbm_openclaw_workspace_path(const char *home_dir, const char *config
      * never guess the default workspace when an include may define it. */
     static const char *const root_path[] = {NULL};
     char *include_value = NULL;
-    int include_lookup =
-        cbm_json_like_get_string_at_path(config_path, root_path, 0U, "$include", &include_value);
+    int include_lookup = cbm_json_like_get_string_at_path(
+        config_path, root_path, CLI_JSON_PATH_DEPTH_ROOT, "$include", &include_value);
     free(include_value);
-    if (include_lookup != 1) {
+    if (include_lookup != CLI_STATUS_PRESENT) {
         return false;
     }
 
@@ -2516,44 +2572,43 @@ static int cbm_resolve_released_hook_command(const char *script_name, char *out,
     return written > 0 && (size_t)written < out_sz ? CLI_OK : CLI_ERR;
 }
 
-cbm_detected_agents_t cbm_detect_agents(const char *home_dir, cbm_scan_mode_t mode) {
-    cbm_detected_agents_t agents;
-    memset(&agents, 0, sizeof(agents));
-    if (!home_dir || !home_dir[0]) {
-        return agents;
-    }
-
+static void cli_detect_primary_agents(cbm_detected_agents_t *agents, const char *home_dir,
+                                      cbm_scan_mode_t mode) {
     char path[CLI_BUF_1K];
-
     cbm_claude_config_dir(home_dir, path, sizeof(path));
-    agents.claude_code = path[0] != '\0' && dir_exists(path);
+    agents->claude_code = path[0] != '\0' && dir_exists(path);
 
     cbm_codex_config_dir(home_dir, path, sizeof(path));
-    agents.codex = path[0] != '\0' && dir_exists(path);
+    agents->codex = path[0] != '\0' && dir_exists(path);
 
     snprintf(path, sizeof(path), "%s/.gemini/antigravity-cli", home_dir);
-    agents.antigravity = dir_exists(path) || cbm_agent_cli_exists("antigravity", home_dir, mode);
+    agents->antigravity = dir_exists(path) || cbm_agent_cli_exists("antigravity", home_dir, mode);
 
     snprintf(path, sizeof(path), "%s/.gemini/settings.json", home_dir);
-    agents.gemini = cbm_file_exists(path) || cbm_agent_cli_exists("gemini", home_dir, mode);
+    agents->gemini = cbm_file_exists(path) || cbm_agent_cli_exists("gemini", home_dir, mode);
 
     cbm_zed_config_dir(home_dir, path, sizeof(path));
-    agents.zed = dir_exists(path);
+    agents->zed = dir_exists(path);
 
     cbm_opencode_config_path(home_dir, path, sizeof(path));
-    agents.opencode = cbm_file_exists(path) || cbm_agent_cli_exists("opencode", home_dir, mode);
-    if (!agents.opencode) {
+    agents->opencode = cbm_file_exists(path) || cbm_agent_cli_exists("opencode", home_dir, mode);
+    if (!agents->opencode) {
         snprintf(path, sizeof(path), "%s/.config/opencode", home_dir);
-        agents.opencode = dir_exists(path);
+        agents->opencode = dir_exists(path);
     }
-    if (!agents.opencode) {
+    if (!agents->opencode) {
         char env_buf[CLI_BUF_1K];
         const char *config_dir =
             cbm_safe_getenv("OPENCODE_CONFIG_DIR", env_buf, sizeof(env_buf), NULL);
-        agents.opencode = config_dir && config_dir[0] && dir_exists(config_dir);
+        agents->opencode = config_dir && config_dir[0] && dir_exists(config_dir);
     }
 
-    agents.aider = cbm_agent_cli_exists("aider", home_dir, mode);
+    agents->aider = cbm_agent_cli_exists("aider", home_dir, mode);
+}
+
+static void cli_detect_desktop_agents(cbm_detected_agents_t *agents, const char *home_dir,
+                                      cbm_scan_mode_t mode) {
+    char path[CLI_BUF_1K];
 
 #ifdef __APPLE__
     snprintf(path, sizeof(path),
@@ -2564,10 +2619,10 @@ cbm_detected_agents_t cbm_detect_agents(const char *home_dir, cbm_scan_mode_t mo
 #else
     snprintf(path, sizeof(path), "%s/.config/Code/User/globalStorage/kilocode.kilo-code", home_dir);
 #endif
-    agents.kilocode = dir_exists(path);
+    agents->kilocode = dir_exists(path);
     snprintf(path, sizeof(path), "%s/.config/kilo", home_dir);
-    agents.kilocode =
-        agents.kilocode || dir_exists(path) || cbm_agent_cli_exists("kilo", home_dir, mode);
+    agents->kilocode =
+        agents->kilocode || dir_exists(path) || cbm_agent_cli_exists("kilo", home_dir, mode);
 
 #ifdef __APPLE__
     snprintf(path, sizeof(path), "%s/Library/Application Support/Code/User", home_dir);
@@ -2576,17 +2631,22 @@ cbm_detected_agents_t cbm_detect_agents(const char *home_dir, cbm_scan_mode_t mo
 #else
     snprintf(path, sizeof(path), "%s/.config/Code/User", home_dir);
 #endif
-    agents.vscode = dir_exists(path);
+    agents->vscode = dir_exists(path);
 
     /* Cursor stores its user MCP config in ~/.cursor/mcp.json on all platforms. */
     snprintf(path, sizeof(path), "%s/.cursor", home_dir);
-    agents.cursor = dir_exists(path);
+    agents->cursor = dir_exists(path);
 
     snprintf(path, sizeof(path), "%s/.codeium/windsurf", home_dir);
-    agents.windsurf = dir_exists(path);
+    agents->windsurf = dir_exists(path);
 
     snprintf(path, sizeof(path), "%s/.augment", home_dir);
-    agents.augment = dir_exists(path) || cbm_agent_cli_exists("auggie", home_dir, mode);
+    agents->augment = dir_exists(path) || cbm_agent_cli_exists("auggie", home_dir, mode);
+}
+
+static void cli_detect_extended_agents(cbm_detected_agents_t *agents, const char *home_dir,
+                                       cbm_scan_mode_t mode) {
+    char path[CLI_BUF_1K];
 
     char openclaw_config[CLI_BUF_1K];
     char openclaw_state[CLI_BUF_1K];
@@ -2594,45 +2654,51 @@ cbm_detected_agents_t cbm_detect_agents(const char *home_dir, cbm_scan_mode_t mo
         cbm_openclaw_config_path(home_dir, openclaw_config, sizeof(openclaw_config));
     bool has_openclaw_state =
         cbm_openclaw_state_dir(home_dir, openclaw_state, sizeof(openclaw_state));
-    agents.openclaw = (has_openclaw_config && cbm_file_exists(openclaw_config)) ||
-                      (has_openclaw_state && dir_exists(openclaw_state)) ||
-                      cbm_agent_cli_exists("openclaw", home_dir, mode);
+    agents->openclaw = (has_openclaw_config && cbm_file_exists(openclaw_config)) ||
+                       (has_openclaw_state && dir_exists(openclaw_state)) ||
+                       cbm_agent_cli_exists("openclaw", home_dir, mode);
 
     cbm_kiro_home_dir(home_dir, path, sizeof(path));
-    agents.kiro =
+    agents->kiro =
         path[0] && (dir_exists(path) || cbm_agent_cli_exists("kiro-cli", home_dir, mode) ||
                     cbm_agent_cli_exists("kiro", home_dir, mode));
 
     /* Junie (JetBrains): ~/.junie/ */
     snprintf(path, sizeof(path), "%s/.junie", home_dir);
-    agents.junie = dir_exists(path);
+    agents->junie = dir_exists(path);
 
     cbm_hermes_home_dir(home_dir, path, sizeof(path));
-    agents.hermes = path[0] && (dir_exists(path) || cbm_agent_cli_exists("hermes", home_dir, mode));
+    agents->hermes =
+        path[0] && (dir_exists(path) || cbm_agent_cli_exists("hermes", home_dir, mode));
 
     snprintf(path, sizeof(path), "%s/.openhands", home_dir);
-    agents.openhands = dir_exists(path) || cbm_agent_cli_exists("openhands", home_dir, mode);
+    agents->openhands = dir_exists(path) || cbm_agent_cli_exists("openhands", home_dir, mode);
 
     char cline_root[CLI_BUF_1K];
     char cline_data[CLI_BUF_1K];
     cbm_cline_root_dir(home_dir, cline_root, sizeof(cline_root));
     cbm_cline_data_dir(home_dir, cline_data, sizeof(cline_data));
-    agents.cline = (cline_root[0] && dir_exists(cline_root)) ||
-                   (cline_data[0] && dir_exists(cline_data)) ||
-                   cbm_agent_cli_exists("cline", home_dir, mode);
+    agents->cline = (cline_root[0] && dir_exists(cline_root)) ||
+                    (cline_data[0] && dir_exists(cline_data)) ||
+                    cbm_agent_cli_exists("cline", home_dir, mode);
 
     snprintf(path, sizeof(path), "%s/.warp", home_dir);
-    agents.warp = dir_exists(path);
+    agents->warp = dir_exists(path);
 #if !defined(__APPLE__) && !defined(_WIN32)
     snprintf(path, sizeof(path), "%s/.config/warp-terminal", home_dir);
-    agents.warp = agents.warp || dir_exists(path);
+    agents->warp = agents->warp || dir_exists(path);
 #endif
-    agents.warp = agents.warp || cbm_agent_cli_exists("oz", home_dir, mode) ||
-                  cbm_agent_cli_exists("oz-preview", home_dir, mode) ||
-                  cbm_agent_cli_exists("warp-cli", home_dir, mode);
+    agents->warp = agents->warp || cbm_agent_cli_exists("oz", home_dir, mode) ||
+                   cbm_agent_cli_exists("oz-preview", home_dir, mode) ||
+                   cbm_agent_cli_exists("warp-cli", home_dir, mode);
 
     cbm_qwen_home_dir(home_dir, path, sizeof(path));
-    agents.qwen = path[0] && (dir_exists(path) || cbm_agent_cli_exists("qwen", home_dir, mode));
+    agents->qwen = path[0] && (dir_exists(path) || cbm_agent_cli_exists("qwen", home_dir, mode));
+}
+
+static void cli_detect_remaining_agents(cbm_detected_agents_t *agents, const char *home_dir,
+                                        cbm_scan_mode_t mode) {
+    char path[CLI_BUF_1K];
 
     cbm_copilot_config_dir(home_dir, path, sizeof(path));
     char copilot_mcp[CLI_BUF_1K];
@@ -2642,24 +2708,37 @@ cbm_detected_agents_t cbm_detect_agents(const char *home_dir, cbm_scan_mode_t mo
              path);
     /* VS Code uses ~/.copilot for shared skills, agents, and hooks. Those
      * durable files are not proof that the standalone Copilot CLI is present. */
-    agents.copilot_cli = cbm_file_exists(copilot_mcp) || cbm_file_exists(copilot_instructions) ||
-                         cbm_agent_cli_exists("copilot", home_dir, mode);
+    agents->copilot_cli = cbm_file_exists(copilot_mcp) || cbm_file_exists(copilot_instructions) ||
+                          cbm_agent_cli_exists("copilot", home_dir, mode);
 
     snprintf(path, sizeof(path), "%s/.factory", home_dir);
-    agents.factory_droid = dir_exists(path) || cbm_agent_cli_exists("droid", home_dir, mode);
+    agents->factory_droid = dir_exists(path) || cbm_agent_cli_exists("droid", home_dir, mode);
 
     cbm_crush_config_path(home_dir, path, sizeof(path));
-    agents.crush = cbm_file_exists(path) || cbm_agent_cli_exists("crush", home_dir, mode);
-    if (!agents.crush) {
+    agents->crush = cbm_file_exists(path) || cbm_agent_cli_exists("crush", home_dir, mode);
+    if (!agents->crush) {
         snprintf(path, sizeof(path), "%s/.config/crush", home_dir);
-        agents.crush = dir_exists(path);
+        agents->crush = dir_exists(path);
     }
 
     cbm_goose_config_dir(home_dir, path, sizeof(path));
-    agents.goose = dir_exists(path) || cbm_agent_cli_exists("goose", home_dir, mode);
+    agents->goose = dir_exists(path) || cbm_agent_cli_exists("goose", home_dir, mode);
 
     cbm_vibe_config_dir(home_dir, path, sizeof(path));
-    agents.mistral_vibe = dir_exists(path) || cbm_agent_cli_exists("vibe", home_dir, mode);
+    agents->mistral_vibe = dir_exists(path) || cbm_agent_cli_exists("vibe", home_dir, mode);
+}
+
+cbm_detected_agents_t cbm_detect_agents(const char *home_dir, cbm_scan_mode_t mode) {
+    cbm_detected_agents_t agents;
+    memset(&agents, 0, sizeof(agents));
+    if (!home_dir || !home_dir[0]) {
+        return agents;
+    }
+
+    cli_detect_primary_agents(&agents, home_dir, mode);
+    cli_detect_desktop_agents(&agents, home_dir, mode);
+    cli_detect_extended_agents(&agents, home_dir, mode);
+    cli_detect_remaining_agents(&agents, home_dir, mode);
 
     return agents;
 }
@@ -3420,47 +3499,56 @@ int cbm_remove_codex_hooks(const char *config_path) {
 
 int cbm_upsert_opencode_mcp(const char *binary_path, const char *config_path) {
     static const char *const path[] = {"mcp"};
-    return cbm_upsert_json_mcp(binary_path, config_path, path, 1U, CBM_JSON_MCP_LOCAL_ARRAY);
+    return cbm_upsert_json_mcp(binary_path, config_path, path, CLI_JSON_PATH_DEPTH_ONE,
+                               CBM_JSON_MCP_LOCAL_ARRAY);
 }
 
 int cbm_remove_opencode_mcp(const char *config_path) {
     static const char *const path[] = {"mcp"};
-    return cbm_remove_json_mcp(config_path, path, 1U, CBM_JSON_MCP_LOCAL_ARRAY, NULL);
+    return cbm_remove_json_mcp(config_path, path, CLI_JSON_PATH_DEPTH_ONE, CBM_JSON_MCP_LOCAL_ARRAY,
+                               NULL);
 }
 
 int cbm_remove_opencode_mcp_owned(const char *binary_path, const char *config_path) {
     static const char *const path[] = {"mcp"};
-    return cbm_remove_json_mcp(config_path, path, 1U, CBM_JSON_MCP_LOCAL_ARRAY, binary_path);
+    return cbm_remove_json_mcp(config_path, path, CLI_JSON_PATH_DEPTH_ONE, CBM_JSON_MCP_LOCAL_ARRAY,
+                               binary_path);
 }
 
 static int cbm_upsert_kilo_mcp(const char *binary_path, const char *config_path) {
     static const char *const path[] = {"mcp"};
-    return cbm_upsert_json_mcp(binary_path, config_path, path, 1U, CBM_JSON_MCP_LOCAL_ARRAY);
+    return cbm_upsert_json_mcp(binary_path, config_path, path, CLI_JSON_PATH_DEPTH_ONE,
+                               CBM_JSON_MCP_LOCAL_ARRAY);
 }
 
 static int cbm_remove_kilo_mcp_owned(const char *binary_path, const char *config_path) {
     static const char *const path[] = {"mcp"};
-    return cbm_remove_json_mcp(config_path, path, 1U, CBM_JSON_MCP_LOCAL_ARRAY, binary_path);
+    return cbm_remove_json_mcp(config_path, path, CLI_JSON_PATH_DEPTH_ONE, CBM_JSON_MCP_LOCAL_ARRAY,
+                               binary_path);
 }
 
 static int cbm_upsert_cline_mcp(const char *binary_path, const char *config_path) {
     static const char *const path[] = {"mcpServers"};
-    return cbm_upsert_json_mcp(binary_path, config_path, path, 1U, CBM_JSON_MCP_CLINE);
+    return cbm_upsert_json_mcp(binary_path, config_path, path, CLI_JSON_PATH_DEPTH_ONE,
+                               CBM_JSON_MCP_CLINE);
 }
 
 static int cbm_remove_cline_mcp_owned(const char *binary_path, const char *config_path) {
     static const char *const path[] = {"mcpServers"};
-    return cbm_remove_json_mcp(config_path, path, 1U, CBM_JSON_MCP_CLINE, binary_path);
+    return cbm_remove_json_mcp(config_path, path, CLI_JSON_PATH_DEPTH_ONE, CBM_JSON_MCP_CLINE,
+                               binary_path);
 }
 
 static int cbm_upsert_copilot_mcp(const char *binary_path, const char *config_path) {
     static const char *const path[] = {"mcpServers"};
-    return cbm_upsert_json_mcp(binary_path, config_path, path, 1U, CBM_JSON_MCP_COPILOT);
+    return cbm_upsert_json_mcp(binary_path, config_path, path, CLI_JSON_PATH_DEPTH_ONE,
+                               CBM_JSON_MCP_COPILOT);
 }
 
 static int cbm_remove_copilot_mcp_owned(const char *binary_path, const char *config_path) {
     static const char *const path[] = {"mcpServers"};
-    return cbm_remove_json_mcp(config_path, path, 1U, CBM_JSON_MCP_COPILOT, binary_path);
+    return cbm_remove_json_mcp(config_path, path, CLI_JSON_PATH_DEPTH_ONE, CBM_JSON_MCP_COPILOT,
+                               binary_path);
 }
 
 enum { COPILOT_HOOK_TIMEOUT_SEC = 5 };
@@ -3527,7 +3615,7 @@ static char *cbm_build_copilot_hook_manifest(const char *binary_path) {
     }
     yyjson_mut_doc_set_root(doc, root);
     bool ok =
-        yyjson_mut_obj_add_int(doc, root, "version", 1) &&
+        yyjson_mut_obj_add_int(doc, root, "version", CLI_ABI_VERSION_INITIAL) &&
         cbm_copilot_add_hook_event(doc, hooks, "sessionStart", session_bash, session_powershell) &&
         cbm_copilot_add_hook_event(doc, hooks, "subagentStart", subagent_bash,
                                    subagent_powershell) &&
@@ -3564,38 +3652,42 @@ static int cbm_remove_copilot_hooks(const char *manifest_path, const char *binar
 
 static int cbm_upsert_factory_mcp(const char *binary_path, const char *config_path) {
     static const char *const path[] = {"mcpServers"};
-    return cbm_upsert_json_mcp(binary_path, config_path, path, 1U, CBM_JSON_MCP_FACTORY);
+    return cbm_upsert_json_mcp(binary_path, config_path, path, CLI_JSON_PATH_DEPTH_ONE,
+                               CBM_JSON_MCP_FACTORY);
 }
 
 static int cbm_remove_factory_mcp_owned(const char *binary_path, const char *config_path) {
     static const char *const path[] = {"mcpServers"};
-    return cbm_remove_json_mcp(config_path, path, 1U, CBM_JSON_MCP_FACTORY, binary_path);
+    return cbm_remove_json_mcp(config_path, path, CLI_JSON_PATH_DEPTH_ONE, CBM_JSON_MCP_FACTORY,
+                               binary_path);
 }
 
 static int cbm_upsert_crush_mcp(const char *binary_path, const char *config_path) {
     static const char *const path[] = {"mcp"};
-    return cbm_upsert_json_mcp(binary_path, config_path, path, 1U, CBM_JSON_MCP_CRUSH);
+    return cbm_upsert_json_mcp(binary_path, config_path, path, CLI_JSON_PATH_DEPTH_ONE,
+                               CBM_JSON_MCP_CRUSH);
 }
 
 static int cbm_upsert_crush_context_path(const char *config_path, const char *context_path) {
     static const char *const path[] = {"options"};
-    return cbm_json_like_add_unique_string_at_path(config_path, path, 1U, "context_paths",
-                                                   context_path) == 0
+    return cbm_json_like_add_unique_string_at_path(config_path, path, CLI_JSON_PATH_DEPTH_ONE,
+                                                   "context_paths", context_path) == 0
                ? CLI_OK
                : CLI_ERR;
 }
 
 static int cbm_remove_crush_context_path(const char *config_path, const char *context_path) {
     static const char *const path[] = {"options"};
-    return cbm_json_like_remove_string_at_path(config_path, path, 1U, "context_paths",
-                                               context_path) == 0
+    return cbm_json_like_remove_string_at_path(config_path, path, CLI_JSON_PATH_DEPTH_ONE,
+                                               "context_paths", context_path) == 0
                ? CLI_OK
                : CLI_ERR;
 }
 
 static int cbm_remove_crush_mcp_owned(const char *binary_path, const char *config_path) {
     static const char *const path[] = {"mcp"};
-    return cbm_remove_json_mcp(config_path, path, 1U, CBM_JSON_MCP_CRUSH, binary_path);
+    return cbm_remove_json_mcp(config_path, path, CLI_JSON_PATH_DEPTH_ONE, CBM_JSON_MCP_CRUSH,
+                               binary_path);
 }
 
 static int cbm_build_yaml_stdio_mcp_block(const char *binary_path, bool goose_schema, char *block,
@@ -3689,7 +3781,7 @@ static int cbm_junie_mcp_preflight(const char *binary_path, const char *config_p
     char *document = NULL;
     size_t document_length = 0U;
     int read_result = cbm_json_like_read_document(config_path, &document, &document_length);
-    if (read_result == 1) {
+    if (read_result == CLI_STATUS_PRESENT) {
         free(document);
         return CLI_OK;
     }
@@ -3700,8 +3792,8 @@ static int cbm_junie_mcp_preflight(const char *binary_path, const char *config_p
     int result = CLI_OK;
     for (size_t i = 0U; i < sizeof(entries) / sizeof(entries[0]); i++) {
         int ownership = cbm_json_mcp_snapshot_ownership(
-            document, document_length, path, 1U, CBM_JSON_MCP_STANDARD, entries[i].name,
-            entries[i].argument, binary_path, g_previous_managed_mcp_command);
+            document, document_length, path, CLI_JSON_PATH_DEPTH_ONE, CBM_JSON_MCP_STANDARD,
+            entries[i].name, entries[i].argument, binary_path, g_previous_managed_mcp_command);
         if (ownership != CBM_JSON_LIKE_OBJECT_MATCH && ownership != CBM_JSON_LIKE_OBJECT_MISSING &&
             ownership != CBM_JSON_MCP_OWNERSHIP_STALE) {
             result = CLI_ERR;
@@ -3715,13 +3807,14 @@ static int cbm_junie_mcp_preflight(const char *binary_path, const char *config_p
 int cbm_upsert_junie_mcp(const char *binary_path, const char *config_path) {
     static const char *const path[] = {"mcpServers"};
     if (cbm_junie_mcp_preflight(binary_path, config_path) != CLI_OK ||
-        cbm_upsert_json_named_mcp(binary_path, config_path, path, 1U, CBM_JSON_MCP_STANDARD,
-                                  CBM_DEFAULT_MCP_SERVER_NAME, NULL) != CLI_OK ||
-        cbm_upsert_json_named_mcp(binary_path, config_path, path, 1U, CBM_JSON_MCP_STANDARD,
-                                  CBM_SCOUT_MCP_SERVER_NAME,
+        cbm_upsert_json_named_mcp(binary_path, config_path, path, CLI_JSON_PATH_DEPTH_ONE,
+                                  CBM_JSON_MCP_STANDARD, CBM_DEFAULT_MCP_SERVER_NAME,
+                                  NULL) != CLI_OK ||
+        cbm_upsert_json_named_mcp(binary_path, config_path, path, CLI_JSON_PATH_DEPTH_ONE,
+                                  CBM_JSON_MCP_STANDARD, CBM_SCOUT_MCP_SERVER_NAME,
                                   CBM_SCOUT_PROFILE_ARGUMENT) != CLI_OK ||
-        cbm_upsert_json_named_mcp(binary_path, config_path, path, 1U, CBM_JSON_MCP_STANDARD,
-                                  CBM_ANALYSIS_MCP_SERVER_NAME,
+        cbm_upsert_json_named_mcp(binary_path, config_path, path, CLI_JSON_PATH_DEPTH_ONE,
+                                  CBM_JSON_MCP_STANDARD, CBM_ANALYSIS_MCP_SERVER_NAME,
                                   CBM_ANALYSIS_PROFILE_ARGUMENT) != CLI_OK) {
         return CLI_ERR;
     }
@@ -3743,16 +3836,16 @@ int cbm_upsert_junie_mcp_with_previous_for_testing(const char *binary_path,
 int cbm_remove_junie_mcp(const char *config_path) {
     static const char *const path[] = {"mcpServers"};
     int result = CLI_OK;
-    if (cbm_remove_json_named_mcp(config_path, path, 1U, CBM_JSON_MCP_STANDARD,
+    if (cbm_remove_json_named_mcp(config_path, path, CLI_JSON_PATH_DEPTH_ONE, CBM_JSON_MCP_STANDARD,
                                   CBM_DEFAULT_MCP_SERVER_NAME, NULL, NULL) != CLI_OK) {
         result = CLI_ERR;
     }
-    if (cbm_remove_json_named_mcp(config_path, path, 1U, CBM_JSON_MCP_STANDARD,
+    if (cbm_remove_json_named_mcp(config_path, path, CLI_JSON_PATH_DEPTH_ONE, CBM_JSON_MCP_STANDARD,
                                   CBM_SCOUT_MCP_SERVER_NAME, CBM_SCOUT_PROFILE_ARGUMENT,
                                   NULL) != CLI_OK) {
         result = CLI_ERR;
     }
-    if (cbm_remove_json_named_mcp(config_path, path, 1U, CBM_JSON_MCP_STANDARD,
+    if (cbm_remove_json_named_mcp(config_path, path, CLI_JSON_PATH_DEPTH_ONE, CBM_JSON_MCP_STANDARD,
                                   CBM_ANALYSIS_MCP_SERVER_NAME, CBM_ANALYSIS_PROFILE_ARGUMENT,
                                   NULL) != CLI_OK) {
         result = CLI_ERR;
@@ -3763,16 +3856,16 @@ int cbm_remove_junie_mcp(const char *config_path) {
 int cbm_remove_junie_mcp_owned(const char *binary_path, const char *config_path) {
     static const char *const path[] = {"mcpServers"};
     int result = CLI_OK;
-    if (cbm_remove_json_named_mcp(config_path, path, 1U, CBM_JSON_MCP_STANDARD,
+    if (cbm_remove_json_named_mcp(config_path, path, CLI_JSON_PATH_DEPTH_ONE, CBM_JSON_MCP_STANDARD,
                                   CBM_DEFAULT_MCP_SERVER_NAME, NULL, binary_path) != CLI_OK) {
         result = CLI_ERR;
     }
-    if (cbm_remove_json_named_mcp(config_path, path, 1U, CBM_JSON_MCP_STANDARD,
+    if (cbm_remove_json_named_mcp(config_path, path, CLI_JSON_PATH_DEPTH_ONE, CBM_JSON_MCP_STANDARD,
                                   CBM_SCOUT_MCP_SERVER_NAME, CBM_SCOUT_PROFILE_ARGUMENT,
                                   binary_path) != CLI_OK) {
         result = CLI_ERR;
     }
-    if (cbm_remove_json_named_mcp(config_path, path, 1U, CBM_JSON_MCP_STANDARD,
+    if (cbm_remove_json_named_mcp(config_path, path, CLI_JSON_PATH_DEPTH_ONE, CBM_JSON_MCP_STANDARD,
                                   CBM_ANALYSIS_MCP_SERVER_NAME, CBM_ANALYSIS_PROFILE_ARGUMENT,
                                   binary_path) != CLI_OK) {
         result = CLI_ERR;
@@ -3865,32 +3958,68 @@ static const char *const cmm_gemini_session_old_matchers[] = {
  * Matcher identity is never sufficient because users commonly choose the same
  * catch-all or lifecycle matchers. Ownership always requires the exact command
  * bytes installed by this version. */
+static bool cli_hook_matcher_is_owned(yyjson_mut_val *entry, const char *matcher_str,
+                                      const char *const *old_matchers) {
+    if (!matcher_str) {
+        return true;
+    }
+    yyjson_mut_val *matcher = yyjson_mut_obj_get(entry, "matcher");
+    if (!matcher || !yyjson_mut_is_str(matcher)) {
+        return false;
+    }
+    const char *value = yyjson_mut_get_str(matcher);
+    if (!value) {
+        return false;
+    }
+    if (strcmp(value, matcher_str) == 0) {
+        return true;
+    }
+    for (size_t index = 0U; old_matchers && old_matchers[index]; index++) {
+        if (strcmp(value, old_matchers[index]) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool cli_hook_command_is_owned(const char *command, const char *required_command,
+                                      const char *const *old_commands) {
+    if (!command) {
+        return false;
+    }
+    if (strcmp(command, required_command) == 0) {
+        return true;
+    }
+    for (size_t index = 0U; old_commands && old_commands[index]; index++) {
+        if (strcmp(command, old_commands[index]) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool cli_hook_object_has_owned_command(yyjson_mut_val *hook, const char *required_command,
+                                              const char *const *old_commands) {
+    if (!yyjson_mut_is_obj(hook)) {
+        return false;
+    }
+    yyjson_mut_val *command_value = yyjson_mut_obj_get(hook, "command");
+    yyjson_mut_val *type_value = yyjson_mut_obj_get(hook, "type");
+    if (!command_value || !yyjson_mut_is_str(command_value) || !type_value ||
+        !yyjson_mut_is_str(type_value) || strcmp(yyjson_mut_get_str(type_value), "command") != 0) {
+        return false;
+    }
+    return cli_hook_command_is_owned(yyjson_mut_get_str(command_value), required_command,
+                                     old_commands);
+}
+
 static bool find_cmm_hook_in_entry(yyjson_mut_val *entry, const char *matcher_str,
                                    const char *const *old_matchers,
                                    const char *require_command_exact,
                                    const char *const *old_commands, size_t *hook_index_out) {
-    if (!entry || !require_command_exact) {
+    if (!entry || !require_command_exact ||
+        !cli_hook_matcher_is_owned(entry, matcher_str, old_matchers)) {
         return false;
-    }
-    if (matcher_str) {
-        yyjson_mut_val *matcher = yyjson_mut_obj_get(entry, "matcher");
-        if (!matcher || !yyjson_mut_is_str(matcher)) {
-            return false;
-        }
-        const char *val = yyjson_mut_get_str(matcher);
-        if (!val) {
-            return false;
-        }
-        bool matcher_ok = strcmp(val, matcher_str) == 0;
-        /* Also match old versions for backwards-compatible upgrade */
-        for (int i = 0; !matcher_ok && old_matchers && old_matchers[i]; i++) {
-            if (strcmp(val, old_matchers[i]) == 0) {
-                matcher_ok = true;
-            }
-        }
-        if (!matcher_ok) {
-            return false;
-        }
     }
     yyjson_mut_val *hooks = yyjson_mut_obj_get(entry, "hooks");
     if (!hooks || !yyjson_mut_is_arr(hooks)) {
@@ -3900,21 +4029,11 @@ static bool find_cmm_hook_in_entry(yyjson_mut_val *entry, const char *matcher_st
     size_t max;
     yyjson_mut_val *h;
     yyjson_mut_arr_foreach(hooks, idx, max, h) {
-        yyjson_mut_val *cmd = yyjson_mut_is_obj(h) ? yyjson_mut_obj_get(h, "command") : NULL;
-        yyjson_mut_val *type = yyjson_mut_is_obj(h) ? yyjson_mut_obj_get(h, "type") : NULL;
-        if (cmd && yyjson_mut_is_str(cmd) && type && yyjson_mut_is_str(type) &&
-            strcmp(yyjson_mut_get_str(type), "command") == 0) {
-            const char *cs = yyjson_mut_get_str(cmd);
-            bool command_ok = cs && strcmp(cs, require_command_exact) == 0;
-            for (size_t i = 0U; !command_ok && cs && old_commands && old_commands[i]; i++) {
-                command_ok = strcmp(cs, old_commands[i]) == 0;
+        if (cli_hook_object_has_owned_command(h, require_command_exact, old_commands)) {
+            if (hook_index_out) {
+                *hook_index_out = idx;
             }
-            if (command_ok) {
-                if (hook_index_out) {
-                    *hook_index_out = idx;
-                }
-                return true;
-            }
+            return true;
         }
     }
     return false;
@@ -3922,7 +4041,7 @@ static bool find_cmm_hook_in_entry(yyjson_mut_val *entry, const char *matcher_st
 
 static bool cmm_hook_outer_is_canonical(yyjson_mut_val *entry, bool has_matcher) {
     if (!entry || !yyjson_mut_is_obj(entry) ||
-        yyjson_mut_obj_size(entry) != (has_matcher ? 2U : 1U)) {
+        yyjson_mut_obj_size(entry) != (has_matcher ? CLI_ARRAY_LENGTH_TWO : CLI_ARRAY_LENGTH_ONE)) {
         return false;
     }
     yyjson_mut_val *hooks = yyjson_mut_obj_get(entry, "hooks");
@@ -3999,7 +4118,8 @@ static int write_hook_event_array(const char *settings_path, const char *hook_ev
     }
 #endif
     if (yyjson_mut_arr_size(event_arr) == 0U) {
-        return cbm_json_like_remove_entry_if_unchanged(settings_path, hooks_path, 1U, hook_event,
+        return cbm_json_like_remove_entry_if_unchanged(settings_path, hooks_path,
+                                                       CLI_JSON_PATH_DEPTH_ONE, hook_event,
                                                        expected_content, expected_length) == 0
                    ? CLI_OK
                    : CLI_ERR;
@@ -4009,10 +4129,75 @@ static int write_hook_event_array(const char *settings_path, const char *hook_ev
     if (!event_json) {
         return CLI_ERR;
     }
-    int rc = cbm_json_like_upsert_entry_if_unchanged(settings_path, hooks_path, 1U, hook_event,
+    int rc = cbm_json_like_upsert_entry_if_unchanged(settings_path, hooks_path,
+                                                     CLI_JSON_PATH_DEPTH_ONE, hook_event,
                                                      event_json, expected_content, expected_length);
     free(event_json);
     return rc == 0 ? CLI_OK : CLI_ERR;
+}
+
+static yyjson_mut_val *cli_hook_document_root(yyjson_mut_doc *mutable_document,
+                                              const char *expected_content, size_t expected_length,
+                                              int read_result, yyjson_doc **source_document_out) {
+    if (read_result == CLI_STATUS_SUCCESS) {
+        yyjson_read_flag flags = YYJSON_READ_ALLOW_COMMENTS | YYJSON_READ_ALLOW_TRAILING_COMMAS;
+        *source_document_out = yyjson_read(expected_content, expected_length, flags);
+        if (!*source_document_out || !yyjson_is_obj(yyjson_doc_get_root(*source_document_out))) {
+            return NULL;
+        }
+        return yyjson_val_mut_copy(mutable_document, yyjson_doc_get_root(*source_document_out));
+    }
+    return yyjson_mut_obj(mutable_document);
+}
+
+static yyjson_mut_val *cli_hook_event_array(yyjson_mut_doc *document, yyjson_mut_val *root,
+                                            const char *hook_event) {
+    yyjson_mut_val *hooks = yyjson_mut_obj_get(root, "hooks");
+    if (hooks && !yyjson_mut_is_obj(hooks)) {
+        return NULL;
+    }
+    if (!hooks) {
+        hooks = yyjson_mut_obj(document);
+        if (!hooks || !yyjson_mut_obj_add_val(document, root, "hooks", hooks)) {
+            return NULL;
+        }
+    }
+    yyjson_mut_val *event_array = yyjson_mut_obj_get(hooks, hook_event);
+    if (event_array && !yyjson_mut_is_arr(event_array)) {
+        return NULL;
+    }
+    if (!event_array) {
+        event_array = yyjson_mut_arr(document);
+        if (!event_array || !yyjson_mut_obj_add_val(document, hooks, hook_event, event_array)) {
+            return NULL;
+        }
+    }
+    return event_array;
+}
+
+static yyjson_mut_val *cli_hook_entry(yyjson_mut_doc *document, const hooks_upsert_args_t *args) {
+    yyjson_mut_val *entry = yyjson_mut_obj(document);
+    yyjson_mut_val *hooks_array = yyjson_mut_arr(document);
+    yyjson_mut_val *hook = yyjson_mut_obj(document);
+    if (!entry || !hooks_array || !hook) {
+        return NULL;
+    }
+    if (args->matcher_str) {
+        yyjson_mut_obj_add_str(document, entry, "matcher", args->matcher_str);
+    }
+    yyjson_mut_obj_add_str(document, hook, "type", "command");
+    yyjson_mut_obj_add_str(document, hook, "command", args->command_str);
+    if (args->command_windows) {
+        yyjson_mut_obj_add_str(document, hook, "command_windows", args->command_windows);
+    }
+    if (args->shell && args->shell[0]) {
+        yyjson_mut_obj_add_str(document, hook, "shell", args->shell);
+    }
+    if (args->timeout_value > 0) {
+        yyjson_mut_obj_add_int(document, hook, "timeout", args->timeout_value);
+    }
+    yyjson_mut_arr_append(hooks_array, hook);
+    return yyjson_mut_obj_add_val(document, entry, "hooks", hooks_array) ? entry : NULL;
 }
 
 static int upsert_hooks_json(hooks_upsert_args_t args) {
@@ -4041,45 +4226,15 @@ static int upsert_hooks_json(hooks_upsert_args_t args) {
         free(expected_content);
         return CLI_ERR;
     }
-    if (read_result == 0) {
-        yyjson_read_flag flags = YYJSON_READ_ALLOW_COMMENTS | YYJSON_READ_ALLOW_TRAILING_COMMAS;
-        doc = yyjson_read(expected_content, expected_length, flags);
-        if (!doc || !yyjson_is_obj(yyjson_doc_get_root(doc))) {
-            goto cleanup;
-        }
-        root = yyjson_val_mut_copy(mdoc, yyjson_doc_get_root(doc));
-    } else {
-        root = yyjson_mut_obj(mdoc);
-    }
+    root = cli_hook_document_root(mdoc, expected_content, expected_length, read_result, &doc);
     if (!root) {
         goto cleanup;
     }
     yyjson_mut_doc_set_root(mdoc, root);
 
-    /* Get or create hooks object in the temporary semantic copy. The actual
-     * write below splices only this event array into the original JSON-like
-     * file, retaining comments and unrelated formatting. */
-    yyjson_mut_val *hooks = yyjson_mut_obj_get(root, "hooks");
-    if (hooks && !yyjson_mut_is_obj(hooks)) {
-        goto cleanup;
-    }
-    if (!hooks) {
-        hooks = yyjson_mut_obj(mdoc);
-        if (!hooks || !yyjson_mut_obj_add_val(mdoc, root, "hooks", hooks)) {
-            goto cleanup;
-        }
-    }
-
-    /* Get or create the hook event array (e.g. PreToolUse / BeforeTool) */
-    yyjson_mut_val *event_arr = yyjson_mut_obj_get(hooks, hook_event);
-    if (event_arr && !yyjson_mut_is_arr(event_arr)) {
-        goto cleanup;
-    }
+    yyjson_mut_val *event_arr = cli_hook_event_array(mdoc, root, hook_event);
     if (!event_arr) {
-        event_arr = yyjson_mut_arr(mdoc);
-        if (!event_arr || !yyjson_mut_obj_add_val(mdoc, hooks, hook_event, event_arr)) {
-            goto cleanup;
-        }
+        goto cleanup;
     }
 
     /* Collapse every exact-owned historical/current entry before appending the
@@ -4088,28 +4243,10 @@ static int upsert_hooks_json(hooks_upsert_args_t args) {
     (void)remove_all_owned_hooks_from_event(event_arr, matcher_str, old_matchers, effective_exact,
                                             args.old_commands);
 
-    /* Build our hook entry */
-    yyjson_mut_val *entry = yyjson_mut_obj(mdoc);
-    if (matcher_str) {
-        yyjson_mut_obj_add_str(mdoc, entry, "matcher", matcher_str);
+    yyjson_mut_val *entry = cli_hook_entry(mdoc, &args);
+    if (!entry) {
+        goto cleanup;
     }
-
-    yyjson_mut_val *hooks_arr = yyjson_mut_arr(mdoc);
-    yyjson_mut_val *hook_obj = yyjson_mut_obj(mdoc);
-    yyjson_mut_obj_add_str(mdoc, hook_obj, "type", "command");
-    yyjson_mut_obj_add_str(mdoc, hook_obj, "command", command_str);
-    if (args.command_windows) {
-        yyjson_mut_obj_add_str(mdoc, hook_obj, "command_windows", args.command_windows);
-    }
-    if (args.shell && args.shell[0]) {
-        yyjson_mut_obj_add_str(mdoc, hook_obj, "shell", args.shell);
-    }
-    if (args.timeout_value > 0) {
-        yyjson_mut_obj_add_int(mdoc, hook_obj, "timeout", args.timeout_value);
-    }
-    yyjson_mut_arr_append(hooks_arr, hook_obj);
-    yyjson_mut_obj_add_val(mdoc, entry, "hooks", hooks_arr);
-
     yyjson_mut_arr_append(event_arr, entry);
 
     rc = write_hook_event_array(settings_path, hook_event, mdoc, event_arr, expected_content,
@@ -4148,7 +4285,7 @@ static int remove_hooks_json(hooks_remove_args_t args) {
     if (read_result < 0) {
         return CLI_ERR;
     }
-    if (read_result == 1) {
+    if (read_result == CLI_STATUS_PRESENT) {
         return CLI_OK;
     }
 
@@ -4373,7 +4510,7 @@ static int cbm_edit_devin_context_hooks(const char *config_path, const char *bin
         return CLI_ERR;
     }
     int result = CLI_OK;
-    size_t first_event = include_session_start ? 0U : 1U;
+    size_t first_event = include_session_start ? CLI_ARRAY_INDEX_FIRST : CLI_ARRAY_INDEX_SECOND;
     for (size_t i = first_event; i < sizeof(events) / sizeof(events[0]); i++) {
         int event_result = remove ? remove_hooks_json((hooks_remove_args_t){
                                         .settings_path = config_path,
@@ -4452,12 +4589,18 @@ static int cbm_upsert_hermes_context_hook(const char *config_path, const char *b
 
 static bool cbm_yaml_line_is_empty_key(const char *line, size_t line_len, size_t indent,
                                        const char *key) {
-    while (line_len > 0U && (line[line_len - 1U] == '\r' || line[line_len - 1U] == ' ')) {
+    while (line_len > 0U && (line[line_len - CLI_C_STRING_TERMINATOR_BYTES] == '\r' ||
+                             line[line_len - CLI_C_STRING_TERMINATOR_BYTES] == ' ')) {
         line_len--;
     }
     size_t key_len = strlen(key);
-    return line_len == indent + key_len + 1U && memcmp(line + indent, key, key_len) == 0 &&
-           line[indent + key_len] == ':';
+    return line_len == indent + key_len + CLI_C_STRING_TERMINATOR_BYTES &&
+           memcmp(line + indent, key, key_len) == 0 && line[indent + key_len] == ':';
+}
+
+static bool cli_yaml_line_is_blank(const char *line, size_t line_len, size_t indent) {
+    return indent == line_len ||
+           (indent + CLI_C_STRING_TERMINATOR_BYTES == line_len && line[indent] == '\r');
 }
 
 static bool cbm_hermes_pre_llm_sequence_is_empty(const char *document) {
@@ -4472,7 +4615,7 @@ static bool cbm_hermes_pre_llm_sequence_is_empty(const char *document) {
         while (indent < line_len && line[indent] == ' ') {
             indent++;
         }
-        bool blank = indent == line_len || (indent + 1U == line_len && line[indent] == '\r');
+        bool blank = cli_yaml_line_is_blank(line, line_len, indent);
         bool comment = indent < line_len && line[indent] == '#';
 
         if (!blank) {
@@ -4489,7 +4632,7 @@ static bool cbm_hermes_pre_llm_sequence_is_empty(const char *document) {
                 in_pre_llm = true;
             }
         }
-        cursor = newline ? newline + 1U : NULL;
+        cursor = newline ? newline + CLI_C_STRING_TERMINATOR_BYTES : NULL;
     }
     return in_pre_llm;
 }
@@ -4614,7 +4757,7 @@ static int cbm_shell_quote_word(const char *value, char *out, size_t out_size) {
     size_t used = 0;
     out[used++] = '\'';
     for (const unsigned char *cursor = (const unsigned char *)value; *cursor; cursor++) {
-        if (*cursor < 0x20 || *cursor == 0x7f) {
+        if (*cursor < CLI_ASCII_CONTROL_FIRST_PRINTABLE || *cursor == CLI_ASCII_DELETE) {
             out[0] = '\0';
             return CLI_ERR;
         }
@@ -4652,11 +4795,11 @@ static int cbm_powershell_quote_word(const char *value, char *out, size_t out_si
     size_t used = 0U;
     out[used++] = '\'';
     for (const unsigned char *cursor = (const unsigned char *)value; *cursor; cursor++) {
-        if (*cursor < 0x20U || *cursor == 0x7fU) {
+        if (*cursor < CLI_ASCII_CONTROL_FIRST_PRINTABLE || *cursor == CLI_ASCII_DELETE) {
             out[0] = '\0';
             return CLI_ERR;
         }
-        size_t needed = *cursor == '\'' ? 2U : 1U;
+        size_t needed = *cursor == '\'' ? CLI_ARRAY_LENGTH_TWO : CLI_ARRAY_LENGTH_ONE;
         if (needed > out_size - used - CLI_PAIR_LEN) {
             out[0] = '\0';
             return CLI_ERR;
@@ -5108,6 +5251,51 @@ static int cbm_remove_session_hooks(const char *settings_path) {
     return rc;
 }
 
+static bool cli_session_hook_matches(yyjson_val *hook, const char *expected_command) {
+    if (!yyjson_is_obj(hook)) {
+        return false;
+    }
+    yyjson_val *type = yyjson_obj_get(hook, "type");
+    yyjson_val *command = yyjson_obj_get(hook, "command");
+    yyjson_val *timeout = yyjson_obj_get(hook, "timeout");
+    if (!type || !yyjson_is_str(type) || strcmp(yyjson_get_str(type), "command") != 0) {
+        return false;
+    }
+    if (!command || !yyjson_is_str(command) ||
+        strcmp(yyjson_get_str(command), expected_command) != 0) {
+        return false;
+    }
+    return timeout && yyjson_is_int(timeout) && yyjson_get_int(timeout) == CMM_HOOK_TIMEOUT_SEC;
+}
+
+static bool cli_session_has_matcher_hook(yyjson_val *session, const char *matcher_name,
+                                         const char *expected_command) {
+    size_t entry_index;
+    size_t entry_count;
+    yyjson_val *entry;
+    yyjson_arr_foreach(session, entry_index, entry_count, entry) {
+        if (!yyjson_is_obj(entry)) {
+            continue;
+        }
+        yyjson_val *matcher = yyjson_obj_get(entry, "matcher");
+        yyjson_val *entry_hooks = yyjson_obj_get(entry, "hooks");
+        if (!matcher || !yyjson_is_str(matcher) ||
+            strcmp(yyjson_get_str(matcher), matcher_name) != 0 || !entry_hooks ||
+            !yyjson_is_arr(entry_hooks)) {
+            continue;
+        }
+        size_t hook_index;
+        size_t hook_count;
+        yyjson_val *hook;
+        yyjson_arr_foreach(entry_hooks, hook_index, hook_count, hook) {
+            if (cli_session_hook_matches(hook, expected_command)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 static bool cbm_has_complete_claude_session_hooks(const char *home) {
     static const char *const matchers[] = {"startup", "resume", "clear", "compact"};
     char config_dir[CLI_BUF_1K];
@@ -5138,38 +5326,7 @@ static bool cbm_has_complete_claude_session_hooks(const char *home) {
     bool complete = session && yyjson_is_arr(session);
     for (size_t matcher_index = 0U;
          complete && matcher_index < sizeof(matchers) / sizeof(matchers[0]); matcher_index++) {
-        bool found = false;
-        size_t entry_index;
-        size_t entry_count;
-        yyjson_val *entry;
-        yyjson_arr_foreach(session, entry_index, entry_count, entry) {
-            yyjson_val *matcher = yyjson_is_obj(entry) ? yyjson_obj_get(entry, "matcher") : NULL;
-            yyjson_val *entry_hooks = yyjson_is_obj(entry) ? yyjson_obj_get(entry, "hooks") : NULL;
-            if (!matcher || !yyjson_is_str(matcher) ||
-                strcmp(yyjson_get_str(matcher), matchers[matcher_index]) != 0 || !entry_hooks ||
-                !yyjson_is_arr(entry_hooks)) {
-                continue;
-            }
-            size_t hook_index;
-            size_t hook_count;
-            yyjson_val *hook;
-            yyjson_arr_foreach(entry_hooks, hook_index, hook_count, hook) {
-                yyjson_val *type = yyjson_is_obj(hook) ? yyjson_obj_get(hook, "type") : NULL;
-                yyjson_val *command = yyjson_is_obj(hook) ? yyjson_obj_get(hook, "command") : NULL;
-                yyjson_val *timeout = yyjson_is_obj(hook) ? yyjson_obj_get(hook, "timeout") : NULL;
-                if (type && yyjson_is_str(type) && strcmp(yyjson_get_str(type), "command") == 0 &&
-                    command && yyjson_is_str(command) &&
-                    strcmp(yyjson_get_str(command), expected_command) == 0 && timeout &&
-                    yyjson_is_int(timeout) && yyjson_get_int(timeout) == CMM_HOOK_TIMEOUT_SEC) {
-                    found = true;
-                    break;
-                }
-            }
-            if (found) {
-                break;
-            }
-        }
-        complete = found;
+        complete = cli_session_has_matcher_hook(session, matchers[matcher_index], expected_command);
     }
     yyjson_doc_free(document);
     return complete;
@@ -6396,10 +6553,11 @@ static int g_auto_answer = 0;
  * can drive prompt_yn() deterministically (1 => yes, -1 => no, 0 => prompt).
  * Not declared in cli.h (internal); the repro runner links cli.c directly and
  * carries an extern forward declaration. Production never calls this. */
-void cbm_set_auto_answer_for_test(int value);
+#ifdef CBM_CLI_ENABLE_TEST_API
 void cbm_set_auto_answer_for_test(int value) {
     g_auto_answer = value;
 }
+#endif
 
 static void parse_auto_answer(int argc, char **argv) {
     for (int i = 0; i < argc; i++) {
@@ -6464,20 +6622,21 @@ int cbm_cli_sha256_file(const char *path, char *out, size_t out_size) {
     cbm_sha256_init(&ctx);
     unsigned char buf[CLI_BUF_1K];
     size_t n;
-    while ((n = fread(buf, 1, sizeof(buf), fp)) > 0) {
+    while ((n = fread(buf, CLI_FILE_ITEM_SIZE_BYTES, sizeof(buf), fp)) > 0) {
         cbm_sha256_update(&ctx, buf, n);
     }
     int read_err = ferror(fp);
-    fclose(fp);
-    if (read_err) {
+    int close_err = fclose(fp);
+    if (read_err || close_err != 0) {
         return CLI_ERR;
     }
     uint8_t digest[CBM_SHA256_DIGEST_LEN];
     cbm_sha256_final(&ctx, digest);
     static const char hex[] = "0123456789abcdef";
     for (size_t i = 0; i < CBM_SHA256_DIGEST_LEN; i++) {
-        out[i * 2] = hex[digest[i] >> 4];
-        out[(i * 2) + 1] = hex[digest[i] & 0x0f];
+        out[i * CLI_SHA256_HEX_CHAR_WIDTH] = hex[digest[i] >> CLI_HEX_DIGIT_BITS];
+        out[(i * CLI_SHA256_HEX_CHAR_WIDTH) + CLI_C_STRING_TERMINATOR_BYTES] =
+            hex[digest[i] & CLI_HEX_DIGIT_MASK];
     }
     out[SHA256_HEX_LEN] = '\0';
     return 0;
@@ -6488,10 +6647,10 @@ static int cli_checksum_hex_nibble(unsigned char value) {
         return (int)(value - (unsigned char)'0');
     }
     if (value >= (unsigned char)'a' && value <= (unsigned char)'f') {
-        return (int)(value - (unsigned char)'a') + 10;
+        return (int)(value - (unsigned char)'a') + CLI_HEX_LETTER_OFFSET;
     }
     if (value >= (unsigned char)'A' && value <= (unsigned char)'F') {
-        return (int)(value - (unsigned char)'A') + 10;
+        return (int)(value - (unsigned char)'A') + CLI_HEX_LETTER_OFFSET;
     }
     return CLI_ERR;
 }
@@ -6507,7 +6666,7 @@ static bool cli_checksum_line_references_archive(const unsigned char *line, size
     if (prefix_length == 0) {
         return true;
     }
-    unsigned char separator = line[prefix_length - 1U];
+    unsigned char separator = line[prefix_length - CLI_C_STRING_TERMINATOR_BYTES];
     return separator == (unsigned char)' ' || separator == (unsigned char)'\t' ||
            separator == (unsigned char)'*';
 }
@@ -6545,25 +6704,13 @@ static bool cli_checksum_line_digest(const unsigned char *line, size_t line_leng
     return true;
 }
 
-/* Parse one downloaded checksum manifest without trusting line truncation or
- * substring matches. This non-header symbol is intentionally exercised by the
- * focused CLI regression tests. Duplicate entries are accepted only when they
- * name the exact artifact and normalize to the same SHA-256 digest. */
-int cbm_cli_checksum_manifest_digest(const char *manifest_path, const char *archive_name, char *out,
-                                     size_t out_size) {
-    if (out && out_size > 0) {
-        out[0] = '\0';
-    }
-    if (!manifest_path || !archive_name || !archive_name[0] || !out || out_size < SHA256_BUF_SIZE ||
-        strchr(archive_name, '\n') || strchr(archive_name, '\r')) {
-        return CLI_ERR;
-    }
-
+static int cli_read_checksum_manifest(const char *manifest_path, unsigned char **manifest_out,
+                                      size_t *manifest_length_out) {
     FILE *fp = cbm_fopen(manifest_path, "rb");
     if (!fp) {
         return CLI_ERR;
     }
-    unsigned char *manifest = malloc(CHECKSUM_MANIFEST_MAX_BYTES + 1U);
+    unsigned char *manifest = malloc(CHECKSUM_MANIFEST_MAX_BYTES + CLI_C_STRING_TERMINATOR_BYTES);
     if (!manifest) {
         (void)fclose(fp);
         return CLI_ERR;
@@ -6571,8 +6718,9 @@ int cbm_cli_checksum_manifest_digest(const char *manifest_path, const char *arch
     size_t manifest_length = 0;
     bool read_ok = true;
     while (manifest_length <= CHECKSUM_MANIFEST_MAX_BYTES) {
-        size_t capacity = CHECKSUM_MANIFEST_MAX_BYTES + 1U - manifest_length;
-        size_t count = fread(manifest + manifest_length, 1, capacity, fp);
+        size_t capacity =
+            CHECKSUM_MANIFEST_MAX_BYTES + CLI_C_STRING_TERMINATOR_BYTES - manifest_length;
+        size_t count = fread(manifest + manifest_length, CLI_FILE_ITEM_SIZE_BYTES, capacity, fp);
         manifest_length += count;
         if (ferror(fp)) {
             read_ok = false;
@@ -6594,9 +6742,14 @@ int cbm_cli_checksum_manifest_digest(const char *manifest_path, const char *arch
         free(manifest);
         return CLI_ERR;
     }
+    *manifest_out = manifest;
+    *manifest_length_out = manifest_length;
+    return CLI_OK;
+}
 
-    size_t archive_name_length = strlen(archive_name);
-    char selected[SHA256_BUF_SIZE] = {0};
+static int cli_checksum_select_digest(const unsigned char *manifest, size_t manifest_length,
+                                      const char *archive_name, char selected[SHA256_BUF_SIZE]) {
+    const size_t archive_name_length = strlen(archive_name);
     bool found = false;
     const unsigned char *cursor = manifest;
     const unsigned char *end = manifest + manifest_length;
@@ -6604,7 +6757,8 @@ int cbm_cli_checksum_manifest_digest(const char *manifest_path, const char *arch
         const unsigned char *newline = memchr(cursor, '\n', (size_t)(end - cursor));
         const unsigned char *line_end = newline ? newline : end;
         size_t line_length = (size_t)(line_end - cursor);
-        if (line_length > 0 && cursor[line_length - 1U] == (unsigned char)'\r') {
+        if (line_length > 0 &&
+            cursor[line_length - CLI_C_STRING_TERMINATOR_BYTES] == (unsigned char)'\r') {
             line_length--;
         }
         bool references = cli_checksum_line_references_archive(cursor, line_length, archive_name,
@@ -6613,21 +6767,42 @@ int cbm_cli_checksum_manifest_digest(const char *manifest_path, const char *arch
         bool valid = cli_checksum_line_digest(cursor, line_length, archive_name,
                                               archive_name_length, candidate);
         if (references && !valid) {
-            free(manifest);
             return CLI_ERR;
         }
         if (valid) {
             if (found && strcmp(selected, candidate) != 0) {
-                free(manifest);
                 return CLI_ERR;
             }
-            memcpy(selected, candidate, sizeof(selected));
+            memcpy(selected, candidate, SHA256_BUF_SIZE);
             found = true;
         }
-        cursor = newline ? newline + 1 : end;
+        cursor = newline ? newline + CLI_C_STRING_TERMINATOR_BYTES : end;
     }
+    return found ? CLI_OK : CLI_ERR;
+}
+
+/* Parse one downloaded checksum manifest without trusting line truncation or
+ * substring matches. This non-header symbol is intentionally exercised by the
+ * focused CLI regression tests. Duplicate entries are accepted only when they
+ * name the exact artifact and normalize to the same SHA-256 digest. */
+int cbm_cli_checksum_manifest_digest(const char *manifest_path, const char *archive_name, char *out,
+                                     size_t out_size) {
+    if (out && out_size > 0) {
+        out[0] = '\0';
+    }
+    if (!manifest_path || !archive_name || !archive_name[0] || !out || out_size < SHA256_BUF_SIZE ||
+        strchr(archive_name, '\n') || strchr(archive_name, '\r')) {
+        return CLI_ERR;
+    }
+    unsigned char *manifest = NULL;
+    size_t manifest_length = 0U;
+    if (cli_read_checksum_manifest(manifest_path, &manifest, &manifest_length) != CLI_OK) {
+        return CLI_ERR;
+    }
+    char selected[SHA256_BUF_SIZE] = {0};
+    int result = cli_checksum_select_digest(manifest, manifest_length, archive_name, selected);
     free(manifest);
-    if (!found) {
+    if (result != CLI_OK) {
         return CLI_ERR;
     }
     memcpy(out, selected, sizeof(selected));
@@ -6891,10 +7066,10 @@ static void plan_record(const char *agent, const char *kind, const char *path) {
         /* Doubling an int overflows before the cast can widen it, so bound it
          * first and drop the record as this function already does when the
          * allocation fails. */
-        if (pl->cap > INT_MAX / 2) {
+        if (pl->cap > INT_MAX / CLI_CAPACITY_GROWTH_FACTOR) {
             return;
         }
-        int ncap = pl->cap ? pl->cap * 2 : CLI_BUF_16;
+        int ncap = pl->cap ? pl->cap * CLI_CAPACITY_GROWTH_FACTOR : CLI_BUF_16;
         cbm_plan_entry_t *ni = realloc(pl->items, (size_t)ncap * sizeof(*ni));
         if (!ni) {
             return;
@@ -6955,6 +7130,143 @@ static void uninstall_tiered_profile_prompts(const char *label, const char *veri
                                              cbm_graph_profile_dialect_t dialect,
                                              const char *legacy_verify_content, bool dry_run);
 
+static void cli_uninstall_claude_hooks(const char *config_dir) {
+    char settings_path[CLI_BUF_1K];
+    snprintf(settings_path, sizeof(settings_path), "%s/settings.json", config_dir);
+    if (cbm_remove_claude_hooks(settings_path) != CLI_OK) {
+        record_agent_config_error(true, "Claude Code", "pretool_hook_uninstall", settings_path);
+    }
+    if (cbm_remove_session_hooks(settings_path) != CLI_OK) {
+        record_agent_config_error(true, "Claude Code", "session_hook_uninstall", settings_path);
+    }
+    if (cbm_remove_claude_subagent_hooks(settings_path) != CLI_OK) {
+        record_agent_config_error(true, "Claude Code", "subagent_hook_uninstall", settings_path);
+    }
+}
+
+static void cli_uninstall_claude_hook_scripts(const char *config_dir,
+                                              const char *installed_binary) {
+    static const struct {
+        const char *name;
+        const char *legacy_name;
+        const char *template_id;
+    } hook_types[] = {
+        {CMM_HOOK_GATE_SCRIPT, CMM_HOOK_GATE_SCRIPT_LEGACY, CMM_HOOK_GATE_TEMPLATE},
+        {CMM_SESSION_REMINDER_SCRIPT, CMM_SESSION_REMINDER_SCRIPT_LEGACY,
+         CMM_SESSION_REMINDER_TEMPLATE},
+        {CMM_SUBAGENT_REMINDER_SCRIPT, CMM_SUBAGENT_REMINDER_SCRIPT_LEGACY,
+         CMM_SUBAGENT_REMINDER_TEMPLATE},
+    };
+    char hooks_dir[CLI_BUF_1K];
+    int hooks_written = snprintf(hooks_dir, sizeof(hooks_dir), "%s/hooks", config_dir);
+    bool hooks_dir_valid = hooks_written > 0 && (size_t)hooks_written < sizeof(hooks_dir);
+    for (size_t index = 0U; index < sizeof(hook_types) / sizeof(hook_types[0]); index++) {
+        const cbm_integration_template_t *template =
+            cbm_integration_template(hook_types[index].template_id);
+        char current[CLI_BUF_8K];
+        if (!template || cbm_render_integration_body(&template->current, installed_binary, NULL,
+                                                     current, sizeof(current)) != CLI_OK) {
+            record_agent_config_error(true, "Claude Code", "hook_script_uninstall",
+                                      hook_types[index].name);
+            continue;
+        }
+        char released_storage[CMM_MAX_RELEASED_SCRIPTS][CLI_BUF_8K];
+        const char *released[CMM_MAX_RELEASED_SCRIPTS];
+        size_t released_count = cbm_render_released_scripts(
+            template, installed_binary, released_storage, released, CMM_MAX_RELEASED_SCRIPTS);
+        char script_path[CLI_BUF_1K];
+        int script_written = hooks_dir_valid ? snprintf(script_path, sizeof(script_path), "%s/%s",
+                                                        hooks_dir, hook_types[index].name)
+                                             : CLI_ERR;
+        bool script_path_valid = script_written > 0 && (size_t)script_written < sizeof(script_path);
+        if (!script_path_valid ||
+            cbm_remove_owned_hook_script(script_path, current, released, released_count) < CLI_OK) {
+            record_agent_config_error(true, "Claude Code", "hook_script_uninstall",
+                                      script_path_valid ? script_path : hook_types[index].name);
+        }
+#ifdef _WIN32
+        if (!hooks_dir_valid ||
+            cbm_remove_owned_legacy_hook_script(hooks_dir, hook_types[index].legacy_name, current,
+                                                released, released_count) != CLI_OK) {
+            char legacy_path[CLI_BUF_1K];
+            int written = hooks_dir_valid ? snprintf(legacy_path, sizeof(legacy_path), "%s/%s",
+                                                     hooks_dir, hook_types[index].legacy_name)
+                                          : CLI_ERR;
+            record_agent_config_error(true, "Claude Code", "legacy_hook_script_uninstall",
+                                      written > 0 && (size_t)written < sizeof(legacy_path)
+                                          ? legacy_path
+                                          : hook_types[index].legacy_name);
+        }
+#endif
+    }
+}
+
+typedef bool (*cli_hook_script_installer_t)(const char *home, const char *binary_path);
+typedef int (*cli_hook_registrar_t)(const char *settings_path);
+
+typedef struct {
+    const char *script_name;
+    const char *success_message;
+    cli_hook_script_installer_t install_script;
+    cli_hook_registrar_t register_hook;
+} cli_claude_hook_spec_t;
+
+static void cli_install_claude_hooks(const char *home, const char *binary_path,
+                                     const char *config_dir, const char *settings_path,
+                                     bool dry_run) {
+    static const cli_claude_hook_spec_t hooks[] = {
+        {CMM_HOOK_GATE_SCRIPT,
+         "PreToolUse Grep/Glob search augmentation + PostToolUse Read coverage (non-blocking)",
+         cbm_install_hook_gate_script, cbm_upsert_claude_hooks},
+        {CMM_SESSION_REMINDER_SCRIPT,
+         "SessionStart (MCP usage reminder on startup/resume/clear/compact)",
+         cbm_install_session_reminder_script, cbm_upsert_session_hooks},
+        {CMM_SUBAGENT_REMINDER_SCRIPT, "SubagentStart (MCP usage reminder for subagents)",
+         cbm_install_subagent_reminder_script, cbm_upsert_claude_subagent_hooks},
+    };
+    for (size_t index = 0U; index < sizeof(hooks) / sizeof(hooks[0]); index++) {
+        const cli_claude_hook_spec_t *hook = &hooks[index];
+        bool installed =
+            dry_run ? cbm_hook_script_write_would_succeed(home, binary_path, hook->script_name)
+                    : hook->install_script(home, binary_path);
+        char hook_path[CLI_BUF_1K];
+        snprintf(hook_path, sizeof(hook_path), "%s/hooks/%s", config_dir, hook->script_name);
+        if (!installed) {
+            if (dry_run) {
+                printf("  hooks: %s would be skipped — the file there is not ours "
+                       "(modified, or written by another install), so the rewrite is refused "
+                       "and existing hook entries are left untouched\n",
+                       hook_path);
+            } else {
+                record_agent_config_error(false, "Claude Code", "hook_script_install", hook_path);
+            }
+            continue;
+        }
+        if (!dry_run && hook->register_hook(settings_path) != CLI_OK) {
+            record_agent_config_error(false, "Claude Code", "hook_register", settings_path);
+            continue;
+        }
+        printf("  hooks: %s\n", hook->success_message);
+    }
+}
+
+static void cli_install_claude_mcp(const char *config_dir, const char *user_root,
+                                   const char *binary_path, bool dry_run) {
+    char legacy_mcp_path[CLI_BUF_1K];
+    snprintf(legacy_mcp_path, sizeof(legacy_mcp_path), "%s/.mcp.json", config_dir);
+    if (!dry_run && cbm_file_exists(legacy_mcp_path) &&
+        cbm_remove_editor_mcp_owned(binary_path, legacy_mcp_path) != CLI_OK) {
+        record_agent_config_error(false, "Claude Code", "legacy_mcp_cleanup", legacy_mcp_path);
+    }
+    char mcp_path[CLI_BUF_1K];
+    snprintf(mcp_path, sizeof(mcp_path), "%s/.claude.json", user_root);
+    if (!dry_run && (!prepare_config_parent(mcp_path) ||
+                     cbm_install_editor_mcp(binary_path, mcp_path) != CLI_OK)) {
+        record_agent_config_error(false, "Claude Code", "mcp_install", mcp_path);
+    }
+    printf("  mcp: %s\n", mcp_path);
+}
+
 static void install_claude_code_config(const char *home, const char *binary_path, bool force,
                                        bool dry_run) {
     char config_dir[CLI_BUF_1K];
@@ -7012,104 +7324,11 @@ static void install_claude_code_config(const char *home, const char *binary_path
         printf("  removed old monolithic skill\n");
     }
 
-    /* ~/.claude/.mcp.json is not a documented Claude Code MCP location.
-     * Remove only our legacy entry there instead of perpetuating that file. */
-    char legacy_mcp_path[CLI_BUF_1K];
-    snprintf(legacy_mcp_path, sizeof(legacy_mcp_path), "%s/.mcp.json", config_dir);
-    if (!dry_run && cbm_file_exists(legacy_mcp_path) &&
-        cbm_remove_editor_mcp_owned(binary_path, legacy_mcp_path) != CLI_OK) {
-        record_agent_config_error(false, "Claude Code", "legacy_mcp_cleanup", legacy_mcp_path);
-    }
-
-    char mcp_path2[CLI_BUF_1K];
-    snprintf(mcp_path2, sizeof(mcp_path2), "%s/.claude.json", user_root);
-    if (!dry_run) {
-        if (!prepare_config_parent(mcp_path2) ||
-            cbm_install_editor_mcp(binary_path, mcp_path2) != CLI_OK) {
-            record_agent_config_error(false, "Claude Code", "mcp_install", mcp_path2);
-        }
-    }
-    printf("  mcp: %s\n", mcp_path2);
+    cli_install_claude_mcp(config_dir, user_root, binary_path, dry_run);
 
     char settings_path[CLI_BUF_1K];
     snprintf(settings_path, sizeof(settings_path), "%s/settings.json", config_dir);
-    bool gate_ok = dry_run;
-    bool session_ok = dry_run;
-    bool subagent_ok = dry_run;
-    if (dry_run) {
-        /* #1387 (second half): the dry run claimed EVERY hook group as
-         * installable because these flags were simply `true`. When the on-disk
-         * script is not ours the real install refuses to rewrite it, so the
-         * preview promised what the run could not deliver and the reporter had
-         * no way to see the loss coming. Predict each refusal read-only. */
-        gate_ok = cbm_hook_script_write_would_succeed(home, binary_path, CMM_HOOK_GATE_SCRIPT);
-        session_ok =
-            cbm_hook_script_write_would_succeed(home, binary_path, CMM_SESSION_REMINDER_SCRIPT);
-        subagent_ok =
-            cbm_hook_script_write_would_succeed(home, binary_path, CMM_SUBAGENT_REMINDER_SCRIPT);
-    }
-    if (!dry_run) {
-        char hook_path[CLI_BUF_1K];
-        gate_ok = cbm_install_hook_gate_script(home, binary_path);
-        snprintf(hook_path, sizeof(hook_path), "%s/hooks/%s", config_dir, CMM_HOOK_GATE_SCRIPT);
-        /* #1387: a failed script (re)write must never remove existing hook
-         * entries. The common failure is TEXT_UNOWNED - a script the user
-         * modified or a manual install wrote with another binary path - and
-         * that script still works; deleting the registration turns a skipped
-         * update into config loss. Entry removal belongs to uninstall only. */
-        if (!gate_ok) {
-            record_agent_config_error(false, "Claude Code", "hook_script_install", hook_path);
-        } else if (cbm_upsert_claude_hooks(settings_path) != CLI_OK) {
-            gate_ok = false;
-            record_agent_config_error(false, "Claude Code", "hook_register", settings_path);
-        }
-
-        session_ok = cbm_install_session_reminder_script(home, binary_path);
-        snprintf(hook_path, sizeof(hook_path), "%s/hooks/%s", config_dir,
-                 CMM_SESSION_REMINDER_SCRIPT);
-        if (!session_ok) {
-            record_agent_config_error(false, "Claude Code", "hook_script_install", hook_path);
-        } else if (cbm_upsert_session_hooks(settings_path) != CLI_OK) {
-            session_ok = false;
-            record_agent_config_error(false, "Claude Code", "hook_register", settings_path);
-        }
-
-        subagent_ok = cbm_install_subagent_reminder_script(home, binary_path);
-        snprintf(hook_path, sizeof(hook_path), "%s/hooks/%s", config_dir,
-                 CMM_SUBAGENT_REMINDER_SCRIPT);
-        if (!subagent_ok) {
-            record_agent_config_error(false, "Claude Code", "hook_script_install", hook_path);
-        } else if (cbm_upsert_claude_subagent_hooks(settings_path) != CLI_OK) {
-            subagent_ok = false;
-            record_agent_config_error(false, "Claude Code", "hook_register", settings_path);
-        }
-    }
-    if (gate_ok) {
-        printf("  hooks: PreToolUse Grep/Glob search augmentation + PostToolUse Read coverage "
-               "(non-blocking)\n");
-    }
-    if (session_ok) {
-        printf("  hooks: SessionStart (MCP usage reminder on startup/resume/clear/compact)\n");
-    }
-    if (subagent_ok) {
-        printf("  hooks: SubagentStart (MCP usage reminder for subagents)\n");
-    }
-    if (dry_run) {
-        /* Name every script the real run would refuse. Silence is what made
-         * #1387 invisible in advance: the group simply went unmentioned, which
-         * reads as "nothing to do" rather than "this will be skipped". */
-        static const char *const preview_scripts[] = {
-            CMM_HOOK_GATE_SCRIPT, CMM_SESSION_REMINDER_SCRIPT, CMM_SUBAGENT_REMINDER_SCRIPT};
-        const bool preview_ok[] = {gate_ok, session_ok, subagent_ok};
-        for (size_t i = 0U; i < sizeof(preview_scripts) / sizeof(preview_scripts[0]); i++) {
-            if (!preview_ok[i]) {
-                printf("  hooks: %s/hooks/%s would be skipped — the file there is not ours "
-                       "(modified, or written by another install), so the rewrite is refused "
-                       "and existing hook entries are left untouched\n",
-                       config_dir, preview_scripts[i]);
-            }
-        }
-    }
+    cli_install_claude_hooks(home, binary_path, config_dir, settings_path, dry_run);
 
     /* Migration nudge: when CLAUDE_CONFIG_DIR is set and a legacy ~/.claude tree
      * still exists, mention it so users can clean up stale artifacts. */
@@ -7226,7 +7445,7 @@ static int cbm_tiered_profile_path(const char *verify_path, cbm_graph_tier_t tie
     if (backslash && (!basename || backslash > basename)) {
         basename = backslash;
     }
-    basename = basename ? basename + 1U : verify_path;
+    basename = basename ? basename + CLI_C_STRING_TERMINATOR_BYTES : verify_path;
     size_t verify_len = strlen(verify_basename);
     if (strncmp(basename, verify_basename, verify_len) != 0 || basename[verify_len] != '.') {
         return CLI_ERR;
@@ -7239,13 +7458,14 @@ static int cbm_tiered_profile_path(const char *verify_path, cbm_graph_tier_t tie
     size_t directory_len = (size_t)(basename - verify_path);
     size_t slug_len = strlen(slug);
     size_t suffix_len = strlen(suffix);
-    if (directory_len >= output_size || slug_len > output_size - directory_len - 1U ||
-        suffix_len > output_size - directory_len - slug_len - 1U) {
+    if (directory_len >= output_size ||
+        slug_len > output_size - directory_len - CLI_C_STRING_TERMINATOR_BYTES ||
+        suffix_len > output_size - directory_len - slug_len - CLI_C_STRING_TERMINATOR_BYTES) {
         return CLI_ERR;
     }
     memcpy(output, verify_path, directory_len);
     memcpy(output + directory_len, slug, slug_len);
-    memcpy(output + directory_len + slug_len, suffix, suffix_len + 1U);
+    memcpy(output + directory_len + slug_len, suffix, suffix_len + CLI_C_STRING_TERMINATOR_BYTES);
     return CLI_OK;
 }
 
@@ -7258,6 +7478,49 @@ static cbm_graph_access_t cbm_tiered_profile_set_access(cbm_tiered_profile_set_t
     return !profiles.force_handoff && cbm_graph_dialect_direct_capable(profiles.dialect)
                ? CBM_GRAPH_ACCESS_DIRECT
                : CBM_GRAPH_ACCESS_HANDOFF;
+}
+
+static void cli_install_tiered_agent_profile(cbm_tiered_profile_set_t profiles,
+                                             cbm_graph_access_t access, cbm_graph_tier_t tier,
+                                             const char *path) {
+    char *current = cbm_render_graph_profile(profiles.dialect, tier, access, profiles.binary_path);
+    if (!current) {
+        record_agent_config_error(false, profiles.label, "agent_render", path);
+        return;
+    }
+    cbm_graph_access_t alternate_access =
+        access == CBM_GRAPH_ACCESS_DIRECT ? CBM_GRAPH_ACCESS_HANDOFF : CBM_GRAPH_ACCESS_DIRECT;
+    char *alternate =
+        cbm_render_graph_profile(profiles.dialect, tier, alternate_access, profiles.binary_path);
+    char *codex_rc1 =
+        profiles.dialect == CBM_GRAPH_DIALECT_CODEX && access == CBM_GRAPH_ACCESS_DIRECT
+            ? cbm_render_graph_profile_codex_rc1(tier)
+            : NULL;
+    const char *released[CLI_RELEASED_DOCUMENT_CAPACITY];
+    size_t released_count = 0U;
+    if (alternate) {
+        released[released_count++] = alternate;
+    }
+    if (codex_rc1) {
+        released[released_count++] = codex_rc1;
+    }
+    if (tier == CBM_GRAPH_TIER_VERIFY && profiles.legacy_verify_content) {
+        released[released_count++] = profiles.legacy_verify_content;
+    }
+    int result = prepare_config_parent(path)
+                     ? cbm_text_migrate_owned_document(path, current, released, released_count)
+                     : CLI_ERR;
+    free(codex_rc1);
+    free(alternate);
+    free(current);
+    if (result != CLI_OK) {
+        if (result > CLI_OK) {
+            printf("  agent: preserved modified profile %s\n", path);
+        }
+        record_agent_config_error(false, profiles.label, "agent_install", path);
+        return;
+    }
+    printf("  agent: %s\n", path);
 }
 
 static void install_tiered_agent_profiles(cbm_tiered_profile_set_t profiles, bool dry_run) {
@@ -7277,45 +7540,7 @@ static void install_tiered_agent_profiles(cbm_tiered_profile_set_t profiles, boo
             printf("  agent: %s\n", path);
             continue;
         }
-        char *current =
-            cbm_render_graph_profile(profiles.dialect, tier, access, profiles.binary_path);
-        if (!current) {
-            record_agent_config_error(false, profiles.label, "agent_render", path);
-            continue;
-        }
-        cbm_graph_access_t alternate_access =
-            access == CBM_GRAPH_ACCESS_DIRECT ? CBM_GRAPH_ACCESS_HANDOFF : CBM_GRAPH_ACCESS_DIRECT;
-        char *alternate = cbm_render_graph_profile(profiles.dialect, tier, alternate_access,
-                                                   profiles.binary_path);
-        char *codex_rc1 =
-            profiles.dialect == CBM_GRAPH_DIALECT_CODEX && access == CBM_GRAPH_ACCESS_DIRECT
-                ? cbm_render_graph_profile_codex_rc1(tier)
-                : NULL;
-        const char *released[3];
-        size_t released_count = 0U;
-        if (alternate) {
-            released[released_count++] = alternate;
-        }
-        if (codex_rc1) {
-            released[released_count++] = codex_rc1;
-        }
-        if (tier == CBM_GRAPH_TIER_VERIFY && profiles.legacy_verify_content) {
-            released[released_count++] = profiles.legacy_verify_content;
-        }
-        int result = prepare_config_parent(path)
-                         ? cbm_text_migrate_owned_document(path, current, released, released_count)
-                         : CLI_ERR;
-        free(codex_rc1);
-        free(alternate);
-        free(current);
-        if (result != CLI_OK) {
-            if (result > CLI_OK) {
-                printf("  agent: preserved modified profile %s\n", path);
-            }
-            record_agent_config_error(false, profiles.label, "agent_install", path);
-            continue;
-        }
-        printf("  agent: %s\n", path);
+        cli_install_tiered_agent_profile(profiles, access, tier, path);
     }
 }
 
@@ -7346,7 +7571,7 @@ static void uninstall_tiered_agent_profiles(cbm_tiered_profile_set_t profiles, b
             profiles.dialect == CBM_GRAPH_DIALECT_CODEX && access == CBM_GRAPH_ACCESS_DIRECT
                 ? cbm_render_graph_profile_codex_rc1(tier)
                 : NULL;
-        const char *released[3];
+        const char *released[CLI_RELEASED_DOCUMENT_CAPACITY];
         size_t released_count = 0U;
         if (alternate) {
             released[released_count++] = alternate;
@@ -7396,7 +7621,9 @@ static void install_tiered_profile_prompts(const char *label, const char *verify
             continue;
         }
         const char *released[] = {legacy_verify_content};
-        size_t released_count = tier == CBM_GRAPH_TIER_VERIFY && legacy_verify_content ? 1U : 0U;
+        size_t released_count = tier == CBM_GRAPH_TIER_VERIFY && legacy_verify_content
+                                    ? CLI_ARRAY_LENGTH_ONE
+                                    : CLI_ARRAY_INDEX_FIRST;
         int result = prepare_config_parent(path)
                          ? cbm_text_migrate_owned_document(path, current, released, released_count)
                          : CLI_ERR;
@@ -7433,7 +7660,9 @@ static void uninstall_tiered_profile_prompts(const char *label, const char *veri
             continue;
         }
         const char *released[] = {legacy_verify_content};
-        size_t released_count = tier == CBM_GRAPH_TIER_VERIFY && legacy_verify_content ? 1U : 0U;
+        size_t released_count = tier == CBM_GRAPH_TIER_VERIFY && legacy_verify_content
+                                    ? CLI_ARRAY_LENGTH_ONE
+                                    : CLI_ARRAY_INDEX_FIRST;
         int result = cbm_text_remove_owned_document_any(path, current, released, released_count);
         free(current);
         if (result < CLI_OK) {
@@ -7914,6 +8143,71 @@ static void install_pochi_durable_context(const char *home, bool force, bool dry
         dry_run);
 }
 
+static bool cli_install_registry_mcp(const cbm_agent_client_profile_t *profile,
+                                     const cbm_agent_registry_context_t *registry,
+                                     const char *binary_path, bool dry_run,
+                                     char config_path[CLI_BUF_1K]) {
+    if ((profile->capabilities & CBM_AGENT_CAP_MCP) == 0U) {
+        return false;
+    }
+    int resolved =
+        cbm_agent_client_resolve_path(profile->id, &registry->options, config_path, CLI_BUF_1K);
+    if (resolved != CLI_OK || !profile->install_mcp) {
+        record_agent_config_error(false, profile->display_name, "mcp_resolve", profile->stable_id);
+        return false;
+    }
+    if (g_install_plan) {
+        plan_record(profile->display_name, "mcp_config", config_path);
+        return true;
+    }
+    int edit_result = CBM_AGENT_EDIT_OK;
+    if (!dry_run) {
+        edit_result = prepare_config_parent(config_path)
+                          ? profile->install_mcp(profile->id, config_path, binary_path)
+                          : CBM_AGENT_EDIT_ERROR;
+    }
+    if (edit_result == CBM_AGENT_EDIT_FOREIGN) {
+        record_agent_config_error(false, profile->display_name, "mcp_foreign", config_path);
+    } else if (edit_result != CBM_AGENT_EDIT_OK) {
+        record_agent_config_error(false, profile->display_name, "mcp_install", config_path);
+    } else {
+        printf("  mcp: %s\n", config_path);
+    }
+    return true;
+}
+
+static void cli_install_registry_context(const cbm_agent_client_profile_t *profile,
+                                         const cbm_agent_registry_context_t *registry,
+                                         const char *home, const char *binary_path,
+                                         const char *config_path, bool config_resolved,
+                                         bool inherit_claude_session, bool force, bool dry_run) {
+    if (profile->id == CBM_AGENT_CLIENT_QODER) {
+        install_qoder_durable_context(home, binary_path, config_path, config_resolved, force,
+                                      dry_run);
+    } else if (profile->id == CBM_AGENT_CLIENT_KIMI) {
+        install_kimi_durable_context(registry, binary_path, force, dry_run);
+    } else if (profile->id == CBM_AGENT_CLIENT_GITLAB_DUO) {
+        install_gitlab_durable_context(registry, binary_path, dry_run);
+    } else if (profile->id == CBM_AGENT_CLIENT_ROVO_DEV) {
+        install_rovo_durable_context(home, force, dry_run);
+    } else if (profile->id == CBM_AGENT_CLIENT_AMP) {
+        install_amp_durable_context(home, force, dry_run);
+    } else if (profile->id == CBM_AGENT_CLIENT_DEVIN) {
+        install_devin_durable_context(registry, binary_path, config_path, config_resolved,
+                                      inherit_claude_session, force, dry_run);
+    } else if (profile->id == CBM_AGENT_CLIENT_CODEBUDDY) {
+        install_codebuddy_durable_context(home, force, dry_run);
+    } else if (profile->id == CBM_AGENT_CLIENT_IBM_BOB_IDE) {
+        install_bob_durable_context(home, true, force, dry_run);
+    } else if (profile->id == CBM_AGENT_CLIENT_IBM_BOB_SHELL) {
+        install_bob_durable_context(home, false, force, dry_run);
+    } else if (profile->id == CBM_AGENT_CLIENT_POCHI) {
+        install_pochi_durable_context(home, force, dry_run);
+    } else if (profile->id == CBM_AGENT_CLIENT_PI) {
+        install_pi_durable_context(home, binary_path, force, dry_run);
+    }
+}
+
 static void install_agent_client_registry(const char *home, const char *binary_path,
                                           bool inherit_claude_session, bool force, bool dry_run,
                                           cbm_scan_mode_t mode) {
@@ -7929,61 +8223,10 @@ static void install_agent_client_registry(const char *home, const char *binary_p
         }
 
         char config_path[CLI_BUF_1K] = {0};
-        bool config_resolved = false;
-        if ((profile->capabilities & CBM_AGENT_CAP_MCP) != 0U) {
-            int resolved = cbm_agent_client_resolve_path(profile->id, &registry.options,
-                                                         config_path, sizeof(config_path));
-            if (resolved != 0 || !profile->install_mcp) {
-                record_agent_config_error(false, profile->display_name, "mcp_resolve",
-                                          profile->stable_id);
-            } else if (g_install_plan) {
-                config_resolved = true;
-                plan_record(profile->display_name, "mcp_config", config_path);
-            } else {
-                config_resolved = true;
-                int edit_result = CBM_AGENT_EDIT_OK;
-                if (!dry_run) {
-                    edit_result = prepare_config_parent(config_path)
-                                      ? profile->install_mcp(profile->id, config_path, binary_path)
-                                      : CBM_AGENT_EDIT_ERROR;
-                }
-                if (edit_result == CBM_AGENT_EDIT_FOREIGN) {
-                    record_agent_config_error(false, profile->display_name, "mcp_foreign",
-                                              config_path);
-                } else if (edit_result != CBM_AGENT_EDIT_OK) {
-                    record_agent_config_error(false, profile->display_name, "mcp_install",
-                                              config_path);
-                } else {
-                    printf("  mcp: %s\n", config_path);
-                }
-            }
-        }
-
-        if (profile->id == CBM_AGENT_CLIENT_QODER) {
-            install_qoder_durable_context(home, binary_path, config_path, config_resolved, force,
-                                          dry_run);
-        } else if (profile->id == CBM_AGENT_CLIENT_KIMI) {
-            install_kimi_durable_context(&registry, binary_path, force, dry_run);
-        } else if (profile->id == CBM_AGENT_CLIENT_GITLAB_DUO) {
-            install_gitlab_durable_context(&registry, binary_path, dry_run);
-        } else if (profile->id == CBM_AGENT_CLIENT_ROVO_DEV) {
-            install_rovo_durable_context(home, force, dry_run);
-        } else if (profile->id == CBM_AGENT_CLIENT_AMP) {
-            install_amp_durable_context(home, force, dry_run);
-        } else if (profile->id == CBM_AGENT_CLIENT_DEVIN) {
-            install_devin_durable_context(&registry, binary_path, config_path, config_resolved,
-                                          inherit_claude_session, force, dry_run);
-        } else if (profile->id == CBM_AGENT_CLIENT_CODEBUDDY) {
-            install_codebuddy_durable_context(home, force, dry_run);
-        } else if (profile->id == CBM_AGENT_CLIENT_IBM_BOB_IDE) {
-            install_bob_durable_context(home, true, force, dry_run);
-        } else if (profile->id == CBM_AGENT_CLIENT_IBM_BOB_SHELL) {
-            install_bob_durable_context(home, false, force, dry_run);
-        } else if (profile->id == CBM_AGENT_CLIENT_POCHI) {
-            install_pochi_durable_context(home, force, dry_run);
-        } else if (profile->id == CBM_AGENT_CLIENT_PI) {
-            install_pi_durable_context(home, binary_path, force, dry_run);
-        }
+        bool config_resolved =
+            cli_install_registry_mcp(profile, &registry, binary_path, dry_run, config_path);
+        cli_install_registry_context(profile, &registry, home, binary_path, config_path,
+                                     config_resolved, inherit_claude_session, force, dry_run);
     }
 }
 
@@ -8032,169 +8275,175 @@ static void install_gemini_config(const char *home, const char *binary_path, boo
     printf("  subagents: Scout + Verify + Auditor\n");
 }
 
+static void cli_install_codex_hooks(const char *config_dir, const char *config_path,
+                                    const char *binary_path, bool dry_run) {
+    char hooks_json[CLI_BUF_1K];
+    snprintf(hooks_json, sizeof(hooks_json), "%s/hooks.json", config_dir);
+    bool use_hooks_json = cbm_file_exists(hooks_json);
+    const char *hook_target = use_hooks_json ? hooks_json : config_path;
+    if (g_install_plan) {
+        plan_record("Codex CLI", "hook", hook_target);
+        return;
+    }
+    bool hook_ok = true;
+    if (!dry_run) {
+        char command[CLI_BUF_8K];
+        char command_windows[CLI_BUF_8K];
+        bool command_ready =
+            cbm_build_augment_command(binary_path, command, sizeof(command)) == CLI_OK &&
+            cbm_build_augment_command_windows(binary_path, command_windows,
+                                              sizeof(command_windows)) == CLI_OK;
+        if (!command_ready) {
+            hook_ok = false;
+            record_agent_config_error(false, "Codex CLI", "hook_command_build", hook_target);
+        } else if (use_hooks_json) {
+            if (cbm_upsert_paired_lifecycle_hooks_json(hooks_json, command, command_windows, NULL,
+                                                       CMM_HOOK_TIMEOUT_SEC) != CLI_OK) {
+                hook_ok = false;
+                record_agent_config_error(false, "Codex CLI", "hook_install", hooks_json);
+            } else if (cbm_remove_codex_hooks(config_path) != CLI_OK) {
+                hook_ok = false;
+                record_agent_config_error(false, "Codex CLI", "legacy_hook_cleanup", config_path);
+            }
+        } else if (cbm_upsert_codex_hooks_command(config_path, command, command_windows) !=
+                   CLI_OK) {
+            hook_ok = false;
+            record_agent_config_error(false, "Codex CLI", "hook_install", config_path);
+        }
+    }
+    if (hook_ok) {
+        printf("  hooks: SessionStart + SubagentStart (dynamic graph context)\n");
+    }
+    printf("  note: non-managed hooks require /hooks trust; definition changes require re-trust\n");
+}
+
+static void cli_install_codex_config(const char *home, const char *binary_path, bool force,
+                                     bool dry_run) {
+    char config_dir[CLI_BUF_1K];
+    char cp[CLI_BUF_1K];
+    char ip[CLI_BUF_1K];
+    char skills_dir[CLI_BUF_1K];
+    char ap[CLI_BUF_1K];
+    cbm_codex_config_dir(home, config_dir, sizeof(config_dir));
+    snprintf(cp, sizeof(cp), "%s/config.toml", config_dir);
+    snprintf(ip, sizeof(ip), "%s/AGENTS.md", config_dir);
+    snprintf(skills_dir, sizeof(skills_dir), "%s/skills", config_dir);
+    snprintf(ap, sizeof(ap), "%s/agents/codebase-memory.toml", config_dir);
+    install_generic_agent_config("Codex CLI", binary_path, cp, ip, dry_run, cbm_upsert_codex_mcp);
+    install_agent_skill("Codex CLI", skills_dir, force, dry_run);
+    install_tiered_agent_profiles(
+        (cbm_tiered_profile_set_t){
+            .label = "Codex CLI",
+            .verify_path = ap,
+            .binary_path = binary_path,
+            .legacy_verify_content = legacy_codex_verify_agent_content,
+            .dialect = CBM_GRAPH_DIALECT_CODEX,
+        },
+        dry_run);
+    cli_install_codex_hooks(config_dir, cp, binary_path, dry_run);
+}
+
+static void cli_install_opencode_config(const char *home, const char *binary_path, bool force,
+                                        bool dry_run) {
+    char cp[CLI_BUF_1K];
+    char ip[CLI_BUF_1K];
+    char skills_dir[CLI_BUF_1K];
+    char ap[CLI_BUF_1K];
+    cbm_opencode_config_path(home, cp, sizeof(cp));
+    snprintf(ip, sizeof(ip), "%s/.config/opencode/AGENTS.md", home);
+    snprintf(skills_dir, sizeof(skills_dir), "%s/.config/opencode/skills", home);
+    snprintf(ap, sizeof(ap), "%s/.config/opencode/agents/codebase-memory.md", home);
+    install_generic_agent_config("OpenCode", binary_path, cp, ip, dry_run, cbm_upsert_opencode_mcp);
+    install_agent_skill("OpenCode", skills_dir, force, dry_run);
+    install_tiered_agent_profiles(
+        (cbm_tiered_profile_set_t){
+            .label = "OpenCode",
+            .verify_path = ap,
+            .binary_path = binary_path,
+            .legacy_verify_content = legacy_opencode_verify_agent_content,
+            .dialect = CBM_GRAPH_DIALECT_OPENCODE,
+        },
+        dry_run);
+    /* OpenCode already reaches every tool over MCP (installed just above),
+     * so this adds no tools -- only the automatic graph lookup before a
+     * grep/glob that other clients get from their own hook configuration.
+     * OpenCode has no such configuration; a plugin module is its only
+     * extension point (verified against their plugin documentation). */
+    char plugin_path[CLI_BUF_1K];
+    snprintf(plugin_path, sizeof(plugin_path), "%s/.config/opencode/plugins/cbm-augment.ts", home);
+    install_generated_client_extension("OpenCode", plugin_path, binary_path,
+                                       cbm_client_adapter_opencode, dry_run);
+}
+
+static void cli_install_antigravity_config(const char *home, const char *binary_path,
+                                           bool dry_run) {
+    char cp[CLI_BUF_1K];
+    char ip[CLI_BUF_1K];
+    /* MCP config is the SHARED Antigravity config (CLI + IDE), not a
+     * per-tool file (2026 unification). */
+    snprintf(cp, sizeof(cp), "%s/.gemini/config/mcp_config.json", home);
+    snprintf(ip, sizeof(ip), "%s/.gemini/GEMINI.md", home);
+    if (!dry_run && !g_install_plan) {
+        char cfg_dir[CLI_BUF_1K];
+        snprintf(cfg_dir, sizeof(cfg_dir), "%s/.gemini/config", home);
+        cbm_mkdir_p(cfg_dir, CLI_OCTAL_PERM);
+    }
+    install_generic_agent_config("Antigravity", binary_path, cp, ip, dry_run,
+                                 cbm_upsert_antigravity_mcp);
+    /* SessionStart is not part of Antigravity's documented hook surface.
+     * Clean up the legacy entry that older installers put in a CLI-only
+     * settings file, without creating that file for new installations. */
+    if (!dry_run && !g_install_plan) {
+        char legacy_settings[CLI_BUF_1K];
+        snprintf(legacy_settings, sizeof(legacy_settings),
+                 "%s/.gemini/antigravity-cli/settings.json", home);
+        if (cbm_file_exists(legacy_settings) &&
+            cbm_remove_gemini_session_hooks(legacy_settings) != CLI_OK) {
+            record_agent_config_error(false, "Antigravity", "legacy_hook_cleanup", legacy_settings);
+        }
+    }
+}
+
+static void cli_install_aider_config(const char *home, bool dry_run) {
+    char cp[CLI_BUF_1K];
+    char ip[CLI_BUF_1K];
+    snprintf(cp, sizeof(cp), "%s/.aider.conf.yml", home);
+    snprintf(ip, sizeof(ip), "%s/CONVENTIONS.md", home);
+    if (g_install_plan) {
+        plan_record("Aider", "instructions", ip);
+        plan_record("Aider", "instructions", cp);
+    } else {
+        printf("Aider:\n");
+        if (!dry_run) {
+            /* #1032: Aider cannot call MCP tools — CLI-form instructions. */
+            if (cbm_upsert_instructions(ip, aider_instructions_content) != CLI_OK) {
+                record_agent_config_error(false, "Aider", "instructions_install", ip);
+            }
+            if (cbm_yaml_upsert_string_list_item(cp, "read", ip) != CLI_OK) {
+                record_agent_config_error(false, "Aider", "loader_install", cp);
+            }
+        }
+        printf("  instructions: %s\n", ip);
+        printf("  loader: %s\n", cp);
+    }
+}
+
 static void install_cli_agent_configs(const cbm_detected_agents_t *agents, const char *home,
                                       const char *binary_path, bool force, bool dry_run) {
     if (agents->codex) {
-        char config_dir[CLI_BUF_1K];
-        char cp[CLI_BUF_1K];
-        char ip[CLI_BUF_1K];
-        char skills_dir[CLI_BUF_1K];
-        char ap[CLI_BUF_1K];
-        cbm_codex_config_dir(home, config_dir, sizeof(config_dir));
-        snprintf(cp, sizeof(cp), "%s/config.toml", config_dir);
-        snprintf(ip, sizeof(ip), "%s/AGENTS.md", config_dir);
-        snprintf(skills_dir, sizeof(skills_dir), "%s/skills", config_dir);
-        snprintf(ap, sizeof(ap), "%s/agents/codebase-memory.toml", config_dir);
-        install_generic_agent_config("Codex CLI", binary_path, cp, ip, dry_run,
-                                     cbm_upsert_codex_mcp);
-        install_agent_skill("Codex CLI", skills_dir, force, dry_run);
-        install_tiered_agent_profiles(
-            (cbm_tiered_profile_set_t){
-                .label = "Codex CLI",
-                .verify_path = ap,
-                .binary_path = binary_path,
-                .legacy_verify_content = legacy_codex_verify_agent_content,
-                .dialect = CBM_GRAPH_DIALECT_CODEX,
-            },
-            dry_run);
-        /* Choose the hook target: if ~/.codex/hooks.json already exists, the
-         * user manages Codex hooks via the JSON representation — write the
-         * SessionStart reminder there instead of config.toml. Writing both
-         * makes Codex warn about loading hooks from two representations (#570).
-         * config.toml remains the mcp_config target above either way. */
-        char hooks_json[CLI_BUF_1K];
-        snprintf(hooks_json, sizeof(hooks_json), "%s/hooks.json", config_dir);
-        bool use_hooks_json = cbm_file_exists(hooks_json);
-        const char *hook_target = use_hooks_json ? hooks_json : cp;
-        if (g_install_plan) {
-            plan_record("Codex CLI", "hook", hook_target);
-        } else {
-            bool hook_ok = true;
-            if (!dry_run) {
-                char command[CLI_BUF_8K];
-                char command_windows[CLI_BUF_8K];
-                if (cbm_build_augment_command(binary_path, command, sizeof(command)) == CLI_OK &&
-                    cbm_build_augment_command_windows(binary_path, command_windows,
-                                                      sizeof(command_windows)) == CLI_OK) {
-                    if (use_hooks_json) {
-                        if (cbm_upsert_paired_lifecycle_hooks_json(
-                                hooks_json, command, command_windows, NULL, CMM_HOOK_TIMEOUT_SEC) ==
-                            CLI_OK) {
-                            if (cbm_remove_codex_hooks(cp) != CLI_OK) {
-                                hook_ok = false;
-                                record_agent_config_error(false, "Codex CLI", "legacy_hook_cleanup",
-                                                          cp);
-                            }
-                        } else {
-                            hook_ok = false;
-                            record_agent_config_error(false, "Codex CLI", "hook_install",
-                                                      hooks_json);
-                        }
-                    } else {
-                        if (cbm_upsert_codex_hooks_command(cp, command, command_windows) !=
-                            CLI_OK) {
-                            hook_ok = false;
-                            record_agent_config_error(false, "Codex CLI", "hook_install", cp);
-                        }
-                    }
-                } else {
-                    hook_ok = false;
-                    record_agent_config_error(false, "Codex CLI", "hook_command_build",
-                                              hook_target);
-                }
-            }
-            if (hook_ok) {
-                printf("  hooks: SessionStart + SubagentStart (dynamic graph context)\n");
-            }
-            printf("  note: non-managed hooks require /hooks trust; definition changes require "
-                   "re-trust\n");
-        }
+        cli_install_codex_config(home, binary_path, force, dry_run);
     }
     if (agents->gemini) {
         install_gemini_config(home, binary_path, dry_run);
     }
     if (agents->opencode) {
-        char cp[CLI_BUF_1K];
-        char ip[CLI_BUF_1K];
-        char skills_dir[CLI_BUF_1K];
-        char ap[CLI_BUF_1K];
-        cbm_opencode_config_path(home, cp, sizeof(cp));
-        snprintf(ip, sizeof(ip), "%s/.config/opencode/AGENTS.md", home);
-        snprintf(skills_dir, sizeof(skills_dir), "%s/.config/opencode/skills", home);
-        snprintf(ap, sizeof(ap), "%s/.config/opencode/agents/codebase-memory.md", home);
-        install_generic_agent_config("OpenCode", binary_path, cp, ip, dry_run,
-                                     cbm_upsert_opencode_mcp);
-        install_agent_skill("OpenCode", skills_dir, force, dry_run);
-        install_tiered_agent_profiles(
-            (cbm_tiered_profile_set_t){
-                .label = "OpenCode",
-                .verify_path = ap,
-                .binary_path = binary_path,
-                .legacy_verify_content = legacy_opencode_verify_agent_content,
-                .dialect = CBM_GRAPH_DIALECT_OPENCODE,
-            },
-            dry_run);
-        /* OpenCode already reaches every tool over MCP (installed just above),
-         * so this adds no tools -- only the automatic graph lookup before a
-         * grep/glob that other clients get from their own hook configuration.
-         * OpenCode has no such configuration; a plugin module is its only
-         * extension point (verified against their plugin documentation). */
-        char plugin_path[CLI_BUF_1K];
-        snprintf(plugin_path, sizeof(plugin_path), "%s/.config/opencode/plugins/cbm-augment.ts",
-                 home);
-        install_generated_client_extension("OpenCode", plugin_path, binary_path,
-                                           cbm_client_adapter_opencode, dry_run);
+        cli_install_opencode_config(home, binary_path, force, dry_run);
     }
     if (agents->antigravity) {
-        char cp[CLI_BUF_1K];
-        char ip[CLI_BUF_1K];
-        /* MCP config is the SHARED Antigravity config (CLI + IDE), not a
-         * per-tool file (2026 unification). */
-        snprintf(cp, sizeof(cp), "%s/.gemini/config/mcp_config.json", home);
-        snprintf(ip, sizeof(ip), "%s/.gemini/GEMINI.md", home);
-        if (!dry_run && !g_install_plan) {
-            char cfg_dir[CLI_BUF_1K];
-            snprintf(cfg_dir, sizeof(cfg_dir), "%s/.gemini/config", home);
-            cbm_mkdir_p(cfg_dir, CLI_OCTAL_PERM);
-        }
-        install_generic_agent_config("Antigravity", binary_path, cp, ip, dry_run,
-                                     cbm_upsert_antigravity_mcp);
-        /* SessionStart is not part of Antigravity's documented hook surface.
-         * Clean up the legacy entry that older installers put in a CLI-only
-         * settings file, without creating that file for new installations. */
-        if (!dry_run && !g_install_plan) {
-            char legacy_settings[CLI_BUF_1K];
-            snprintf(legacy_settings, sizeof(legacy_settings),
-                     "%s/.gemini/antigravity-cli/settings.json", home);
-            if (cbm_file_exists(legacy_settings) &&
-                cbm_remove_gemini_session_hooks(legacy_settings) != CLI_OK) {
-                record_agent_config_error(false, "Antigravity", "legacy_hook_cleanup",
-                                          legacy_settings);
-            }
-        }
+        cli_install_antigravity_config(home, binary_path, dry_run);
     }
     if (agents->aider) {
-        char cp[CLI_BUF_1K];
-        char ip[CLI_BUF_1K];
-        snprintf(cp, sizeof(cp), "%s/.aider.conf.yml", home);
-        snprintf(ip, sizeof(ip), "%s/CONVENTIONS.md", home);
-        if (g_install_plan) {
-            plan_record("Aider", "instructions", ip);
-            plan_record("Aider", "instructions", cp);
-        } else {
-            printf("Aider:\n");
-            if (!dry_run) {
-                /* #1032: Aider cannot call MCP tools — CLI-form instructions. */
-                if (cbm_upsert_instructions(ip, aider_instructions_content) != CLI_OK) {
-                    record_agent_config_error(false, "Aider", "instructions_install", ip);
-                }
-                if (cbm_yaml_upsert_string_list_item(cp, "read", ip) != CLI_OK) {
-                    record_agent_config_error(false, "Aider", "loader_install", cp);
-                }
-            }
-            printf("  instructions: %s\n", ip);
-            printf("  loader: %s\n", cp);
-        }
+        cli_install_aider_config(home, dry_run);
     }
 }
 
@@ -8257,502 +8506,584 @@ static void uninstall_vscode_profile_configs(const char *code_user, const char *
 }
 
 /* Install MCP configs for editor-based agents (Zed, KiloCode, VS Code, OpenClaw). */
+static void cli_install_editor_zed(const char *home, const char *binary_path, bool force,
+                                   bool dry_run) {
+    char config_dir[CLI_BUF_1K];
+    char cp[CLI_BUF_1K];
+    char ip[CLI_BUF_1K];
+    char skills_dir[CLI_BUF_1K];
+    cbm_zed_config_dir(home, config_dir, sizeof(config_dir));
+    cbm_zed_instructions_path(home, ip, sizeof(ip));
+    snprintf(cp, sizeof(cp), "%s/settings.json", config_dir);
+    snprintf(skills_dir, sizeof(skills_dir), "%s/.agents/skills", home);
+    install_generic_agent_config("Zed", binary_path, cp, ip, dry_run, cbm_install_zed_mcp);
+    install_agent_skill("Zed", skills_dir, force, dry_run);
+}
+
+static void cli_install_editor_kilocode(const char *home, const char *binary_path, bool dry_run) {
+    char cp[CLI_BUF_1K];
+    char ip[CLI_BUF_1K];
+    char ap[CLI_BUF_1K];
+    snprintf(cp, sizeof(cp), "%s/.config/kilo/kilo.jsonc", home);
+    snprintf(ip, sizeof(ip), "%s/.config/kilo/rules/codebase-memory-mcp.md", home);
+    snprintf(ap, sizeof(ap), "%s/.config/kilo/agents/codebase-memory.md", home);
+    install_generic_agent_config("KiloCode", binary_path, cp, ip, dry_run, cbm_upsert_kilo_mcp);
+    install_tiered_agent_profiles(
+        (cbm_tiered_profile_set_t){
+            .label = "KiloCode",
+            .verify_path = ap,
+            .binary_path = binary_path,
+            .legacy_verify_content = legacy_kilo_verify_agent_content,
+            .dialect = CBM_GRAPH_DIALECT_KILO,
+        },
+        dry_run);
+    if (!dry_run && !g_install_plan) {
+        if (cbm_json_like_add_unique_string(cp, "instructions", ip) != CLI_OK) {
+            record_agent_config_error(false, "KiloCode", "instruction_reference_install", cp);
+        }
+
+        /* Migrate only the fragments owned by releases that targeted the
+         * retired VS Code extension storage path. */
+        char legacy_cp[CLI_BUF_1K];
+        char legacy_ip[CLI_BUF_1K];
+#ifdef __APPLE__
+        snprintf(legacy_cp, sizeof(legacy_cp),
+                 "%s/Library/Application Support/Code/User/globalStorage/"
+                 "kilocode.kilo-code/settings/mcp_settings.json",
+                 home);
+#elif defined(_WIN32)
+        snprintf(legacy_cp, sizeof(legacy_cp),
+                 "%s/AppData/Roaming/Code/User/globalStorage/"
+                 "kilocode.kilo-code/settings/mcp_settings.json",
+                 home);
+#else
+        snprintf(legacy_cp, sizeof(legacy_cp),
+                 "%s/.config/Code/User/globalStorage/"
+                 "kilocode.kilo-code/settings/mcp_settings.json",
+                 home);
+#endif
+        snprintf(legacy_ip, sizeof(legacy_ip), "%s/.kilocode/rules/codebase-memory-mcp.md", home);
+        if (cbm_file_exists(legacy_cp)) {
+            if (cbm_remove_editor_mcp_owned(binary_path, legacy_cp) != CLI_OK) {
+                record_agent_config_error(false, "KiloCode", "legacy_mcp_cleanup", legacy_cp);
+            }
+        }
+        if (cbm_file_exists(legacy_ip)) {
+            if (cbm_remove_instructions(legacy_ip) != CLI_OK) {
+                record_agent_config_error(false, "KiloCode", "legacy_rules_cleanup", legacy_ip);
+            }
+        }
+    }
+}
+
+static void cli_install_editor_vscode(const char *home, const char *binary_path, bool dry_run) {
+    char code_user[CLI_BUF_1K];
+#ifdef __APPLE__
+    snprintf(code_user, sizeof(code_user), "%s/Library/Application Support/Code/User", home);
+#else
+    snprintf(code_user, sizeof(code_user), "%s/Code/User", cbm_app_config_dir());
+#endif
+    char cp[CLI_BUF_1K];
+    snprintf(cp, sizeof(cp), "%s/mcp.json", code_user);
+    install_generic_agent_config("VS Code", binary_path, cp, NULL, dry_run, cbm_install_vscode_mcp);
+    /* VS Code profiles each keep their own settings under
+     * Code/User/profiles/<id>/. The default mcp.json above does NOT apply
+     * to a named profile, so write/plan a per-profile mcp.json for every
+     * existing profile directory (#431). */
+    install_vscode_profile_configs(code_user, binary_path, dry_run);
+}
+
+static void cli_install_editor_cursor(const char *home, const char *binary_path, bool force,
+                                      bool dry_run) {
+    char cp[CLI_BUF_1K];
+    char skills_dir[CLI_BUF_1K];
+    char ap[CLI_BUF_1K];
+    snprintf(cp, sizeof(cp), "%s/.cursor/mcp.json", home);
+    snprintf(skills_dir, sizeof(skills_dir), "%s/.cursor/skills", home);
+    snprintf(ap, sizeof(ap), "%s/.cursor/agents/codebase-memory.md", home);
+    install_generic_agent_config("Cursor", binary_path, cp, NULL, dry_run, cbm_install_editor_mcp);
+    install_agent_skill("Cursor", skills_dir, force, dry_run);
+    install_tiered_agent_profiles(
+        (cbm_tiered_profile_set_t){
+            .label = "Cursor",
+            .verify_path = ap,
+            .binary_path = binary_path,
+            .legacy_verify_content = legacy_cursor_verify_agent_content,
+            .dialect = CBM_GRAPH_DIALECT_CURSOR,
+        },
+        dry_run);
+    /* Cursor documents sessionStart additional_context, but current stable
+     * releases have a confirmed delivery race in the IDE. Skills and the
+     * read-only subagent are the reliable durable surfaces; do not install
+     * an executable hook until the vendor fixes end-to-end delivery. */
+}
+
+static void cli_install_editor_windsurf(const char *home, const char *binary_path, bool dry_run) {
+    char cp[CLI_BUF_1K];
+    char ip[CLI_BUF_1K];
+    snprintf(cp, sizeof(cp), "%s/.codeium/windsurf/mcp_config.json", home);
+    snprintf(ip, sizeof(ip), "%s/.codeium/windsurf/memories/global_rules.md", home);
+    install_windsurf_config(binary_path, cp, ip, dry_run);
+}
+
+static void cli_install_openclaw_workspace(const char *config_path, const char *workspace,
+                                           bool dry_run) {
+    char agents_path[CLI_BUF_1K];
+    char tools_path[CLI_BUF_1K];
+    snprintf(agents_path, sizeof(agents_path), "%s/AGENTS.md", workspace);
+    snprintf(tools_path, sizeof(tools_path), "%s/TOOLS.md", workspace);
+    if (g_install_plan) {
+        plan_record("OpenClaw", "instructions", agents_path);
+        plan_record("OpenClaw", "instructions", tools_path);
+        plan_record("OpenClaw", "hook", config_path);
+        return;
+    }
+    bool compaction_installed = true;
+    if (!dry_run) {
+        if (cbm_upsert_instructions(agents_path, agent_instructions_content) != CLI_OK) {
+            record_agent_config_error(false, "OpenClaw", "instructions_install", agents_path);
+        }
+        if (cbm_upsert_instructions(tools_path, agent_instructions_content) != CLI_OK) {
+            record_agent_config_error(false, "OpenClaw", "tools_context_install", tools_path);
+        }
+        if (cbm_upsert_openclaw_compaction(config_path) != CLI_OK) {
+            compaction_installed = false;
+            record_agent_config_error(false, "OpenClaw", "compaction_install", config_path);
+        }
+    }
+    printf("  instructions: %s\n", agents_path);
+    printf("  tools context: %s\n", tools_path);
+    printf(compaction_installed ? "  compaction: reinjects Codebase Memory\n"
+                                : "  compaction: could not update exact-owned augmentation\n");
+}
+
+static void cli_install_editor_openclaw(const char *home, const char *binary_path, bool dry_run) {
+    char config_path[CLI_BUF_1K];
+    if (!cbm_openclaw_config_path(home, config_path, sizeof(config_path))) {
+        (void)fprintf(stderr, "  warning: OpenClaw config path could not be resolved\n");
+        return;
+    }
+    char workspace[CLI_BUF_1K];
+    bool workspace_ok =
+        cbm_openclaw_workspace_path(home, config_path, workspace, sizeof(workspace));
+    (void)install_generic_agent_config("OpenClaw", binary_path, config_path, NULL, dry_run,
+                                       cbm_install_openclaw_mcp);
+    if (workspace_ok) {
+        cli_install_openclaw_workspace(config_path, workspace, dry_run);
+    } else if (!g_install_plan) {
+        (void)fprintf(stderr, "  warning: OpenClaw workspace is ambiguous; skipped AGENTS.md, "
+                              "TOOLS.md, and compaction augmentation\n");
+    }
+}
+
+static void cli_install_editor_kiro(const char *home, const char *binary_path, bool force,
+                                    bool dry_run) {
+    char kiro_home[CLI_BUF_1K];
+    char cp[CLI_BUF_1K];
+    char ip[CLI_BUF_1K];
+    char skills_dir[CLI_BUF_1K];
+    char ap[CLI_BUF_1K];
+    cbm_kiro_home_dir(home, kiro_home, sizeof(kiro_home));
+    snprintf(cp, sizeof(cp), "%s/settings/mcp.json", kiro_home);
+    snprintf(ip, sizeof(ip), "%s/steering/codebase-memory.md", kiro_home);
+    snprintf(skills_dir, sizeof(skills_dir), "%s/skills", kiro_home);
+    snprintf(ap, sizeof(ap), "%s/agents/codebase-memory.json", kiro_home);
+    install_generic_agent_config("Kiro", binary_path, cp, ip, dry_run, cbm_install_editor_mcp);
+    install_agent_skill("Kiro", skills_dir, force, dry_run);
+    char *legacy_agent_content = cbm_build_legacy_kiro_verify_agent_content(binary_path);
+    if (!legacy_agent_content) {
+        record_agent_config_error(false, "Kiro", "legacy_agent_build", ap);
+    }
+    install_tiered_agent_profiles(
+        (cbm_tiered_profile_set_t){
+            .label = "Kiro",
+            .verify_path = ap,
+            .binary_path = binary_path,
+            .legacy_verify_content = legacy_agent_content,
+            .dialect = CBM_GRAPH_DIALECT_KIRO,
+        },
+        dry_run);
+    free(legacy_agent_content);
+}
+
+static void cli_install_editor_junie(const char *home, const char *binary_path, bool force,
+                                     bool dry_run) {
+    char cp[CLI_BUF_1K];
+    char sd[CLI_BUF_1K];
+    char skills_dir[CLI_BUF_1K];
+    char agent_path[CLI_BUF_1K];
+    snprintf(cp, sizeof(cp), "%s/.junie/mcp/mcp.json", home);
+    snprintf(sd, sizeof(sd), "%s/.junie/mcp", home);
+    snprintf(skills_dir, sizeof(skills_dir), "%s/.junie/skills", home);
+    snprintf(agent_path, sizeof(agent_path), "%s/.junie/agents/codebase-memory.md", home);
+    if (!dry_run && !g_install_plan) {
+        cbm_mkdir_p(sd, CLI_OCTAL_PERM);
+    }
+    bool direct_profiles_ready =
+        install_generic_agent_config("Junie", binary_path, cp, NULL, dry_run, cbm_upsert_junie_mcp);
+    install_agent_skill("Junie", skills_dir, force, dry_run);
+    if (!direct_profiles_ready && !g_install_plan) {
+        printf("  subagents: direct MCP withheld; installed parent-handoff profiles\n");
+    }
+    install_tiered_agent_profiles(
+        (cbm_tiered_profile_set_t){
+            .label = "Junie",
+            .verify_path = agent_path,
+            .binary_path = binary_path,
+            .legacy_verify_content = legacy_junie_verify_agent_content,
+            .dialect = CBM_GRAPH_DIALECT_JUNIE,
+            .force_handoff = !direct_profiles_ready,
+        },
+        dry_run);
+}
+
 static void install_editor_agent_configs(const cbm_detected_agents_t *agents, const char *home,
                                          const char *binary_path, bool force, bool dry_run) {
     if (agents->zed) {
-        char config_dir[CLI_BUF_1K];
-        char cp[CLI_BUF_1K];
-        char ip[CLI_BUF_1K];
-        char skills_dir[CLI_BUF_1K];
-        cbm_zed_config_dir(home, config_dir, sizeof(config_dir));
-        cbm_zed_instructions_path(home, ip, sizeof(ip));
-        snprintf(cp, sizeof(cp), "%s/settings.json", config_dir);
-        snprintf(skills_dir, sizeof(skills_dir), "%s/.agents/skills", home);
-        install_generic_agent_config("Zed", binary_path, cp, ip, dry_run, cbm_install_zed_mcp);
-        install_agent_skill("Zed", skills_dir, force, dry_run);
+        cli_install_editor_zed(home, binary_path, force, dry_run);
     }
     if (agents->kilocode) {
-        char cp[CLI_BUF_1K];
-        char ip[CLI_BUF_1K];
-        char ap[CLI_BUF_1K];
-        snprintf(cp, sizeof(cp), "%s/.config/kilo/kilo.jsonc", home);
-        snprintf(ip, sizeof(ip), "%s/.config/kilo/rules/codebase-memory-mcp.md", home);
-        snprintf(ap, sizeof(ap), "%s/.config/kilo/agents/codebase-memory.md", home);
-        install_generic_agent_config("KiloCode", binary_path, cp, ip, dry_run, cbm_upsert_kilo_mcp);
-        install_tiered_agent_profiles(
-            (cbm_tiered_profile_set_t){
-                .label = "KiloCode",
-                .verify_path = ap,
-                .binary_path = binary_path,
-                .legacy_verify_content = legacy_kilo_verify_agent_content,
-                .dialect = CBM_GRAPH_DIALECT_KILO,
-            },
-            dry_run);
-        if (!dry_run && !g_install_plan) {
-            if (cbm_json_like_add_unique_string(cp, "instructions", ip) != CLI_OK) {
-                record_agent_config_error(false, "KiloCode", "instruction_reference_install", cp);
-            }
-
-            /* Migrate only the fragments owned by releases that targeted the
-             * retired VS Code extension storage path. */
-            char legacy_cp[CLI_BUF_1K];
-            char legacy_ip[CLI_BUF_1K];
-#ifdef __APPLE__
-            snprintf(legacy_cp, sizeof(legacy_cp),
-                     "%s/Library/Application Support/Code/User/globalStorage/"
-                     "kilocode.kilo-code/settings/mcp_settings.json",
-                     home);
-#elif defined(_WIN32)
-            snprintf(legacy_cp, sizeof(legacy_cp),
-                     "%s/AppData/Roaming/Code/User/globalStorage/"
-                     "kilocode.kilo-code/settings/mcp_settings.json",
-                     home);
-#else
-            snprintf(legacy_cp, sizeof(legacy_cp),
-                     "%s/.config/Code/User/globalStorage/"
-                     "kilocode.kilo-code/settings/mcp_settings.json",
-                     home);
-#endif
-            snprintf(legacy_ip, sizeof(legacy_ip), "%s/.kilocode/rules/codebase-memory-mcp.md",
-                     home);
-            if (cbm_file_exists(legacy_cp)) {
-                if (cbm_remove_editor_mcp_owned(binary_path, legacy_cp) != CLI_OK) {
-                    record_agent_config_error(false, "KiloCode", "legacy_mcp_cleanup", legacy_cp);
-                }
-            }
-            if (cbm_file_exists(legacy_ip)) {
-                if (cbm_remove_instructions(legacy_ip) != CLI_OK) {
-                    record_agent_config_error(false, "KiloCode", "legacy_rules_cleanup", legacy_ip);
-                }
-            }
-        }
+        cli_install_editor_kilocode(home, binary_path, dry_run);
     }
     if (agents->vscode) {
-        char code_user[CLI_BUF_1K];
-#ifdef __APPLE__
-        snprintf(code_user, sizeof(code_user), "%s/Library/Application Support/Code/User", home);
-#else
-        snprintf(code_user, sizeof(code_user), "%s/Code/User", cbm_app_config_dir());
-#endif
-        char cp[CLI_BUF_1K];
-        snprintf(cp, sizeof(cp), "%s/mcp.json", code_user);
-        install_generic_agent_config("VS Code", binary_path, cp, NULL, dry_run,
-                                     cbm_install_vscode_mcp);
-        /* VS Code profiles each keep their own settings under
-         * Code/User/profiles/<id>/. The default mcp.json above does NOT apply
-         * to a named profile, so write/plan a per-profile mcp.json for every
-         * existing profile directory (#431). */
-        install_vscode_profile_configs(code_user, binary_path, dry_run);
+        cli_install_editor_vscode(home, binary_path, dry_run);
     }
     if (agents->cursor) {
-        char cp[CLI_BUF_1K];
-        char skills_dir[CLI_BUF_1K];
-        char ap[CLI_BUF_1K];
-        snprintf(cp, sizeof(cp), "%s/.cursor/mcp.json", home);
-        snprintf(skills_dir, sizeof(skills_dir), "%s/.cursor/skills", home);
-        snprintf(ap, sizeof(ap), "%s/.cursor/agents/codebase-memory.md", home);
-        install_generic_agent_config("Cursor", binary_path, cp, NULL, dry_run,
-                                     cbm_install_editor_mcp);
-        install_agent_skill("Cursor", skills_dir, force, dry_run);
-        install_tiered_agent_profiles(
-            (cbm_tiered_profile_set_t){
-                .label = "Cursor",
-                .verify_path = ap,
-                .binary_path = binary_path,
-                .legacy_verify_content = legacy_cursor_verify_agent_content,
-                .dialect = CBM_GRAPH_DIALECT_CURSOR,
-            },
-            dry_run);
-        /* Cursor documents sessionStart additional_context, but current stable
-         * releases have a confirmed delivery race in the IDE. Skills and the
-         * read-only subagent are the reliable durable surfaces; do not install
-         * an executable hook until the vendor fixes end-to-end delivery. */
+        cli_install_editor_cursor(home, binary_path, force, dry_run);
     }
     if (agents->windsurf) {
-        char cp[CLI_BUF_1K];
-        char ip[CLI_BUF_1K];
-        snprintf(cp, sizeof(cp), "%s/.codeium/windsurf/mcp_config.json", home);
-        snprintf(ip, sizeof(ip), "%s/.codeium/windsurf/memories/global_rules.md", home);
-        install_windsurf_config(binary_path, cp, ip, dry_run);
+        cli_install_editor_windsurf(home, binary_path, dry_run);
     }
     if (agents->openclaw) {
-        char cp[CLI_BUF_1K];
-        if (!cbm_openclaw_config_path(home, cp, sizeof(cp))) {
-            (void)fprintf(stderr, "  warning: OpenClaw config path could not be resolved\n");
-        } else {
-            char workspace[CLI_BUF_1K];
-            bool workspace_ok = cbm_openclaw_workspace_path(home, cp, workspace, sizeof(workspace));
-            (void)install_generic_agent_config("OpenClaw", binary_path, cp, NULL, dry_run,
-                                               cbm_install_openclaw_mcp);
-            if (workspace_ok) {
-                char agents_path[CLI_BUF_1K];
-                char tools_path[CLI_BUF_1K];
-                snprintf(agents_path, sizeof(agents_path), "%s/AGENTS.md", workspace);
-                snprintf(tools_path, sizeof(tools_path), "%s/TOOLS.md", workspace);
-                if (g_install_plan) {
-                    plan_record("OpenClaw", "instructions", agents_path);
-                    plan_record("OpenClaw", "instructions", tools_path);
-                    plan_record("OpenClaw", "hook", cp);
-                } else {
-                    bool compaction_installed = true;
-                    if (!dry_run) {
-                        if (cbm_upsert_instructions(agents_path, agent_instructions_content) !=
-                            CLI_OK) {
-                            record_agent_config_error(false, "OpenClaw", "instructions_install",
-                                                      agents_path);
-                        }
-                        if (cbm_upsert_instructions(tools_path, agent_instructions_content) !=
-                            CLI_OK) {
-                            record_agent_config_error(false, "OpenClaw", "tools_context_install",
-                                                      tools_path);
-                        }
-                        if (cbm_upsert_openclaw_compaction(cp) != CLI_OK) {
-                            compaction_installed = false;
-                            record_agent_config_error(false, "OpenClaw", "compaction_install", cp);
-                        }
-                    }
-                    printf("  instructions: %s\n", agents_path);
-                    printf("  tools context: %s\n", tools_path);
-                    if (compaction_installed) {
-                        printf("  compaction: reinjects Codebase Memory\n");
-                    } else {
-                        printf("  compaction: could not update exact-owned augmentation\n");
-                    }
-                }
-            } else if (!g_install_plan) {
-                (void)fprintf(stderr,
-                              "  warning: OpenClaw workspace is ambiguous; skipped AGENTS.md, "
-                              "TOOLS.md, and compaction augmentation\n");
-            }
-        }
+        cli_install_editor_openclaw(home, binary_path, dry_run);
     }
     if (agents->kiro) {
-        char kiro_home[CLI_BUF_1K];
-        char cp[CLI_BUF_1K];
-        char ip[CLI_BUF_1K];
-        char skills_dir[CLI_BUF_1K];
-        char ap[CLI_BUF_1K];
-        cbm_kiro_home_dir(home, kiro_home, sizeof(kiro_home));
-        snprintf(cp, sizeof(cp), "%s/settings/mcp.json", kiro_home);
-        snprintf(ip, sizeof(ip), "%s/steering/codebase-memory.md", kiro_home);
-        snprintf(skills_dir, sizeof(skills_dir), "%s/skills", kiro_home);
-        snprintf(ap, sizeof(ap), "%s/agents/codebase-memory.json", kiro_home);
-        install_generic_agent_config("Kiro", binary_path, cp, ip, dry_run, cbm_install_editor_mcp);
-        install_agent_skill("Kiro", skills_dir, force, dry_run);
-        char *legacy_agent_content = cbm_build_legacy_kiro_verify_agent_content(binary_path);
-        if (!legacy_agent_content) {
-            record_agent_config_error(false, "Kiro", "legacy_agent_build", ap);
-        }
-        install_tiered_agent_profiles(
-            (cbm_tiered_profile_set_t){
-                .label = "Kiro",
-                .verify_path = ap,
-                .binary_path = binary_path,
-                .legacy_verify_content = legacy_agent_content,
-                .dialect = CBM_GRAPH_DIALECT_KIRO,
-            },
-            dry_run);
-        free(legacy_agent_content);
+        cli_install_editor_kiro(home, binary_path, force, dry_run);
     }
     if (agents->junie) {
-        char cp[CLI_BUF_1K];
-        char sd[CLI_BUF_1K];
-        char skills_dir[CLI_BUF_1K];
-        char agent_path[CLI_BUF_1K];
-        snprintf(cp, sizeof(cp), "%s/.junie/mcp/mcp.json", home);
-        snprintf(sd, sizeof(sd), "%s/.junie/mcp", home);
-        snprintf(skills_dir, sizeof(skills_dir), "%s/.junie/skills", home);
-        snprintf(agent_path, sizeof(agent_path), "%s/.junie/agents/codebase-memory.md", home);
-        if (!dry_run && !g_install_plan) {
-            cbm_mkdir_p(sd, CLI_OCTAL_PERM);
-        }
-        bool direct_profiles_ready = install_generic_agent_config("Junie", binary_path, cp, NULL,
-                                                                  dry_run, cbm_upsert_junie_mcp);
-        install_agent_skill("Junie", skills_dir, force, dry_run);
-        if (!direct_profiles_ready && !g_install_plan) {
-            printf("  subagents: direct MCP withheld; installed parent-handoff profiles\n");
-        }
-        install_tiered_agent_profiles(
-            (cbm_tiered_profile_set_t){
-                .label = "Junie",
-                .verify_path = agent_path,
-                .binary_path = binary_path,
-                .legacy_verify_content = legacy_junie_verify_agent_content,
-                .dialect = CBM_GRAPH_DIALECT_JUNIE,
-                .force_handoff = !direct_profiles_ready,
-            },
-            dry_run);
+        cli_install_editor_junie(home, binary_path, force, dry_run);
     }
+}
+
+static void cli_install_additional_hermes(const char *home, const char *binary_path, bool force,
+                                          bool dry_run) {
+    char hermes_home[CLI_BUF_1K];
+    char cp[CLI_BUF_1K];
+    char skills_dir[CLI_BUF_1K];
+    cbm_hermes_home_dir(home, hermes_home, sizeof(hermes_home));
+    snprintf(cp, sizeof(cp), "%s/config.yaml", hermes_home);
+    snprintf(skills_dir, sizeof(skills_dir), "%s/skills", hermes_home);
+    install_generic_agent_config("Hermes", binary_path, cp, NULL, dry_run, cbm_upsert_hermes_mcp);
+    install_agent_skill("Hermes", skills_dir, force, dry_run);
+    if (g_install_plan) {
+        plan_record("Hermes", "hook", cp);
+    } else {
+        int hook_result = CBM_YAML_IDENTITY_EDIT_OK;
+        if (!dry_run) {
+            hook_result = prepare_config_parent(cp)
+                              ? cbm_upsert_hermes_context_hook(cp, binary_path)
+                              : CBM_YAML_IDENTITY_EDIT_ERROR;
+        }
+        if (hook_result == CBM_YAML_IDENTITY_EDIT_FOREIGN) {
+            record_agent_config_error(false, "Hermes", "pre_llm_hook_foreign", cp);
+        } else if (hook_result != CBM_YAML_IDENTITY_EDIT_OK) {
+            record_agent_config_error(false, "Hermes", "pre_llm_hook_install", cp);
+        } else {
+            printf("  hook: %s (pre_llm_call)\n", cp);
+        }
+    }
+}
+
+static void cli_install_additional_openhands(const char *home, const char *binary_path, bool force,
+                                             bool dry_run) {
+    char cp[CLI_BUF_1K];
+    char skills_dir[CLI_BUF_1K];
+    snprintf(cp, sizeof(cp), "%s/.openhands/mcp.json", home);
+    snprintf(skills_dir, sizeof(skills_dir), "%s/.agents/skills", home);
+    install_generic_agent_config("OpenHands", binary_path, cp, NULL, dry_run,
+                                 cbm_install_editor_mcp);
+    install_agent_skill("OpenHands", skills_dir, force, dry_run);
+}
+
+static void cli_install_additional_augment(const char *home, const char *binary_path,
+                                           bool dry_run) {
+    char cp[CLI_BUF_1K];
+    char ip[CLI_BUF_1K];
+    char ap[CLI_BUF_1K];
+    char session_hp[CLI_BUF_1K];
+    char coverage_hp[CLI_BUF_1K];
+    snprintf(cp, sizeof(cp), "%s/.augment/settings.json", home);
+    snprintf(ip, sizeof(ip), "%s/.augment/rules/codebase-memory.md", home);
+    snprintf(ap, sizeof(ap), "%s/.augment/agents/codebase-memory.md", home);
+    snprintf(session_hp, sizeof(session_hp), "%s/.augment/hooks/%s", home, AUGMENT_SESSION_SCRIPT);
+    snprintf(coverage_hp, sizeof(coverage_hp), "%s/.augment/hooks/%s", home,
+             AUGMENT_COVERAGE_SCRIPT);
+    install_generic_agent_config("Augment/Auggie", binary_path, cp, ip, dry_run,
+                                 cbm_install_editor_mcp);
+    install_tiered_agent_profiles(
+        (cbm_tiered_profile_set_t){
+            .label = "Augment/Auggie",
+            .verify_path = ap,
+            .binary_path = binary_path,
+            .legacy_verify_content = legacy_augment_verify_agent_content,
+            .dialect = CBM_GRAPH_DIALECT_AUGMENT,
+        },
+        dry_run);
+    if (g_install_plan) {
+        plan_record("Augment/Auggie", "hook", cp);
+        plan_record("Augment/Auggie", "hook", session_hp);
+        plan_record("Augment/Auggie", "hook", coverage_hp);
+    } else {
+        bool hook_ok = true;
+        if (!dry_run) {
+            if (!cbm_install_augment_session_script(binary_path, session_hp)) {
+                hook_ok = false;
+                record_agent_config_error(false, "Augment/Auggie", "session_script_install",
+                                          session_hp);
+            } else if (cbm_upsert_augment_session_hook(cp, session_hp) != CLI_OK) {
+                hook_ok = false;
+                record_agent_config_error(false, "Augment/Auggie", "session_hook_install", cp);
+            }
+            if (!cbm_install_augment_coverage_script(binary_path, coverage_hp)) {
+                hook_ok = false;
+                record_agent_config_error(false, "Augment/Auggie", "coverage_script_install",
+                                          coverage_hp);
+            } else if (cbm_upsert_augment_coverage_hook(cp, coverage_hp) != CLI_OK) {
+                hook_ok = false;
+                record_agent_config_error(false, "Augment/Auggie", "coverage_hook_install", cp);
+            }
+        }
+        if (hook_ok) {
+            printf("  hooks: SessionStart + PostToolUse view coverage\n");
+        }
+    }
+}
+
+static void cli_install_additional_cline(const char *home, const char *binary_path, bool force,
+                                         bool dry_run) {
+    char cline_root[CLI_BUF_1K];
+    char cline_data[CLI_BUF_1K];
+    char cli_cp[CLI_BUF_1K];
+    char ide_cp[CLI_BUF_1K];
+    char ip[CLI_BUF_1K];
+    char skills_dir[CLI_BUF_1K];
+    cbm_cline_root_dir(home, cline_root, sizeof(cline_root));
+    cbm_cline_data_dir(home, cline_data, sizeof(cline_data));
+    snprintf(cli_cp, sizeof(cli_cp), "%s/mcp.json", cline_root);
+    snprintf(ide_cp, sizeof(ide_cp), "%s/settings/cline_mcp_settings.json", cline_data);
+    snprintf(ip, sizeof(ip), "%s/rules/codebase-memory-mcp.md", cline_root);
+    snprintf(skills_dir, sizeof(skills_dir), "%s/skills", cline_root);
+    install_generic_agent_config("Cline", binary_path, cli_cp, ip, dry_run, cbm_upsert_cline_mcp);
+    install_generic_agent_config("Cline IDE", binary_path, ide_cp, NULL, dry_run,
+                                 cbm_upsert_cline_mcp);
+    install_agent_skill("Cline", skills_dir, force, dry_run);
+    reconcile_cline_context_hooks(cline_root, binary_path, dry_run);
+}
+
+static void cli_install_additional_warp(const char *home, bool force, bool dry_run) {
+    char skills_dir[CLI_BUF_1K];
+    snprintf(skills_dir, sizeof(skills_dir), "%s/.agents/skills", home);
+    install_agent_skill("Warp", skills_dir, force, dry_run);
+}
+
+static void cli_install_additional_qwen(const char *home, const char *binary_path, bool force,
+                                        bool dry_run) {
+    char qwen_home[CLI_BUF_1K];
+    char cp[CLI_BUF_1K];
+    char ip[CLI_BUF_1K];
+    char skills_dir[CLI_BUF_1K];
+    char ap[CLI_BUF_1K];
+    cbm_qwen_home_dir(home, qwen_home, sizeof(qwen_home));
+    snprintf(cp, sizeof(cp), "%s/settings.json", qwen_home);
+    snprintf(ip, sizeof(ip), "%s/QWEN.md", qwen_home);
+    snprintf(skills_dir, sizeof(skills_dir), "%s/skills", qwen_home);
+    snprintf(ap, sizeof(ap), "%s/agents/codebase-memory.md", qwen_home);
+    install_generic_agent_config("Qwen Code", binary_path, cp, ip, dry_run, cbm_install_editor_mcp);
+    install_agent_skill("Qwen Code", skills_dir, force, dry_run);
+    install_tiered_agent_profiles(
+        (cbm_tiered_profile_set_t){
+            .label = "Qwen Code",
+            .verify_path = ap,
+            .binary_path = binary_path,
+            .legacy_verify_content = legacy_qwen_verify_agent_content,
+            .dialect = CBM_GRAPH_DIALECT_QWEN,
+        },
+        dry_run);
+    if (g_install_plan) {
+        plan_record("Qwen Code", "hook", cp);
+    } else if (!dry_run) {
+#ifdef _WIN32
+        bool windows = true;
+#else
+        bool windows = false;
+#endif
+        if (cbm_upsert_qwen_lifecycle_hooks(cp, binary_path, windows) != CLI_OK) {
+            record_agent_config_error(false, "Qwen Code", "lifecycle_hook_install", cp);
+        } else {
+            printf("  hooks: SessionStart + SubagentStart + PostToolUse ReadFile\n");
+        }
+    }
+}
+
+static void cli_install_additional_copilot_cli(const char *home, const char *binary_path,
+                                               bool dry_run) {
+    char config_dir[CLI_BUF_1K];
+    char cp[CLI_BUF_1K];
+    char ip[CLI_BUF_1K];
+    cbm_copilot_config_dir(home, config_dir, sizeof(config_dir));
+    snprintf(cp, sizeof(cp), "%s/mcp-config.json", config_dir);
+    snprintf(ip, sizeof(ip), "%s/copilot-instructions.md", config_dir);
+    install_generic_agent_config("Copilot CLI", binary_path, cp, ip, dry_run,
+                                 cbm_upsert_copilot_mcp);
+}
+
+static void cli_install_additional_vscode_copilot(const char *home, const char *binary_path,
+                                                  bool force, bool dry_run) {
+    install_copilot_durable_context(home, binary_path, force, dry_run);
+}
+
+static void cli_install_additional_factory_droid(const char *home, const char *binary_path,
+                                                 bool force, bool dry_run) {
+    char cp[CLI_BUF_1K];
+    char ip[CLI_BUF_1K];
+    char hp[CLI_BUF_1K];
+    char ap[CLI_BUF_1K];
+    char skills_dir[CLI_BUF_1K];
+    snprintf(cp, sizeof(cp), "%s/.factory/mcp.json", home);
+    snprintf(ip, sizeof(ip), "%s/.factory/AGENTS.md", home);
+    snprintf(hp, sizeof(hp), "%s/.factory/hooks.json", home);
+    snprintf(ap, sizeof(ap), "%s/.factory/droids/codebase-memory.md", home);
+    snprintf(skills_dir, sizeof(skills_dir), "%s/.factory/skills", home);
+    install_generic_agent_config("Factory Droid", binary_path, cp, ip, dry_run,
+                                 cbm_upsert_factory_mcp);
+    install_agent_skill("Factory Droid", skills_dir, force, dry_run);
+    install_tiered_agent_profiles(
+        (cbm_tiered_profile_set_t){
+            .label = "Factory Droid",
+            .verify_path = ap,
+            .binary_path = binary_path,
+            .legacy_verify_content = legacy_factory_verify_agent_content,
+            .dialect = CBM_GRAPH_DIALECT_FACTORY,
+        },
+        dry_run);
+    bool hook_supported = cbm_optional_hook_supported("factory", cbm_current_platform_is_windows());
+    if (g_install_plan) {
+        if (hook_supported) {
+            plan_record("Factory Droid", "hook", hp);
+        }
+    } else if (!hook_supported) {
+        printf("  hooks: withheld on Windows (vendor documents Bash only)\n");
+    } else {
+        bool hook_ok = true;
+        if (!dry_run) {
+            if (cbm_upsert_factory_hooks(hp, binary_path) != CLI_OK) {
+                hook_ok = false;
+                record_agent_config_error(false, "Factory Droid", "context_hook_install", hp);
+            }
+        }
+        if (hook_ok) {
+            printf("  hooks: SessionStart + PostToolUse Read coverage\n");
+        }
+    }
+}
+
+static void cli_install_additional_crush(const char *home, const char *binary_path, bool dry_run) {
+    char cp[CLI_BUF_1K];
+    char ip[CLI_BUF_1K];
+    cbm_crush_config_path(home, cp, sizeof(cp));
+    snprintf(ip, sizeof(ip), "%s/.config/crush/codebase-memory.md", home);
+    install_generic_agent_config("Crush", binary_path, cp, NULL, dry_run, cbm_upsert_crush_mcp);
+    if (g_install_plan) {
+        plan_record("Crush", "instructions", ip);
+    } else {
+        if (!dry_run) {
+            if (cbm_upsert_instructions(ip, crush_context_content) != CLI_OK) {
+                record_agent_config_error(false, "Crush", "task_context_install", ip);
+            }
+            if (cbm_upsert_crush_context_path(cp, ip) != CLI_OK) {
+                record_agent_config_error(false, "Crush", "context_reference_install", cp);
+            }
+        }
+        printf("  task context: %s\n", ip);
+    }
+}
+
+static void cli_install_additional_goose(const char *home, const char *binary_path, bool dry_run) {
+    char config_dir[CLI_BUF_1K];
+    char cp[CLI_BUF_1K];
+    char ip[CLI_BUF_1K];
+    cbm_goose_config_dir(home, config_dir, sizeof(config_dir));
+    snprintf(cp, sizeof(cp), "%s/config.yaml", config_dir);
+    snprintf(ip, sizeof(ip), "%s/.config/goose/.goosehints", home);
+    install_generic_agent_config("Goose", binary_path, cp, ip, dry_run, cbm_upsert_goose_mcp);
+}
+
+static void cli_install_additional_mistral_vibe(const char *home, const char *binary_path,
+                                                bool force, bool dry_run) {
+    char config_dir[CLI_BUF_1K];
+    char cp[CLI_BUF_1K];
+    char ip[CLI_BUF_1K];
+    char skills_dir[CLI_BUF_1K];
+    char ap[CLI_BUF_1K];
+    char prompt_path[CLI_BUF_1K];
+    cbm_vibe_config_dir(home, config_dir, sizeof(config_dir));
+    snprintf(cp, sizeof(cp), "%s/config.toml", config_dir);
+    snprintf(ip, sizeof(ip), "%s/AGENTS.md", config_dir);
+    snprintf(skills_dir, sizeof(skills_dir), "%s/skills", config_dir);
+    snprintf(ap, sizeof(ap), "%s/agents/codebase-memory.toml", config_dir);
+    snprintf(prompt_path, sizeof(prompt_path), "%s/prompts/codebase-memory.md", config_dir);
+    install_generic_agent_config("Mistral Vibe", binary_path, cp, ip, dry_run, cbm_upsert_vibe_mcp);
+    install_agent_skill("Mistral Vibe", skills_dir, force, dry_run);
+    install_tiered_agent_profiles(
+        (cbm_tiered_profile_set_t){
+            .label = "Mistral Vibe",
+            .verify_path = ap,
+            .binary_path = binary_path,
+            .legacy_verify_content = legacy_vibe_verify_agent_content,
+            .dialect = CBM_GRAPH_DIALECT_VIBE,
+        },
+        dry_run);
+    install_tiered_profile_prompts("Mistral Vibe", prompt_path, CBM_GRAPH_DIALECT_VIBE,
+                                   legacy_vibe_verify_prompt_content, dry_run);
 }
 
 static void install_additional_agent_configs(const cbm_detected_agents_t *agents, const char *home,
                                              const char *binary_path, bool force, bool dry_run) {
     if (agents->hermes) {
-        char hermes_home[CLI_BUF_1K];
-        char cp[CLI_BUF_1K];
-        char skills_dir[CLI_BUF_1K];
-        cbm_hermes_home_dir(home, hermes_home, sizeof(hermes_home));
-        snprintf(cp, sizeof(cp), "%s/config.yaml", hermes_home);
-        snprintf(skills_dir, sizeof(skills_dir), "%s/skills", hermes_home);
-        install_generic_agent_config("Hermes", binary_path, cp, NULL, dry_run,
-                                     cbm_upsert_hermes_mcp);
-        install_agent_skill("Hermes", skills_dir, force, dry_run);
-        if (g_install_plan) {
-            plan_record("Hermes", "hook", cp);
-        } else {
-            int hook_result = CBM_YAML_IDENTITY_EDIT_OK;
-            if (!dry_run) {
-                hook_result = prepare_config_parent(cp)
-                                  ? cbm_upsert_hermes_context_hook(cp, binary_path)
-                                  : CBM_YAML_IDENTITY_EDIT_ERROR;
-            }
-            if (hook_result == CBM_YAML_IDENTITY_EDIT_FOREIGN) {
-                record_agent_config_error(false, "Hermes", "pre_llm_hook_foreign", cp);
-            } else if (hook_result != CBM_YAML_IDENTITY_EDIT_OK) {
-                record_agent_config_error(false, "Hermes", "pre_llm_hook_install", cp);
-            } else {
-                printf("  hook: %s (pre_llm_call)\n", cp);
-            }
-        }
+        cli_install_additional_hermes(home, binary_path, force, dry_run);
     }
     if (agents->openhands) {
-        char cp[CLI_BUF_1K];
-        char skills_dir[CLI_BUF_1K];
-        snprintf(cp, sizeof(cp), "%s/.openhands/mcp.json", home);
-        snprintf(skills_dir, sizeof(skills_dir), "%s/.agents/skills", home);
-        install_generic_agent_config("OpenHands", binary_path, cp, NULL, dry_run,
-                                     cbm_install_editor_mcp);
-        install_agent_skill("OpenHands", skills_dir, force, dry_run);
+        cli_install_additional_openhands(home, binary_path, force, dry_run);
     }
     if (agents->augment) {
-        char cp[CLI_BUF_1K];
-        char ip[CLI_BUF_1K];
-        char ap[CLI_BUF_1K];
-        char session_hp[CLI_BUF_1K];
-        char coverage_hp[CLI_BUF_1K];
-        snprintf(cp, sizeof(cp), "%s/.augment/settings.json", home);
-        snprintf(ip, sizeof(ip), "%s/.augment/rules/codebase-memory.md", home);
-        snprintf(ap, sizeof(ap), "%s/.augment/agents/codebase-memory.md", home);
-        snprintf(session_hp, sizeof(session_hp), "%s/.augment/hooks/%s", home,
-                 AUGMENT_SESSION_SCRIPT);
-        snprintf(coverage_hp, sizeof(coverage_hp), "%s/.augment/hooks/%s", home,
-                 AUGMENT_COVERAGE_SCRIPT);
-        install_generic_agent_config("Augment/Auggie", binary_path, cp, ip, dry_run,
-                                     cbm_install_editor_mcp);
-        install_tiered_agent_profiles(
-            (cbm_tiered_profile_set_t){
-                .label = "Augment/Auggie",
-                .verify_path = ap,
-                .binary_path = binary_path,
-                .legacy_verify_content = legacy_augment_verify_agent_content,
-                .dialect = CBM_GRAPH_DIALECT_AUGMENT,
-            },
-            dry_run);
-        if (g_install_plan) {
-            plan_record("Augment/Auggie", "hook", cp);
-            plan_record("Augment/Auggie", "hook", session_hp);
-            plan_record("Augment/Auggie", "hook", coverage_hp);
-        } else {
-            bool hook_ok = true;
-            if (!dry_run) {
-                if (!cbm_install_augment_session_script(binary_path, session_hp)) {
-                    hook_ok = false;
-                    record_agent_config_error(false, "Augment/Auggie", "session_script_install",
-                                              session_hp);
-                } else if (cbm_upsert_augment_session_hook(cp, session_hp) != CLI_OK) {
-                    hook_ok = false;
-                    record_agent_config_error(false, "Augment/Auggie", "session_hook_install", cp);
-                }
-                if (!cbm_install_augment_coverage_script(binary_path, coverage_hp)) {
-                    hook_ok = false;
-                    record_agent_config_error(false, "Augment/Auggie", "coverage_script_install",
-                                              coverage_hp);
-                } else if (cbm_upsert_augment_coverage_hook(cp, coverage_hp) != CLI_OK) {
-                    hook_ok = false;
-                    record_agent_config_error(false, "Augment/Auggie", "coverage_hook_install", cp);
-                }
-            }
-            if (hook_ok) {
-                printf("  hooks: SessionStart + PostToolUse view coverage\n");
-            }
-        }
+        cli_install_additional_augment(home, binary_path, dry_run);
     }
     if (agents->cline) {
-        char cline_root[CLI_BUF_1K];
-        char cline_data[CLI_BUF_1K];
-        char cli_cp[CLI_BUF_1K];
-        char ide_cp[CLI_BUF_1K];
-        char ip[CLI_BUF_1K];
-        char skills_dir[CLI_BUF_1K];
-        cbm_cline_root_dir(home, cline_root, sizeof(cline_root));
-        cbm_cline_data_dir(home, cline_data, sizeof(cline_data));
-        snprintf(cli_cp, sizeof(cli_cp), "%s/mcp.json", cline_root);
-        snprintf(ide_cp, sizeof(ide_cp), "%s/settings/cline_mcp_settings.json", cline_data);
-        snprintf(ip, sizeof(ip), "%s/rules/codebase-memory-mcp.md", cline_root);
-        snprintf(skills_dir, sizeof(skills_dir), "%s/skills", cline_root);
-        install_generic_agent_config("Cline", binary_path, cli_cp, ip, dry_run,
-                                     cbm_upsert_cline_mcp);
-        install_generic_agent_config("Cline IDE", binary_path, ide_cp, NULL, dry_run,
-                                     cbm_upsert_cline_mcp);
-        install_agent_skill("Cline", skills_dir, force, dry_run);
-        reconcile_cline_context_hooks(cline_root, binary_path, dry_run);
+        cli_install_additional_cline(home, binary_path, force, dry_run);
     }
     if (agents->warp) {
-        char skills_dir[CLI_BUF_1K];
-        snprintf(skills_dir, sizeof(skills_dir), "%s/.agents/skills", home);
-        install_agent_skill("Warp", skills_dir, force, dry_run);
+        cli_install_additional_warp(home, force, dry_run);
     }
     if (agents->qwen) {
-        char qwen_home[CLI_BUF_1K];
-        char cp[CLI_BUF_1K];
-        char ip[CLI_BUF_1K];
-        char skills_dir[CLI_BUF_1K];
-        char ap[CLI_BUF_1K];
-        cbm_qwen_home_dir(home, qwen_home, sizeof(qwen_home));
-        snprintf(cp, sizeof(cp), "%s/settings.json", qwen_home);
-        snprintf(ip, sizeof(ip), "%s/QWEN.md", qwen_home);
-        snprintf(skills_dir, sizeof(skills_dir), "%s/skills", qwen_home);
-        snprintf(ap, sizeof(ap), "%s/agents/codebase-memory.md", qwen_home);
-        install_generic_agent_config("Qwen Code", binary_path, cp, ip, dry_run,
-                                     cbm_install_editor_mcp);
-        install_agent_skill("Qwen Code", skills_dir, force, dry_run);
-        install_tiered_agent_profiles(
-            (cbm_tiered_profile_set_t){
-                .label = "Qwen Code",
-                .verify_path = ap,
-                .binary_path = binary_path,
-                .legacy_verify_content = legacy_qwen_verify_agent_content,
-                .dialect = CBM_GRAPH_DIALECT_QWEN,
-            },
-            dry_run);
-        if (g_install_plan) {
-            plan_record("Qwen Code", "hook", cp);
-        } else if (!dry_run) {
-#ifdef _WIN32
-            bool windows = true;
-#else
-            bool windows = false;
-#endif
-            if (cbm_upsert_qwen_lifecycle_hooks(cp, binary_path, windows) != CLI_OK) {
-                record_agent_config_error(false, "Qwen Code", "lifecycle_hook_install", cp);
-            } else {
-                printf("  hooks: SessionStart + SubagentStart + PostToolUse ReadFile\n");
-            }
-        }
+        cli_install_additional_qwen(home, binary_path, force, dry_run);
     }
     if (agents->copilot_cli) {
-        char config_dir[CLI_BUF_1K];
-        char cp[CLI_BUF_1K];
-        char ip[CLI_BUF_1K];
-        cbm_copilot_config_dir(home, config_dir, sizeof(config_dir));
-        snprintf(cp, sizeof(cp), "%s/mcp-config.json", config_dir);
-        snprintf(ip, sizeof(ip), "%s/copilot-instructions.md", config_dir);
-        install_generic_agent_config("Copilot CLI", binary_path, cp, ip, dry_run,
-                                     cbm_upsert_copilot_mcp);
+        cli_install_additional_copilot_cli(home, binary_path, dry_run);
     }
     if (agents->vscode || agents->copilot_cli) {
-        install_copilot_durable_context(home, binary_path, force, dry_run);
+        cli_install_additional_vscode_copilot(home, binary_path, force, dry_run);
     }
     if (agents->factory_droid) {
-        char cp[CLI_BUF_1K];
-        char ip[CLI_BUF_1K];
-        char hp[CLI_BUF_1K];
-        char ap[CLI_BUF_1K];
-        char skills_dir[CLI_BUF_1K];
-        snprintf(cp, sizeof(cp), "%s/.factory/mcp.json", home);
-        snprintf(ip, sizeof(ip), "%s/.factory/AGENTS.md", home);
-        snprintf(hp, sizeof(hp), "%s/.factory/hooks.json", home);
-        snprintf(ap, sizeof(ap), "%s/.factory/droids/codebase-memory.md", home);
-        snprintf(skills_dir, sizeof(skills_dir), "%s/.factory/skills", home);
-        install_generic_agent_config("Factory Droid", binary_path, cp, ip, dry_run,
-                                     cbm_upsert_factory_mcp);
-        install_agent_skill("Factory Droid", skills_dir, force, dry_run);
-        install_tiered_agent_profiles(
-            (cbm_tiered_profile_set_t){
-                .label = "Factory Droid",
-                .verify_path = ap,
-                .binary_path = binary_path,
-                .legacy_verify_content = legacy_factory_verify_agent_content,
-                .dialect = CBM_GRAPH_DIALECT_FACTORY,
-            },
-            dry_run);
-        bool hook_supported =
-            cbm_optional_hook_supported("factory", cbm_current_platform_is_windows());
-        if (g_install_plan) {
-            if (hook_supported) {
-                plan_record("Factory Droid", "hook", hp);
-            }
-        } else if (!hook_supported) {
-            printf("  hooks: withheld on Windows (vendor documents Bash only)\n");
-        } else {
-            bool hook_ok = true;
-            if (!dry_run) {
-                if (cbm_upsert_factory_hooks(hp, binary_path) != CLI_OK) {
-                    hook_ok = false;
-                    record_agent_config_error(false, "Factory Droid", "context_hook_install", hp);
-                }
-            }
-            if (hook_ok) {
-                printf("  hooks: SessionStart + PostToolUse Read coverage\n");
-            }
-        }
+        cli_install_additional_factory_droid(home, binary_path, force, dry_run);
     }
     if (agents->crush) {
-        char cp[CLI_BUF_1K];
-        char ip[CLI_BUF_1K];
-        cbm_crush_config_path(home, cp, sizeof(cp));
-        snprintf(ip, sizeof(ip), "%s/.config/crush/codebase-memory.md", home);
-        install_generic_agent_config("Crush", binary_path, cp, NULL, dry_run, cbm_upsert_crush_mcp);
-        if (g_install_plan) {
-            plan_record("Crush", "instructions", ip);
-        } else {
-            if (!dry_run) {
-                if (cbm_upsert_instructions(ip, crush_context_content) != CLI_OK) {
-                    record_agent_config_error(false, "Crush", "task_context_install", ip);
-                }
-                if (cbm_upsert_crush_context_path(cp, ip) != CLI_OK) {
-                    record_agent_config_error(false, "Crush", "context_reference_install", cp);
-                }
-            }
-            printf("  task context: %s\n", ip);
-        }
+        cli_install_additional_crush(home, binary_path, dry_run);
     }
     if (agents->goose) {
-        char config_dir[CLI_BUF_1K];
-        char cp[CLI_BUF_1K];
-        char ip[CLI_BUF_1K];
-        cbm_goose_config_dir(home, config_dir, sizeof(config_dir));
-        snprintf(cp, sizeof(cp), "%s/config.yaml", config_dir);
-        snprintf(ip, sizeof(ip), "%s/.config/goose/.goosehints", home);
-        install_generic_agent_config("Goose", binary_path, cp, ip, dry_run, cbm_upsert_goose_mcp);
+        cli_install_additional_goose(home, binary_path, dry_run);
     }
     if (agents->mistral_vibe) {
-        char config_dir[CLI_BUF_1K];
-        char cp[CLI_BUF_1K];
-        char ip[CLI_BUF_1K];
-        char skills_dir[CLI_BUF_1K];
-        char ap[CLI_BUF_1K];
-        char prompt_path[CLI_BUF_1K];
-        cbm_vibe_config_dir(home, config_dir, sizeof(config_dir));
-        snprintf(cp, sizeof(cp), "%s/config.toml", config_dir);
-        snprintf(ip, sizeof(ip), "%s/AGENTS.md", config_dir);
-        snprintf(skills_dir, sizeof(skills_dir), "%s/skills", config_dir);
-        snprintf(ap, sizeof(ap), "%s/agents/codebase-memory.toml", config_dir);
-        snprintf(prompt_path, sizeof(prompt_path), "%s/prompts/codebase-memory.md", config_dir);
-        install_generic_agent_config("Mistral Vibe", binary_path, cp, ip, dry_run,
-                                     cbm_upsert_vibe_mcp);
-        install_agent_skill("Mistral Vibe", skills_dir, force, dry_run);
-        install_tiered_agent_profiles(
-            (cbm_tiered_profile_set_t){
-                .label = "Mistral Vibe",
-                .verify_path = ap,
-                .binary_path = binary_path,
-                .legacy_verify_content = legacy_vibe_verify_agent_content,
-                .dialect = CBM_GRAPH_DIALECT_VIBE,
-            },
-            dry_run);
-        install_tiered_profile_prompts("Mistral Vibe", prompt_path, CBM_GRAPH_DIALECT_VIBE,
-                                       legacy_vibe_verify_prompt_content, dry_run);
+        cli_install_additional_mistral_vibe(home, binary_path, force, dry_run);
     }
 }
 
@@ -8833,7 +9164,6 @@ static int count_db_indexes(const char *home) {
  * assert the default path preserves the DB. It is intentionally NOT declared
  * in cli.h (internal helper); the test carries an extern forward declaration.
  */
-int cbm_install_handle_existing_indexes(const char *home, bool reset, bool dry_run);
 static int cbm_install_prepare_existing_indexes(const char *home, bool reset, bool dry_run,
                                                 bool *delete_indexes_out) {
     if (delete_indexes_out) {
@@ -8841,7 +9171,7 @@ static int cbm_install_prepare_existing_indexes(const char *home, bool reset, bo
     }
     int index_count = count_db_indexes(home);
     if (index_count <= 0) {
-        return 1; /* nothing to handle, proceed */
+        return CLI_STATUS_PRESENT; /* nothing to handle, proceed */
     }
 
     if (!reset) {
@@ -8851,7 +9181,7 @@ static int cbm_install_prepare_existing_indexes(const char *home, bool reset, bo
                index_count);
         cbm_list_indexes(home);
         printf("\n");
-        return 1; /* proceed without deleting */
+        return CLI_STATUS_PRESENT; /* proceed without deleting */
     }
 
     /* Opt-in reset (--reset-indexes): the original prompt-and-delete path. */
@@ -8865,19 +9195,21 @@ static int cbm_install_prepare_existing_indexes(const char *home, bool reset, bo
     if (!dry_run && delete_indexes_out) {
         *delete_indexes_out = true;
     }
-    return 1; /* proceed */
+    return CLI_STATUS_PRESENT; /* proceed */
 }
 
+#ifdef CBM_CLI_ENABLE_TEST_API
 int cbm_install_handle_existing_indexes(const char *home, bool reset, bool dry_run) {
     bool delete_indexes = false;
     int prepare_result =
         cbm_install_prepare_existing_indexes(home, reset, dry_run, &delete_indexes);
-    if (prepare_result == 1 && delete_indexes) {
+    if (prepare_result == CLI_STATUS_PRESENT && delete_indexes) {
         int removed = cbm_remove_indexes(home);
         printf("Removed %d index(es).\n\n", removed);
     }
     return prepare_result;
 }
+#endif
 
 /* ── Subcommand: install ──────────────────────────────────────── */
 
@@ -9061,6 +9393,88 @@ typedef struct {
     bool dry_run;
 } cli_install_activation_t;
 
+static int cli_install_stage_prepared_candidate(cli_install_activation_t *activation) {
+    if (activation->dry_run || activation->binary_transaction || !activation->prepared_candidate) {
+        return CLI_OK;
+    }
+    if (!cbm_mkdir_p(activation->bin_dir, CLI_OCTAL_PERM)) {
+        (void)fprintf(stderr, "error: cannot create install directory %s\n", activation->bin_dir);
+        return CLI_TRUE;
+    }
+    cbm_activation_transaction_status_t stage_status = cbm_activation_transaction_stage_file(
+        activation->bin_target, activation->prepared_candidate, &activation->binary_transaction);
+    cli_binary_validator_t restaged_validator = {{0}};
+    if (stage_status == CBM_ACTIVATION_TRANSACTION_OK && activation->binary_transaction &&
+        cli_activation_transaction_expected_build(activation->binary_transaction,
+                                                  &restaged_validator) &&
+        activation->has_binary_validator &&
+        strcmp(restaged_validator.fingerprint, activation->binary_validator.fingerprint) == 0) {
+        return CLI_OK;
+    }
+    (void)fprintf(
+        stderr,
+        "error: verified install candidate could not be re-staged on the target filesystem\n");
+    cli_activation_transaction_abort_or_fail_stop(&activation->binary_transaction,
+                                                  "install_transaction_restaging_cleanup");
+    return CLI_TRUE;
+}
+
+static int cli_install_publish_binary(cli_install_activation_t *activation) {
+    if (activation->dry_run || !activation->binary_transaction) {
+        return CLI_OK;
+    }
+    if (cli_activation_transaction_commit_validated(
+            activation->binary_transaction,
+            activation->has_binary_validator ? &activation->binary_validator : NULL,
+            CLI_OCTAL_PERM) == CLI_OK) {
+        printf("Installed binary -> %s\n\n", activation->bin_target);
+        return CLI_OK;
+    }
+    cli_activation_transaction_abort_or_fail_stop(&activation->binary_transaction,
+                                                  "install_transaction_publish_recovery");
+    (void)fprintf(stderr, "error: failed to publish the staged binary to %s\n",
+                  activation->bin_target);
+    return CLI_TRUE;
+}
+
+static int cli_install_configure_path(const cli_install_activation_t *activation) {
+    int path_result = CLI_TRUE;
+#ifdef _WIN32
+    path_result = cli_ensure_windows_user_path(
+        activation->bin_dir, activation->dry_run || g_cli_activation_test_ops_set);
+    if (path_result == CLI_OK) {
+        printf("\nAdded %s to the current-user PATH\n", activation->bin_dir);
+    } else if (path_result == CLI_TRUE) {
+        printf("\nPATH already includes %s\n", activation->bin_dir);
+    }
+#else
+    if (activation->shell_rc[0]) {
+        path_result =
+            cbm_ensure_path(activation->bin_dir, activation->shell_rc, activation->dry_run);
+        if (path_result == CLI_OK) {
+            printf("\nAdded %s to PATH in %s\n", activation->bin_dir, activation->shell_rc);
+        } else if (path_result == CLI_TRUE) {
+            printf("\nPATH already includes %s\n", activation->bin_dir);
+        }
+    }
+#endif
+    return path_result;
+}
+
+static int cli_install_remove_indexes(const cli_install_activation_t *activation) {
+    if (activation->dry_run || !activation->delete_indexes) {
+        return CLI_OK;
+    }
+    int expected = count_db_indexes(activation->home);
+    int removed = cbm_remove_indexes(activation->home);
+    printf("Removed %d index(es).\n\n", removed);
+    if (removed == expected) {
+        return CLI_OK;
+    }
+    (void)fprintf(stderr, "error: only %d of %d indexes could be removed\n", removed, expected);
+    return CLI_TRUE;
+}
+
 static int cli_install_activate(void *opaque) {
     cli_install_activation_t *activation = opaque;
     if (!activation || !activation->bin_target || !activation->bin_dir || !activation->home ||
@@ -9075,40 +9489,11 @@ static int cli_install_activate(void *opaque) {
             printf("Would install binary -> %s\n\n", activation->bin_target);
         }
     }
-    if (!activation->dry_run && !activation->binary_transaction && activation->prepared_candidate) {
-        if (!cbm_mkdir_p(activation->bin_dir, CLI_OCTAL_PERM)) {
-            (void)fprintf(stderr, "error: cannot create install directory %s\n",
-                          activation->bin_dir);
-            return CLI_TRUE;
-        }
-        cbm_activation_transaction_status_t stage_status = cbm_activation_transaction_stage_file(
-            activation->bin_target, activation->prepared_candidate,
-            &activation->binary_transaction);
-        cli_binary_validator_t restaged_validator = {{0}};
-        if (stage_status != CBM_ACTIVATION_TRANSACTION_OK || !activation->binary_transaction ||
-            !cli_activation_transaction_expected_build(activation->binary_transaction,
-                                                       &restaged_validator) ||
-            !activation->has_binary_validator ||
-            strcmp(restaged_validator.fingerprint, activation->binary_validator.fingerprint) != 0) {
-            (void)fprintf(stderr, "error: verified install candidate could not be "
-                                  "re-staged on the target filesystem\n");
-            cli_activation_transaction_abort_or_fail_stop(&activation->binary_transaction,
-                                                          "install_transaction_restaging_cleanup");
-            return CLI_TRUE;
-        }
+    if (cli_install_stage_prepared_candidate(activation) != CLI_OK) {
+        return CLI_TRUE;
     }
-    if (!activation->dry_run && activation->binary_transaction) {
-        if (cli_activation_transaction_commit_validated(
-                activation->binary_transaction,
-                activation->has_binary_validator ? &activation->binary_validator : NULL,
-                CLI_OCTAL_PERM) != CLI_OK) {
-            cli_activation_transaction_abort_or_fail_stop(&activation->binary_transaction,
-                                                          "install_transaction_publish_recovery");
-            (void)fprintf(stderr, "error: failed to publish the staged binary to %s\n",
-                          activation->bin_target);
-            return CLI_TRUE;
-        }
-        printf("Installed binary -> %s\n\n", activation->bin_target);
+    if (cli_install_publish_binary(activation) != CLI_OK) {
+        return CLI_TRUE;
     }
     /* Config and PATH refreshes are install mutations too. Keep them in this
      * callback so the startup lock covers the complete filesystem window,
@@ -9128,86 +9513,287 @@ static int cli_install_activate(void *opaque) {
                               "was not attempted\n");
         return CLI_ACTIVATION_PARTIAL;
     }
-    int path_rc = CLI_TRUE;
-#ifdef _WIN32
-    path_rc = cli_ensure_windows_user_path(activation->bin_dir,
-                                           activation->dry_run || g_cli_activation_test_ops_set);
-    if (path_rc == CLI_OK) {
-        printf("\nAdded %s to the current-user PATH\n", activation->bin_dir);
-    } else if (path_rc == CLI_TRUE) {
-        printf("\nPATH already includes %s\n", activation->bin_dir);
-    }
-#else
-    if (activation->shell_rc[0]) {
-        path_rc = cbm_ensure_path(activation->bin_dir, activation->shell_rc, activation->dry_run);
-        if (path_rc == 0) {
-            printf("\nAdded %s to PATH in %s\n", activation->bin_dir, activation->shell_rc);
-        } else if (path_rc == CLI_TRUE) {
-            printf("\nPATH already includes %s\n", activation->bin_dir);
-        }
-    }
-#endif
-    if (path_rc == CLI_ERR) {
+    if (cli_install_configure_path(activation) == CLI_ERR) {
         cli_activation_transaction_finalize_committed_or_fail_stop(
             &activation->binary_transaction, "install_transaction_path_failure_finalize");
         (void)fprintf(stderr, "error: PATH configuration failed; the published/current "
                               "executable was kept, and index cleanup was not attempted\n");
         return CLI_ACTIVATION_PARTIAL;
     }
-    if (!activation->dry_run && activation->delete_indexes) {
-        int expected = count_db_indexes(activation->home);
-        int removed = cbm_remove_indexes(activation->home);
-        printf("Removed %d index(es).\n\n", removed);
-        if (removed != expected) {
-            cli_activation_transaction_finalize_committed_or_fail_stop(
-                &activation->binary_transaction, "install_transaction_index_failure_finalize");
-            (void)fprintf(stderr, "error: only %d of %d indexes could be removed\n", removed,
-                          expected);
-            return CLI_ACTIVATION_PARTIAL;
-        }
+    if (cli_install_remove_indexes(activation) != CLI_OK) {
+        cli_activation_transaction_finalize_committed_or_fail_stop(
+            &activation->binary_transaction, "install_transaction_index_failure_finalize");
+        return CLI_ACTIVATION_PARTIAL;
     }
     cli_activation_transaction_finalize_committed_or_fail_stop(&activation->binary_transaction,
                                                                "install_transaction_finalize");
     return CLI_OK;
 }
 
-int cbm_cmd_install(int argc, char **argv) {
-    parse_auto_answer(argc, argv);
-    bool dry_run = false;
-    bool force = false;
-    bool plan = false;
-    bool reset_indexes = false;
-    bool skip_config = false;
-    const char *requested_bin_dir = NULL;
+typedef struct {
+    cbm_activation_transaction_t *binary_transaction;
+    cli_binary_validator_t binary_validator;
+    bool has_binary_validator;
+    char prepared_dir[CLI_BUF_1K];
+    char prepared_candidate[CLI_BUF_1K];
+} cli_install_binary_preparation_t;
+
+static void cli_install_discard_preparation(cli_install_binary_preparation_t *preparation) {
+    if (preparation->binary_transaction) {
+        (void)cli_activation_transaction_abort(&preparation->binary_transaction);
+    }
+    if (preparation->prepared_candidate[0]) {
+        (void)cbm_unlink(preparation->prepared_candidate);
+    }
+    if (preparation->prepared_dir[0]) {
+        (void)cbm_rmdir(preparation->prepared_dir);
+    }
+}
+
+static bool cli_install_create_private_candidate(cli_install_binary_preparation_t *preparation) {
+    int dir_length = snprintf(preparation->prepared_dir, sizeof(preparation->prepared_dir),
+                              "%s/cbm-install-XXXXXX", cbm_tmpdir());
+    if (dir_length <= 0 || (size_t)dir_length >= sizeof(preparation->prepared_dir) ||
+        !cbm_mkdtemp(preparation->prepared_dir)) {
+        (void)fprintf(stderr, "error: cannot create private install staging directory\n");
+        return false;
+    }
+#ifdef _WIN32
+    int path_length =
+        snprintf(preparation->prepared_candidate, sizeof(preparation->prepared_candidate),
+                 "%s/codebase-memory-mcp.exe", preparation->prepared_dir);
+#else
+    int path_length =
+        snprintf(preparation->prepared_candidate, sizeof(preparation->prepared_candidate),
+                 "%s/codebase-memory-mcp", preparation->prepared_dir);
+#endif
+    if (path_length > 0 && (size_t)path_length < sizeof(preparation->prepared_candidate)) {
+        return true;
+    }
+    (void)fprintf(stderr, "error: private install staging path is too long\n");
+    cli_install_discard_preparation(preparation);
+    return false;
+}
+
+static bool cli_install_stage_candidate(const char *stage_target, const char *candidate,
+                                        cli_install_binary_preparation_t *preparation,
+                                        cli_binary_validator_t *validator) {
+    cbm_activation_transaction_status_t status = cbm_activation_transaction_stage_file(
+        stage_target, candidate, &preparation->binary_transaction);
+    if (status == CBM_ACTIVATION_TRANSACTION_OK && preparation->binary_transaction &&
+        cli_activation_transaction_expected_build(preparation->binary_transaction, validator)) {
+        return true;
+    }
+    const char *refusal = cbm_activation_transaction_refusal_note();
+    (void)fprintf(stderr, "error: failed to stage install candidate: %s%s%s\n",
+                  cbm_activation_transaction_status_message(status), refusal[0] ? ": " : "",
+                  refusal);
+    cli_install_discard_preparation(preparation);
+    return false;
+}
+
+static bool cli_install_validate_private_candidate(const char *bin_target,
+                                                   bool target_parent_exists,
+                                                   cli_install_binary_preparation_t *preparation,
+                                                   cli_binary_validator_t *staged_validator) {
+    if (cli_activation_transaction_commit_validated(preparation->binary_transaction,
+                                                    staged_validator, CLI_OCTAL_PERM) != CLI_OK ||
+        cli_activation_transaction_finalize_close(&preparation->binary_transaction) != CLI_OK) {
+        (void)fprintf(stderr, "error: private install candidate preparation failed\n");
+        cli_install_discard_preparation(preparation);
+        return false;
+    }
+#ifdef __APPLE__
+    if (cbm_macos_adhoc_sign(preparation->prepared_candidate) != 0) {
+        (void)fprintf(stderr, "error: ad-hoc signing the private macOS candidate failed\n");
+        cli_install_discard_preparation(preparation);
+        return false;
+    }
+#endif
+    preparation->has_binary_validator = cbm_daemon_build_fingerprint_file(
+        preparation->prepared_candidate, preparation->binary_validator.fingerprint);
+    if (preparation->has_binary_validator && !g_cli_activation_test_ops_set) {
+        const char *argv[] = {preparation->prepared_candidate, "--version", NULL};
+        preparation->has_binary_validator = cbm_exec_no_shell(argv) == CLI_OK;
+    }
+    if (!preparation->has_binary_validator) {
+        (void)fprintf(stderr, "error: prepared install candidate could not be verified\n");
+        cli_install_discard_preparation(preparation);
+        return false;
+    }
+    if (!target_parent_exists) {
+        return true;
+    }
+    cli_binary_validator_t final_validator = {{0}};
+    if (!cli_install_stage_candidate(bin_target, preparation->prepared_candidate, preparation,
+                                     &final_validator) ||
+        strcmp(final_validator.fingerprint, preparation->binary_validator.fingerprint) != 0) {
+        (void)fprintf(
+            stderr,
+            "error: signed install candidate could not be staged on the target filesystem\n");
+        cli_install_discard_preparation(preparation);
+        return false;
+    }
+    preparation->binary_validator = final_validator;
+    return true;
+}
+
+static int cli_install_prepare_binary(bool dry_run, bool prepare_binary, bool do_copy,
+                                      const char *self_path, const char *bin_target,
+                                      const char *bin_dir,
+                                      cli_install_binary_preparation_t *preparation) {
+    if (!preparation) {
+        return CLI_TRUE;
+    }
+    memset(preparation, 0, sizeof(*preparation));
+    if (dry_run || !prepare_binary) {
+        return CLI_OK;
+    }
+#ifdef __APPLE__
+    const char *candidate = do_copy ? self_path : bin_target;
+#else
+    const char *candidate = self_path;
+#endif
+    bool target_parent_exists = cbm_is_dir(bin_dir);
+    bool private_candidate = !target_parent_exists;
+#ifdef __APPLE__
+    private_candidate = true;
+#endif
+    if (private_candidate && !cli_install_create_private_candidate(preparation)) {
+        return CLI_TRUE;
+    }
+    const char *stage_target = private_candidate ? preparation->prepared_candidate : bin_target;
+    cli_binary_validator_t staged_validator = {{0}};
+    if (!cli_install_stage_candidate(stage_target, candidate, preparation, &staged_validator)) {
+        return CLI_TRUE;
+    }
+    if (!private_candidate) {
+        preparation->binary_validator = staged_validator;
+        preparation->has_binary_validator = true;
+        return CLI_OK;
+    }
+    return cli_install_validate_private_candidate(bin_target, target_parent_exists, preparation,
+                                                  &staged_validator)
+               ? CLI_OK
+               : CLI_TRUE;
+}
+
+typedef struct {
+    bool dry_run;
+    bool force;
+    bool plan;
+    bool reset_indexes;
+    bool skip_config;
+    const char *requested_bin_dir;
+} cli_install_options_t;
+
+static bool cli_install_parse_options(int argc, char **argv, cli_install_options_t *options) {
+    if (!options) {
+        return false;
+    }
+    *options = (cli_install_options_t){0};
     for (int i = 0; i < argc; i++) {
         if (strcmp(argv[i], "--dry-run") == 0) {
-            dry_run = true;
+            options->dry_run = true;
         } else if (strcmp(argv[i], "--force") == 0) {
-            force = true;
+            options->force = true;
         } else if (strcmp(argv[i], "--plan") == 0) {
-            plan = true;
+            options->plan = true;
         } else if (strcmp(argv[i], "--reset-indexes") == 0) {
-            reset_indexes = true;
+            options->reset_indexes = true;
         } else if (strcmp(argv[i], "--skip-config") == 0) {
-            skip_config = true;
+            options->skip_config = true;
         } else if (strncmp(argv[i], "--dir=", SLEN("--dir=")) == 0) {
-            requested_bin_dir = argv[i] + SLEN("--dir=");
-            if (!requested_bin_dir[0]) {
+            options->requested_bin_dir = argv[i] + SLEN("--dir=");
+            if (!options->requested_bin_dir[0]) {
                 (void)fprintf(stderr, "error: --dir requires a non-empty path\n");
-                return CLI_TRUE;
+                return false;
             }
         } else if (strcmp(argv[i], "--dir") == 0) {
-            if (i + 1 >= argc || !argv[i + 1] || !argv[i + 1][0] || argv[i + 1][0] == '-') {
+            if (i + CLI_ARRAY_LENGTH_ONE >= argc || !argv[i + CLI_ARRAY_LENGTH_ONE] ||
+                !argv[i + CLI_ARRAY_LENGTH_ONE][CLI_ARRAY_INDEX_FIRST] ||
+                argv[i + CLI_ARRAY_LENGTH_ONE][CLI_ARRAY_INDEX_FIRST] == '-') {
                 (void)fprintf(stderr, "error: --dir requires a non-empty path\n");
-                return CLI_TRUE;
+                return false;
             }
-            requested_bin_dir = argv[++i];
+            options->requested_bin_dir = argv[++i];
         } else if (strcmp(argv[i], "-y") != 0 && strcmp(argv[i], "--yes") != 0 &&
                    strcmp(argv[i], "-n") != 0 && strcmp(argv[i], "--no") != 0) {
             (void)fprintf(stderr, "error: unknown install option: %s\n", argv[i]);
-            return CLI_TRUE;
+            return false;
         }
     }
+    return true;
+}
+
+static bool cli_install_resolve_paths(const char *home, const char *requested_bin_dir,
+                                      char bin_dir[CLI_BUF_1K], char bin_target[CLI_BUF_1K]) {
+    int bin_dir_length = requested_bin_dir ? snprintf(bin_dir, CLI_BUF_1K, "%s", requested_bin_dir)
+                                           : snprintf(bin_dir, CLI_BUF_1K, "%s/.local/bin", home);
+    if (bin_dir_length <= 0 || bin_dir_length >= CLI_BUF_1K) {
+        (void)fprintf(stderr, "error: install directory path is too long\n");
+        return false;
+    }
+    cbm_normalize_path_sep(bin_dir);
+#ifdef _WIN32
+    int target_length = snprintf(bin_target, CLI_BUF_1K, "%s/codebase-memory-mcp.exe", bin_dir);
+#else
+    int target_length = snprintf(bin_target, CLI_BUF_1K, "%s/codebase-memory-mcp", bin_dir);
+#endif
+    if (target_length <= 0 || target_length >= CLI_BUF_1K) {
+        (void)fprintf(stderr, "error: install target path is too long\n");
+        return false;
+    }
+    return true;
+}
+
+static int cli_install_emit_plan(const char *home, const char *bin_target, bool skip_config) {
+    char *json = cbm_build_install_plan_json_options(home, bin_target, skip_config);
+    if (!json) {
+        (void)fprintf(stderr, "error: failed to build install plan\n");
+        return CLI_TRUE;
+    }
+    printf("%s\n", json);
+    free(json);
+    return CLI_OK;
+}
+
+static bool cli_install_assets_ready(const char *home, bool dry_run) {
+    char assets_error[CLI_BUF_1K];
+    if (cbm_integration_assets_install(home, dry_run, assets_error, sizeof(assets_error))) {
+        return true;
+    }
+    (void)fprintf(stderr, "error: %s\n", assets_error);
+    return false;
+}
+
+static bool cli_install_choose_copy(bool same_binary, bool target_exists, bool *force,
+                                    const char *bin_target) {
+    bool do_copy = !same_binary && (!target_exists || *force);
+    if (same_binary || !target_exists || *force) {
+        return do_copy;
+    }
+    printf("A different binary already exists at:\n  %s\n", bin_target);
+    if (prompt_yn("Replace it with the binary you ran install from?")) {
+        *force = true;
+        return true;
+    }
+    printf("Keeping existing binary; configs will point at it.\n\n");
+    return false;
+}
+
+int cbm_cmd_install(int argc, char **argv) {
+    parse_auto_answer(argc, argv);
+    cli_install_options_t options;
+    if (!cli_install_parse_options(argc, argv, &options)) {
+        return CLI_TRUE;
+    }
+    bool dry_run = options.dry_run;
+    bool force = options.force;
+    bool plan = options.plan;
+    bool reset_indexes = options.reset_indexes;
+    bool skip_config = options.skip_config;
+    const char *requested_bin_dir = options.requested_bin_dir;
 
     const char *home = cbm_get_home_dir();
     if (!home) {
@@ -9216,23 +9802,8 @@ int cbm_cmd_install(int argc, char **argv) {
     }
 
     char bin_dir[CLI_BUF_1K];
-    int bin_dir_length = requested_bin_dir
-                             ? snprintf(bin_dir, sizeof(bin_dir), "%s", requested_bin_dir)
-                             : snprintf(bin_dir, sizeof(bin_dir), "%s/.local/bin", home);
-    if (bin_dir_length <= 0 || (size_t)bin_dir_length >= sizeof(bin_dir)) {
-        (void)fprintf(stderr, "error: install directory path is too long\n");
-        return CLI_TRUE;
-    }
-    cbm_normalize_path_sep(bin_dir);
     char bin_target[CLI_BUF_1K];
-#ifdef _WIN32
-    int target_length =
-        snprintf(bin_target, sizeof(bin_target), "%s/codebase-memory-mcp.exe", bin_dir);
-#else
-    int target_length = snprintf(bin_target, sizeof(bin_target), "%s/codebase-memory-mcp", bin_dir);
-#endif
-    if (target_length <= 0 || (size_t)target_length >= sizeof(bin_target)) {
-        (void)fprintf(stderr, "error: install target path is too long\n");
+    if (!cli_install_resolve_paths(home, requested_bin_dir, bin_dir, bin_target)) {
         return CLI_TRUE;
     }
 
@@ -9240,14 +9811,7 @@ int cbm_cmd_install(int argc, char **argv) {
      * mutating anything (no config writes, no index deletion, no network) so
      * an agent can inspect exactly what install would touch first (#388). */
     if (plan) {
-        char *json = cbm_build_install_plan_json_options(home, bin_target, skip_config);
-        if (!json) {
-            (void)fprintf(stderr, "error: failed to build install plan\n");
-            return CLI_TRUE;
-        }
-        printf("%s\n", json);
-        free(json);
-        return 0;
+        return cli_install_emit_plan(home, bin_target, skip_config);
     }
 
     /* Integration-assets gate: verify cbm-integrations.json against the
@@ -9256,12 +9820,8 @@ int cbm_cmd_install(int argc, char **argv) {
      * every later upgrade/uninstall decision). Missing or modified assets
      * fail the whole install with one actionable message — never a partial
      * install, and --dry-run must not promise what a real run would refuse. */
-    {
-        char assets_error[CLI_BUF_1K];
-        if (!cbm_integration_assets_install(home, dry_run, assets_error, sizeof(assets_error))) {
-            (void)fprintf(stderr, "error: %s\n", assets_error);
-            return CLI_TRUE;
-        }
+    if (!cli_install_assets_ready(home, dry_run)) {
+        return CLI_TRUE;
     }
 
     printf("codebase-memory-mcp install %s\n\n", CBM_VERSION);
@@ -9272,7 +9832,7 @@ int cbm_cmd_install(int argc, char **argv) {
     struct stat target_status;
     bool target_exists = (stat(bin_target, &target_status) == 0);
     bool same_binary = cbm_same_file(self_path, bin_target);
-    bool do_copy = !same_binary && (!target_exists || force);
+    bool do_copy = cli_install_choose_copy(same_binary, target_exists, &force, bin_target);
 
     /* (#607) Default: preserve existing indexes. `--reset-indexes` opts into
      * the old prompt-and-delete behaviour. The helper returns 0 only when the
@@ -9287,15 +9847,6 @@ int cbm_cmd_install(int argc, char **argv) {
      * `install --force` from a freshly built binary silently kept the OLD file
      * — operators ran stale code believing they had upgraded (#472). Copy the
      * running binary to ~/.local/bin (unless we ARE that file), then sign it. */
-    if (!same_binary && target_exists && !force) {
-        printf("A different binary already exists at:\n  %s\n", bin_target);
-        if (prompt_yn("Replace it with the binary you ran install from?")) {
-            do_copy = true;
-            force = true; /* user approved replacement for this run */
-        } else {
-            printf("Keeping existing binary; configs will point at it.\n\n");
-        }
-    }
 #ifdef __APPLE__
     /* A freshly clang-built arm64 binary is linker-signed (flags=0x20002)
      * and gets Killed:9 when spawned by an MCP host. Sign the private staged
@@ -9306,132 +9857,18 @@ int cbm_cmd_install(int argc, char **argv) {
 #else
     bool prepare_binary = do_copy;
 #endif
-    cbm_activation_transaction_t *binary_transaction = NULL;
-    cli_binary_validator_t binary_validator = {{0}};
-    bool has_binary_validator = false;
-    char prepared_dir[CLI_BUF_1K] = {0};
-    char prepared_candidate[CLI_BUF_1K] = {0};
-    if (!dry_run && prepare_binary) {
-#ifdef __APPLE__
-        const char *candidate = do_copy ? self_path : bin_target;
-#else
-        /* Non-macOS activation reaches this block only for a real copy. */
-        const char *candidate = self_path;
-#endif
-        bool target_parent_exists = cbm_is_dir(bin_dir);
-        bool prepare_out_of_line = !target_parent_exists;
-#ifdef __APPLE__
-        /* codesign may replace the file's inode. Sign a private published copy
-         * first, then open the final transaction over those immutable bytes;
-         * mutating a transaction-owned stage invalidates its identity snapshot. */
-        prepare_out_of_line = prepare_out_of_line || sign_binary;
-#endif
-        const char *stage_target = bin_target;
-        if (prepare_out_of_line) {
-            int dir_length =
-                snprintf(prepared_dir, sizeof(prepared_dir), "%s/cbm-install-XXXXXX", cbm_tmpdir());
-            if (dir_length <= 0 || (size_t)dir_length >= sizeof(prepared_dir) ||
-                !cbm_mkdtemp(prepared_dir)) {
-                (void)fprintf(stderr, "error: cannot create private install staging "
-                                      "directory\n");
-                return CLI_TRUE;
-            }
-#ifdef _WIN32
-            int candidate_length = snprintf(prepared_candidate, sizeof(prepared_candidate),
-                                            "%s/codebase-memory-mcp.exe", prepared_dir);
-#else
-            int candidate_length = snprintf(prepared_candidate, sizeof(prepared_candidate),
-                                            "%s/codebase-memory-mcp", prepared_dir);
-#endif
-            if (candidate_length <= 0 || (size_t)candidate_length >= sizeof(prepared_candidate)) {
-                (void)cbm_rmdir(prepared_dir);
-                (void)fprintf(stderr, "error: private install staging path is too long\n");
-                return CLI_TRUE;
-            }
-            stage_target = prepared_candidate;
-        }
-        cbm_activation_transaction_status_t stage_status =
-            cbm_activation_transaction_stage_file(stage_target, candidate, &binary_transaction);
-        cli_binary_validator_t staged_validator = {{0}};
-        if (stage_status != CBM_ACTIVATION_TRANSACTION_OK || !binary_transaction ||
-            !cli_activation_transaction_expected_build(binary_transaction, &staged_validator)) {
-            const char *stage_refusal = cbm_activation_transaction_refusal_note();
-            (void)fprintf(stderr, "error: failed to stage install candidate: %s%s%s\n",
-                          cbm_activation_transaction_status_message(stage_status),
-                          stage_refusal[0] ? ": " : "", stage_refusal);
-            (void)cli_activation_transaction_abort(&binary_transaction);
-            if (prepared_dir[0]) {
-                (void)cbm_rmdir(prepared_dir);
-            }
-            return CLI_TRUE;
-        }
-        if (prepare_out_of_line) {
-            if (cli_activation_transaction_commit_validated(binary_transaction, &staged_validator,
-                                                            CLI_OCTAL_PERM) != CLI_OK ||
-                cli_activation_transaction_finalize_close(&binary_transaction) != CLI_OK) {
-                (void)cli_activation_transaction_abort(&binary_transaction);
-                (void)cbm_unlink(prepared_candidate);
-                (void)cbm_rmdir(prepared_dir);
-                (void)fprintf(stderr, "error: private install candidate preparation "
-                                      "failed\n");
-                return CLI_TRUE;
-            }
-#ifdef __APPLE__
-            if (sign_binary && cbm_macos_adhoc_sign(prepared_candidate) != 0) {
-                (void)fprintf(stderr, "error: ad-hoc signing the private macOS candidate failed\n");
-                (void)cbm_unlink(prepared_candidate);
-                (void)cbm_rmdir(prepared_dir);
-                return CLI_TRUE;
-            }
-#endif
-            has_binary_validator =
-                cbm_daemon_build_fingerprint_file(prepared_candidate, binary_validator.fingerprint);
-            if (has_binary_validator && !g_cli_activation_test_ops_set) {
-                const char *candidate_argv[] = {prepared_candidate, "--version", NULL};
-                has_binary_validator = cbm_exec_no_shell(candidate_argv) == CLI_OK;
-            }
-            if (!has_binary_validator) {
-                (void)fprintf(stderr, "error: prepared install candidate could not be "
-                                      "verified\n");
-                (void)cbm_unlink(prepared_candidate);
-                (void)cbm_rmdir(prepared_dir);
-                return CLI_TRUE;
-            }
-            if (target_parent_exists) {
-                stage_status = cbm_activation_transaction_stage_file(bin_target, prepared_candidate,
-                                                                     &binary_transaction);
-                cli_binary_validator_t final_validator = {{0}};
-                if (stage_status != CBM_ACTIVATION_TRANSACTION_OK || !binary_transaction ||
-                    !cli_activation_transaction_expected_build(binary_transaction,
-                                                               &final_validator) ||
-                    strcmp(final_validator.fingerprint, binary_validator.fingerprint) != 0) {
-                    (void)fprintf(stderr, "error: signed install candidate could not be staged "
-                                          "on the target filesystem\n");
-                    (void)cli_activation_transaction_abort(&binary_transaction);
-                    (void)cbm_unlink(prepared_candidate);
-                    (void)cbm_rmdir(prepared_dir);
-                    return CLI_TRUE;
-                }
-                binary_validator = final_validator;
-            }
-        } else {
-            binary_validator = staged_validator;
-            has_binary_validator = true;
-        }
-        if (!has_binary_validator) {
-            (void)fprintf(stderr, "error: staged install candidate could not be verified\n");
-            if (binary_transaction) {
-                (void)cli_activation_transaction_abort(&binary_transaction);
-            }
-            if (prepared_candidate[0]) {
-                (void)cbm_unlink(prepared_candidate);
-            }
-            if (prepared_dir[0]) {
-                (void)cbm_rmdir(prepared_dir);
-            }
-            return CLI_TRUE;
-        }
+    cli_install_binary_preparation_t preparation;
+    if (cli_install_prepare_binary(dry_run, prepare_binary, do_copy, self_path, bin_target, bin_dir,
+                                   &preparation) != CLI_OK) {
+        return CLI_TRUE;
     }
+    cbm_activation_transaction_t *binary_transaction = preparation.binary_transaction;
+    cli_binary_validator_t binary_validator = preparation.binary_validator;
+    bool has_binary_validator = preparation.has_binary_validator;
+    char prepared_dir[CLI_BUF_1K];
+    char prepared_candidate[CLI_BUF_1K];
+    snprintf(prepared_dir, sizeof(prepared_dir), "%s", preparation.prepared_dir);
+    snprintf(prepared_candidate, sizeof(prepared_candidate), "%s", preparation.prepared_candidate);
     char shell_rc[CLI_BUF_1K] = {0};
 #ifndef _WIN32
     snprintf(shell_rc, sizeof(shell_rc), "%s", cbm_detect_shell_rc(home));
@@ -9535,77 +9972,9 @@ static void uninstall_claude_code(const char *home, bool dry_run) {
         record_agent_config_error(true, "Claude Code", "mcp_uninstall", mcp_path2);
     }
 
-    char settings_path[CLI_BUF_1K];
-    snprintf(settings_path, sizeof(settings_path), "%s/settings.json", config_dir);
     if (!dry_run) {
-        if (cbm_remove_claude_hooks(settings_path) != CLI_OK) {
-            record_agent_config_error(true, "Claude Code", "pretool_hook_uninstall", settings_path);
-        }
-        if (cbm_remove_session_hooks(settings_path) != CLI_OK) {
-            record_agent_config_error(true, "Claude Code", "session_hook_uninstall", settings_path);
-        }
-        if (cbm_remove_claude_subagent_hooks(settings_path) != CLI_OK) {
-            record_agent_config_error(true, "Claude Code", "subagent_hook_uninstall",
-                                      settings_path);
-        }
-        /* Ownership reference for the on-disk scripts: materialize current +
-         * released bodies from the verified asset store and compare exactly.
-         * When the assets are unavailable the render fails and every script
-         * is preserved with a recorded error — never guessed at. */
-        static const struct {
-            const char *name;
-            const char *legacy_name;
-            const char *template_id;
-        } hook_types[] = {
-            {CMM_HOOK_GATE_SCRIPT, CMM_HOOK_GATE_SCRIPT_LEGACY, CMM_HOOK_GATE_TEMPLATE},
-            {CMM_SESSION_REMINDER_SCRIPT, CMM_SESSION_REMINDER_SCRIPT_LEGACY,
-             CMM_SESSION_REMINDER_TEMPLATE},
-            {CMM_SUBAGENT_REMINDER_SCRIPT, CMM_SUBAGENT_REMINDER_SCRIPT_LEGACY,
-             CMM_SUBAGENT_REMINDER_TEMPLATE},
-        };
-        char hooks_dir[CLI_BUF_1K];
-        int hooks_written = snprintf(hooks_dir, sizeof(hooks_dir), "%s/hooks", config_dir);
-        bool hooks_dir_valid = hooks_written > 0 && (size_t)hooks_written < sizeof(hooks_dir);
-        for (size_t i = 0; i < sizeof(hook_types) / sizeof(hook_types[0]); i++) {
-            char script_path[CLI_BUF_1K];
-            int script_written = hooks_dir_valid ? snprintf(script_path, sizeof(script_path),
-                                                            "%s/%s", hooks_dir, hook_types[i].name)
-                                                 : CLI_ERR;
-            bool script_path_valid =
-                script_written > 0 && (size_t)script_written < sizeof(script_path);
-            const cbm_integration_template_t *tpl =
-                cbm_integration_template(hook_types[i].template_id);
-            char current[CLI_BUF_8K];
-            if (!tpl || cbm_render_integration_body(&tpl->current, installed_binary, NULL, current,
-                                                    sizeof(current)) != CLI_OK) {
-                record_agent_config_error(true, "Claude Code", "hook_script_uninstall",
-                                          hook_types[i].name);
-                continue;
-            }
-            char released_storage[CMM_MAX_RELEASED_SCRIPTS][CLI_BUF_8K];
-            const char *legacy[CMM_MAX_RELEASED_SCRIPTS];
-            size_t legacy_count = cbm_render_released_scripts(
-                tpl, installed_binary, released_storage, legacy, CMM_MAX_RELEASED_SCRIPTS);
-            if (!script_path_valid ||
-                cbm_remove_owned_hook_script(script_path, current, legacy, legacy_count) < CLI_OK) {
-                record_agent_config_error(true, "Claude Code", "hook_script_uninstall",
-                                          script_path_valid ? script_path : hook_types[i].name);
-            }
-#ifdef _WIN32
-            if (!hooks_dir_valid ||
-                cbm_remove_owned_legacy_hook_script(hooks_dir, hook_types[i].legacy_name, current,
-                                                    legacy, legacy_count) != CLI_OK) {
-                char legacy_path[CLI_BUF_1K];
-                int written = hooks_dir_valid ? snprintf(legacy_path, sizeof(legacy_path), "%s/%s",
-                                                         hooks_dir, hook_types[i].legacy_name)
-                                              : CLI_ERR;
-                record_agent_config_error(true, "Claude Code", "legacy_hook_script_uninstall",
-                                          written > 0 && (size_t)written < sizeof(legacy_path)
-                                              ? legacy_path
-                                              : hook_types[i].legacy_name);
-            }
-#endif
-        }
+        cli_uninstall_claude_hooks(config_dir);
+        cli_uninstall_claude_hook_scripts(config_dir, installed_binary);
     }
     printf("  removed PreToolUse + SessionStart + SubagentStart hooks\n");
 }
@@ -9824,7 +10193,7 @@ static bool remove_cline_context_hooks(const char *cline_root, const char *binar
             record_agent_config_error(uninstalling, "Cline",
                                       uninstalling ? "hook_uninstall" : "legacy_hook_cleanup",
                                       hook_path);
-        } else if (result == 1) {
+        } else if (result == CLI_STATUS_PRESENT) {
             printf("  hook: preserved modified %s adapter\n", cmm_cline_context_events[i]);
         }
     }
@@ -9931,6 +10300,62 @@ static void uninstall_pochi_durable_context(const char *home, bool dry_run) {
         dry_run);
 }
 
+static bool cli_uninstall_registry_mcp(const cbm_agent_client_profile_t *profile,
+                                       const cbm_agent_registry_context_t *registry,
+                                       const char *binary_path, bool dry_run,
+                                       char config_path[CLI_BUF_1K]) {
+    if ((profile->capabilities & CBM_AGENT_CAP_MCP) == 0U) {
+        return false;
+    }
+    int resolved =
+        cbm_agent_client_resolve_path(profile->id, &registry->options, config_path, CLI_BUF_1K);
+    if (resolved != CLI_OK || !profile->remove_mcp) {
+        record_agent_config_error(true, profile->display_name, "mcp_resolve", profile->stable_id);
+        return false;
+    }
+    int edit_result =
+        dry_run ? CBM_AGENT_EDIT_OK : profile->remove_mcp(profile->id, config_path, binary_path);
+    if (edit_result == CBM_AGENT_EDIT_FOREIGN) {
+        printf("  mcp: preserved modified or foreign entry in %s\n", config_path);
+    } else if (edit_result != CBM_AGENT_EDIT_OK) {
+        record_agent_config_error(true, profile->display_name, "mcp_uninstall", config_path);
+    } else {
+        printf("  mcp: removed canonical entry from %s\n", config_path);
+    }
+    return true;
+}
+
+static void cli_uninstall_registry_context(const cbm_agent_client_profile_t *profile,
+                                           const cbm_agent_registry_context_t *registry,
+                                           const char *home, const char *binary_path,
+                                           const char *config_path, bool config_resolved,
+                                           bool dry_run) {
+    if (profile->id == CBM_AGENT_CLIENT_QODER) {
+        uninstall_qoder_durable_context(home, binary_path, config_path, config_resolved, dry_run);
+    } else if (profile->id == CBM_AGENT_CLIENT_KIMI) {
+        uninstall_kimi_durable_context(registry, dry_run);
+    } else if (profile->id == CBM_AGENT_CLIENT_GITLAB_DUO) {
+        uninstall_gitlab_durable_context(registry, binary_path, dry_run);
+    } else if (profile->id == CBM_AGENT_CLIENT_ROVO_DEV) {
+        uninstall_rovo_durable_context(home, dry_run);
+    } else if (profile->id == CBM_AGENT_CLIENT_AMP) {
+        uninstall_amp_durable_context(home, dry_run);
+    } else if (profile->id == CBM_AGENT_CLIENT_DEVIN) {
+        uninstall_devin_durable_context(registry, binary_path, config_path, config_resolved,
+                                        dry_run);
+    } else if (profile->id == CBM_AGENT_CLIENT_CODEBUDDY) {
+        uninstall_codebuddy_durable_context(home, dry_run);
+    } else if (profile->id == CBM_AGENT_CLIENT_IBM_BOB_IDE) {
+        uninstall_bob_durable_context(home, true, dry_run);
+    } else if (profile->id == CBM_AGENT_CLIENT_IBM_BOB_SHELL) {
+        uninstall_bob_durable_context(home, false, dry_run);
+    } else if (profile->id == CBM_AGENT_CLIENT_POCHI) {
+        uninstall_pochi_durable_context(home, dry_run);
+    } else if (profile->id == CBM_AGENT_CLIENT_PI) {
+        uninstall_pi_durable_context(home, dry_run);
+    }
+}
+
 static void uninstall_agent_client_registry(const char *home, bool dry_run) {
     cbm_agent_registry_context_t registry;
     /* Reached only from cbm_cmd_uninstall, which resolves home via
@@ -9945,54 +10370,10 @@ static void uninstall_agent_client_registry(const char *home, bool dry_run) {
         }
         printf("%s:\n", profile->display_name);
         char config_path[CLI_BUF_1K] = {0};
-        bool config_resolved = false;
-        if ((profile->capabilities & CBM_AGENT_CAP_MCP) != 0U) {
-            int resolved = cbm_agent_client_resolve_path(profile->id, &registry.options,
-                                                         config_path, sizeof(config_path));
-            if (resolved != 0 || !profile->remove_mcp) {
-                record_agent_config_error(true, profile->display_name, "mcp_resolve",
-                                          profile->stable_id);
-            } else {
-                config_resolved = true;
-                int edit_result = dry_run
-                                      ? CBM_AGENT_EDIT_OK
-                                      : profile->remove_mcp(profile->id, config_path, binary_path);
-                if (edit_result == CBM_AGENT_EDIT_FOREIGN) {
-                    printf("  mcp: preserved modified or foreign entry in %s\n", config_path);
-                } else if (edit_result != CBM_AGENT_EDIT_OK) {
-                    record_agent_config_error(true, profile->display_name, "mcp_uninstall",
-                                              config_path);
-                } else {
-                    printf("  mcp: removed canonical entry from %s\n", config_path);
-                }
-            }
-        }
-
-        if (profile->id == CBM_AGENT_CLIENT_QODER) {
-            uninstall_qoder_durable_context(home, binary_path, config_path, config_resolved,
-                                            dry_run);
-        } else if (profile->id == CBM_AGENT_CLIENT_KIMI) {
-            uninstall_kimi_durable_context(&registry, dry_run);
-        } else if (profile->id == CBM_AGENT_CLIENT_GITLAB_DUO) {
-            uninstall_gitlab_durable_context(&registry, binary_path, dry_run);
-        } else if (profile->id == CBM_AGENT_CLIENT_ROVO_DEV) {
-            uninstall_rovo_durable_context(home, dry_run);
-        } else if (profile->id == CBM_AGENT_CLIENT_AMP) {
-            uninstall_amp_durable_context(home, dry_run);
-        } else if (profile->id == CBM_AGENT_CLIENT_DEVIN) {
-            uninstall_devin_durable_context(&registry, binary_path, config_path, config_resolved,
-                                            dry_run);
-        } else if (profile->id == CBM_AGENT_CLIENT_CODEBUDDY) {
-            uninstall_codebuddy_durable_context(home, dry_run);
-        } else if (profile->id == CBM_AGENT_CLIENT_IBM_BOB_IDE) {
-            uninstall_bob_durable_context(home, true, dry_run);
-        } else if (profile->id == CBM_AGENT_CLIENT_IBM_BOB_SHELL) {
-            uninstall_bob_durable_context(home, false, dry_run);
-        } else if (profile->id == CBM_AGENT_CLIENT_POCHI) {
-            uninstall_pochi_durable_context(home, dry_run);
-        } else if (profile->id == CBM_AGENT_CLIENT_PI) {
-            uninstall_pi_durable_context(home, dry_run);
-        }
+        bool config_resolved =
+            cli_uninstall_registry_mcp(profile, &registry, binary_path, dry_run, config_path);
+        cli_uninstall_registry_context(profile, &registry, home, binary_path, config_path,
+                                       config_resolved, dry_run);
     }
 }
 
@@ -10038,301 +10419,611 @@ static void uninstall_gemini_config(const char *home, bool dry_run) {
     printf("Gemini CLI: removed MCP config + hooks + instructions + tiered subagents\n");
 }
 
+static void cli_uninstall_cli_codex(const char *home, bool dry_run) {
+    char config_dir[CLI_BUF_1K];
+    char cp[CLI_BUF_1K];
+    char ip[CLI_BUF_1K];
+    char skills_dir[CLI_BUF_1K];
+    char ap[CLI_BUF_1K];
+    char installed_binary[CLI_BUF_1K];
+    cbm_codex_config_dir(home, config_dir, sizeof(config_dir));
+    snprintf(cp, sizeof(cp), "%s/config.toml", config_dir);
+    snprintf(ip, sizeof(ip), "%s/AGENTS.md", config_dir);
+    snprintf(skills_dir, sizeof(skills_dir), "%s/skills", config_dir);
+    snprintf(ap, sizeof(ap), "%s/agents/codebase-memory.toml", config_dir);
+    cbm_agent_installed_binary_path(home, installed_binary, sizeof(installed_binary));
+    uninstall_agent_mcp_instr((mcp_uninstall_args_t){"Codex CLI", cp, ip}, dry_run,
+                              cbm_remove_codex_mcp_owned);
+    uninstall_agent_skill("Codex CLI", skills_dir, dry_run);
+    uninstall_tiered_agent_profiles(
+        (cbm_tiered_profile_set_t){
+            .label = "Codex CLI",
+            .verify_path = ap,
+            .binary_path = installed_binary,
+            .legacy_verify_content = legacy_codex_verify_agent_content,
+            .dialect = CBM_GRAPH_DIALECT_CODEX,
+        },
+        dry_run);
+    if (!dry_run) {
+        if (cbm_remove_codex_hooks(cp) != CLI_OK) {
+            record_agent_config_error(true, "Codex CLI", "hook_uninstall", cp);
+        }
+        char hooks_json[CLI_BUF_1K];
+        char hook_command[CLI_BUF_8K];
+        snprintf(hooks_json, sizeof(hooks_json), "%s/hooks.json", config_dir);
+        if (cbm_file_exists(hooks_json) &&
+            (cbm_build_augment_command(installed_binary, hook_command, sizeof(hook_command)) !=
+                 CLI_OK ||
+             cbm_remove_paired_lifecycle_hooks_json(hooks_json, hook_command) != CLI_OK)) {
+            record_agent_config_error(true, "Codex CLI", "json_hook_uninstall", hooks_json);
+        }
+    }
+}
+
+static void cli_uninstall_cli_gemini(const char *home, bool dry_run) {
+    uninstall_gemini_config(home, dry_run);
+}
+
+static void cli_uninstall_cli_opencode(const char *home, bool dry_run) {
+    char cp[CLI_BUF_1K];
+    char ip[CLI_BUF_1K];
+    char skills_dir[CLI_BUF_1K];
+    char ap[CLI_BUF_1K];
+    cbm_opencode_config_path(home, cp, sizeof(cp));
+    snprintf(ip, sizeof(ip), "%s/.config/opencode/AGENTS.md", home);
+    snprintf(skills_dir, sizeof(skills_dir), "%s/.config/opencode/skills", home);
+    snprintf(ap, sizeof(ap), "%s/.config/opencode/agents/codebase-memory.md", home);
+    uninstall_agent_mcp_instr((mcp_uninstall_args_t){"OpenCode", cp, ip}, dry_run,
+                              cbm_remove_opencode_mcp_owned);
+    uninstall_agent_skill("OpenCode", skills_dir, dry_run);
+    uninstall_tiered_agent_profiles(
+        (cbm_tiered_profile_set_t){
+            .label = "OpenCode",
+            .verify_path = ap,
+            .legacy_verify_content = legacy_opencode_verify_agent_content,
+            .dialect = CBM_GRAPH_DIALECT_OPENCODE,
+        },
+        dry_run);
+    char plugin_path[CLI_BUF_1K];
+    snprintf(plugin_path, sizeof(plugin_path), "%s/.config/opencode/plugins/cbm-augment.ts", home);
+    uninstall_generated_client_extension("OpenCode", plugin_path, dry_run);
+}
+
+static void cli_uninstall_cli_antigravity(const char *home, bool dry_run) {
+    char cp[CLI_BUF_1K];
+    char ip[CLI_BUF_1K];
+    snprintf(cp, sizeof(cp), "%s/.gemini/config/mcp_config.json", home);
+    snprintf(ip, sizeof(ip), "%s/.gemini/GEMINI.md", home);
+    uninstall_agent_mcp_instr((mcp_uninstall_args_t){"Antigravity", cp, ip}, dry_run,
+                              cbm_remove_antigravity_mcp_owned);
+    if (!dry_run) {
+        char sp[CLI_BUF_1K];
+        snprintf(sp, sizeof(sp), "%s/.gemini/antigravity-cli/settings.json", home);
+        if (cbm_remove_gemini_session_hooks(sp) != CLI_OK) {
+            record_agent_config_error(true, "Antigravity", "session_hook_uninstall", sp);
+        }
+    }
+}
+
+static void cli_uninstall_cli_aider(const char *home, bool dry_run) {
+    char cp[CLI_BUF_1K];
+    char ip[CLI_BUF_1K];
+    snprintf(cp, sizeof(cp), "%s/.aider.conf.yml", home);
+    snprintf(ip, sizeof(ip), "%s/CONVENTIONS.md", home);
+    if (!dry_run) {
+        if (cbm_yaml_remove_string_list_item(cp, "read", ip) != CLI_OK) {
+            record_agent_config_error(true, "Aider", "loader_uninstall", cp);
+        }
+        if (cbm_remove_instructions(ip) != CLI_OK) {
+            record_agent_config_error(true, "Aider", "instructions_uninstall", ip);
+        }
+    }
+    printf("Aider: removed instructions + loader reference\n");
+}
+
 static void uninstall_cli_agents(const cbm_detected_agents_t *agents, const char *home,
                                  bool dry_run) {
     if (agents->codex) {
-        char config_dir[CLI_BUF_1K];
-        char cp[CLI_BUF_1K];
-        char ip[CLI_BUF_1K];
-        char skills_dir[CLI_BUF_1K];
-        char ap[CLI_BUF_1K];
-        char installed_binary[CLI_BUF_1K];
-        cbm_codex_config_dir(home, config_dir, sizeof(config_dir));
-        snprintf(cp, sizeof(cp), "%s/config.toml", config_dir);
-        snprintf(ip, sizeof(ip), "%s/AGENTS.md", config_dir);
-        snprintf(skills_dir, sizeof(skills_dir), "%s/skills", config_dir);
-        snprintf(ap, sizeof(ap), "%s/agents/codebase-memory.toml", config_dir);
-        cbm_agent_installed_binary_path(home, installed_binary, sizeof(installed_binary));
-        uninstall_agent_mcp_instr((mcp_uninstall_args_t){"Codex CLI", cp, ip}, dry_run,
-                                  cbm_remove_codex_mcp_owned);
-        uninstall_agent_skill("Codex CLI", skills_dir, dry_run);
-        uninstall_tiered_agent_profiles(
-            (cbm_tiered_profile_set_t){
-                .label = "Codex CLI",
-                .verify_path = ap,
-                .binary_path = installed_binary,
-                .legacy_verify_content = legacy_codex_verify_agent_content,
-                .dialect = CBM_GRAPH_DIALECT_CODEX,
-            },
-            dry_run);
-        if (!dry_run) {
-            if (cbm_remove_codex_hooks(cp) != CLI_OK) {
-                record_agent_config_error(true, "Codex CLI", "hook_uninstall", cp);
-            }
-            char hooks_json[CLI_BUF_1K];
-            char hook_command[CLI_BUF_8K];
-            snprintf(hooks_json, sizeof(hooks_json), "%s/hooks.json", config_dir);
-            if (cbm_file_exists(hooks_json) &&
-                (cbm_build_augment_command(installed_binary, hook_command, sizeof(hook_command)) !=
-                     CLI_OK ||
-                 cbm_remove_paired_lifecycle_hooks_json(hooks_json, hook_command) != CLI_OK)) {
-                record_agent_config_error(true, "Codex CLI", "json_hook_uninstall", hooks_json);
-            }
-        }
+        cli_uninstall_cli_codex(home, dry_run);
     }
     if (agents->gemini) {
-        uninstall_gemini_config(home, dry_run);
+        cli_uninstall_cli_gemini(home, dry_run);
     }
     if (agents->opencode) {
-        char cp[CLI_BUF_1K];
-        char ip[CLI_BUF_1K];
-        char skills_dir[CLI_BUF_1K];
-        char ap[CLI_BUF_1K];
-        cbm_opencode_config_path(home, cp, sizeof(cp));
-        snprintf(ip, sizeof(ip), "%s/.config/opencode/AGENTS.md", home);
-        snprintf(skills_dir, sizeof(skills_dir), "%s/.config/opencode/skills", home);
-        snprintf(ap, sizeof(ap), "%s/.config/opencode/agents/codebase-memory.md", home);
-        uninstall_agent_mcp_instr((mcp_uninstall_args_t){"OpenCode", cp, ip}, dry_run,
-                                  cbm_remove_opencode_mcp_owned);
-        uninstall_agent_skill("OpenCode", skills_dir, dry_run);
-        uninstall_tiered_agent_profiles(
-            (cbm_tiered_profile_set_t){
-                .label = "OpenCode",
-                .verify_path = ap,
-                .legacy_verify_content = legacy_opencode_verify_agent_content,
-                .dialect = CBM_GRAPH_DIALECT_OPENCODE,
-            },
-            dry_run);
-        char plugin_path[CLI_BUF_1K];
-        snprintf(plugin_path, sizeof(plugin_path), "%s/.config/opencode/plugins/cbm-augment.ts",
-                 home);
-        uninstall_generated_client_extension("OpenCode", plugin_path, dry_run);
+        cli_uninstall_cli_opencode(home, dry_run);
     }
     if (agents->antigravity) {
-        char cp[CLI_BUF_1K];
-        char ip[CLI_BUF_1K];
-        snprintf(cp, sizeof(cp), "%s/.gemini/config/mcp_config.json", home);
-        snprintf(ip, sizeof(ip), "%s/.gemini/GEMINI.md", home);
-        uninstall_agent_mcp_instr((mcp_uninstall_args_t){"Antigravity", cp, ip}, dry_run,
-                                  cbm_remove_antigravity_mcp_owned);
-        if (!dry_run) {
-            char sp[CLI_BUF_1K];
-            snprintf(sp, sizeof(sp), "%s/.gemini/antigravity-cli/settings.json", home);
-            if (cbm_remove_gemini_session_hooks(sp) != CLI_OK) {
-                record_agent_config_error(true, "Antigravity", "session_hook_uninstall", sp);
-            }
-        }
+        cli_uninstall_cli_antigravity(home, dry_run);
     }
     if (agents->aider) {
-        char cp[CLI_BUF_1K];
-        char ip[CLI_BUF_1K];
-        snprintf(cp, sizeof(cp), "%s/.aider.conf.yml", home);
-        snprintf(ip, sizeof(ip), "%s/CONVENTIONS.md", home);
-        if (!dry_run) {
-            if (cbm_yaml_remove_string_list_item(cp, "read", ip) != CLI_OK) {
-                record_agent_config_error(true, "Aider", "loader_uninstall", cp);
-            }
-            if (cbm_remove_instructions(ip) != CLI_OK) {
-                record_agent_config_error(true, "Aider", "instructions_uninstall", ip);
-            }
-        }
-        printf("Aider: removed instructions + loader reference\n");
+        cli_uninstall_cli_aider(home, dry_run);
     }
 }
 
 /* Remove editor agent configs (Zed, KiloCode, VS Code, OpenClaw). */
+static void cli_uninstall_editor_zed(const char *home, bool dry_run) {
+    char config_dir[CLI_BUF_1K];
+    char cp[CLI_BUF_1K];
+    char ip[CLI_BUF_1K];
+    char skills_dir[CLI_BUF_1K];
+    cbm_zed_config_dir(home, config_dir, sizeof(config_dir));
+    cbm_zed_instructions_path(home, ip, sizeof(ip));
+    snprintf(cp, sizeof(cp), "%s/settings.json", config_dir);
+    snprintf(skills_dir, sizeof(skills_dir), "%s/.agents/skills", home);
+    uninstall_agent_mcp_instr((mcp_uninstall_args_t){"Zed", cp, ip}, dry_run,
+                              cbm_remove_zed_mcp_owned);
+    uninstall_agent_skill("Zed", skills_dir, dry_run);
+}
+
+static void cli_uninstall_editor_kilocode(const char *home, const char *installed_binary,
+                                          bool dry_run) {
+    char cp[CLI_BUF_1K];
+    char ip[CLI_BUF_1K];
+    char ap[CLI_BUF_1K];
+    snprintf(cp, sizeof(cp), "%s/.config/kilo/kilo.jsonc", home);
+    snprintf(ip, sizeof(ip), "%s/.config/kilo/rules/codebase-memory-mcp.md", home);
+    snprintf(ap, sizeof(ap), "%s/.config/kilo/agents/codebase-memory.md", home);
+    if (!dry_run) {
+        if (cbm_remove_kilo_mcp_owned(installed_binary, cp) != CLI_OK) {
+            record_agent_config_error(true, "KiloCode", "mcp_uninstall", cp);
+        }
+        if (cbm_json_like_remove_string(cp, "instructions", ip) != CLI_OK) {
+            record_agent_config_error(true, "KiloCode", "instruction_reference_uninstall", cp);
+        }
+        if (cbm_remove_instructions(ip) != CLI_OK) {
+            record_agent_config_error(true, "KiloCode", "instructions_uninstall", ip);
+        }
+
+        char legacy_cp[CLI_BUF_1K];
+        char legacy_ip[CLI_BUF_1K];
+#ifdef __APPLE__
+        snprintf(legacy_cp, sizeof(legacy_cp),
+                 "%s/Library/Application Support/Code/User/globalStorage/"
+                 "kilocode.kilo-code/settings/mcp_settings.json",
+                 home);
+#elif defined(_WIN32)
+        snprintf(legacy_cp, sizeof(legacy_cp),
+                 "%s/AppData/Roaming/Code/User/globalStorage/"
+                 "kilocode.kilo-code/settings/mcp_settings.json",
+                 home);
+#else
+        snprintf(legacy_cp, sizeof(legacy_cp),
+                 "%s/.config/Code/User/globalStorage/"
+                 "kilocode.kilo-code/settings/mcp_settings.json",
+                 home);
+#endif
+        snprintf(legacy_ip, sizeof(legacy_ip), "%s/.kilocode/rules/codebase-memory-mcp.md", home);
+        if (cbm_file_exists(legacy_cp) &&
+            cbm_remove_editor_mcp_owned(installed_binary, legacy_cp) != CLI_OK) {
+            record_agent_config_error(true, "KiloCode", "legacy_mcp_uninstall", legacy_cp);
+        }
+        if (cbm_file_exists(legacy_ip) && cbm_remove_instructions(legacy_ip) != CLI_OK) {
+            record_agent_config_error(true, "KiloCode", "legacy_rules_uninstall", legacy_ip);
+        }
+    }
+    uninstall_tiered_agent_profiles(
+        (cbm_tiered_profile_set_t){
+            .label = "KiloCode",
+            .verify_path = ap,
+            .legacy_verify_content = legacy_kilo_verify_agent_content,
+            .dialect = CBM_GRAPH_DIALECT_KILO,
+        },
+        dry_run);
+    printf("KiloCode: removed MCP config + instruction reference\n");
+}
+
+static void cli_uninstall_editor_vscode(const char *home, const char *installed_binary,
+                                        bool dry_run) {
+    char code_user[CLI_BUF_1K];
+    char cp[CLI_BUF_1K];
+#ifdef __APPLE__
+    snprintf(code_user, sizeof(code_user), "%s/Library/Application Support/Code/User", home);
+#else
+    snprintf(code_user, sizeof(code_user), "%s/Code/User", cbm_app_config_dir());
+#endif
+    snprintf(cp, sizeof(cp), "%s/mcp.json", code_user);
+    uninstall_agent_mcp_instr((mcp_uninstall_args_t){"VS Code", cp, NULL}, dry_run,
+                              cbm_remove_vscode_mcp_owned);
+    uninstall_vscode_profile_configs(code_user, installed_binary, dry_run);
+}
+
+static void cli_uninstall_editor_cursor(const char *home, bool dry_run) {
+    char cp[CLI_BUF_1K];
+    char skills_dir[CLI_BUF_1K];
+    char ap[CLI_BUF_1K];
+    snprintf(cp, sizeof(cp), "%s/.cursor/mcp.json", home);
+    snprintf(skills_dir, sizeof(skills_dir), "%s/.cursor/skills", home);
+    snprintf(ap, sizeof(ap), "%s/.cursor/agents/codebase-memory.md", home);
+    uninstall_agent_mcp_instr((mcp_uninstall_args_t){"Cursor", cp, NULL}, dry_run,
+                              cbm_remove_editor_mcp_owned);
+    uninstall_agent_skill("Cursor", skills_dir, dry_run);
+    uninstall_tiered_agent_profiles(
+        (cbm_tiered_profile_set_t){
+            .label = "Cursor",
+            .verify_path = ap,
+            .legacy_verify_content = legacy_cursor_verify_agent_content,
+            .dialect = CBM_GRAPH_DIALECT_CURSOR,
+        },
+        dry_run);
+}
+
+static void cli_uninstall_editor_windsurf(const char *home, bool dry_run) {
+    char cp[CLI_BUF_1K];
+    char ip[CLI_BUF_1K];
+    snprintf(cp, sizeof(cp), "%s/.codeium/windsurf/mcp_config.json", home);
+    snprintf(ip, sizeof(ip), "%s/.codeium/windsurf/memories/global_rules.md", home);
+    uninstall_agent_mcp_instr((mcp_uninstall_args_t){"Windsurf", cp, ip}, dry_run,
+                              cbm_remove_editor_mcp_owned);
+}
+
+static void cli_uninstall_editor_openclaw(const char *home, bool dry_run) {
+    char cp[CLI_BUF_1K];
+    if (cbm_openclaw_config_path(home, cp, sizeof(cp))) {
+        char workspace[CLI_BUF_1K];
+        bool workspace_ok = cbm_openclaw_workspace_path(home, cp, workspace, sizeof(workspace));
+        uninstall_agent_mcp_instr((mcp_uninstall_args_t){"OpenClaw", cp, NULL}, dry_run,
+                                  cbm_remove_openclaw_mcp_owned);
+        if (!dry_run && cbm_remove_openclaw_compaction(cp) != CLI_OK) {
+            record_agent_config_error(true, "OpenClaw", "compaction_uninstall", cp);
+        }
+        if (workspace_ok) {
+            char agents_path[CLI_BUF_1K];
+            char tools_path[CLI_BUF_1K];
+            snprintf(agents_path, sizeof(agents_path), "%s/AGENTS.md", workspace);
+            snprintf(tools_path, sizeof(tools_path), "%s/TOOLS.md", workspace);
+            if (!dry_run) {
+                if (cbm_remove_instructions(agents_path) != CLI_OK) {
+                    record_agent_config_error(true, "OpenClaw", "instructions_uninstall",
+                                              agents_path);
+                }
+                if (cbm_remove_instructions(tools_path) != CLI_OK) {
+                    record_agent_config_error(true, "OpenClaw", "tools_context_uninstall",
+                                              tools_path);
+                }
+            }
+            printf("  removed workspace instructions + compaction augmentation\n");
+        } else {
+            printf("  removed compaction augmentation; workspace instructions unresolved\n");
+        }
+    }
+}
+
+static void cli_uninstall_editor_kiro(const char *home, const char *installed_binary,
+                                      bool dry_run) {
+    char kiro_home[CLI_BUF_1K];
+    char cp[CLI_BUF_1K];
+    char ip[CLI_BUF_1K];
+    char skills_dir[CLI_BUF_1K];
+    char ap[CLI_BUF_1K];
+    cbm_kiro_home_dir(home, kiro_home, sizeof(kiro_home));
+    snprintf(cp, sizeof(cp), "%s/settings/mcp.json", kiro_home);
+    snprintf(ip, sizeof(ip), "%s/steering/codebase-memory.md", kiro_home);
+    snprintf(skills_dir, sizeof(skills_dir), "%s/skills", kiro_home);
+    snprintf(ap, sizeof(ap), "%s/agents/codebase-memory.json", kiro_home);
+    uninstall_agent_mcp_instr((mcp_uninstall_args_t){"Kiro", cp, ip}, dry_run,
+                              cbm_remove_editor_mcp_owned);
+    uninstall_agent_skill("Kiro", skills_dir, dry_run);
+    char *legacy_agent_content = cbm_build_legacy_kiro_verify_agent_content(installed_binary);
+    if (!legacy_agent_content) {
+        record_agent_config_error(true, "Kiro", "legacy_agent_build", ap);
+    }
+    uninstall_tiered_agent_profiles(
+        (cbm_tiered_profile_set_t){
+            .label = "Kiro",
+            .verify_path = ap,
+            .binary_path = installed_binary,
+            .legacy_verify_content = legacy_agent_content,
+            .dialect = CBM_GRAPH_DIALECT_KIRO,
+        },
+        dry_run);
+    free(legacy_agent_content);
+}
+
+static void cli_uninstall_editor_junie(const char *home, bool dry_run) {
+    char cp[CLI_BUF_1K];
+    char skills_dir[CLI_BUF_1K];
+    char agent_path[CLI_BUF_1K];
+    snprintf(cp, sizeof(cp), "%s/.junie/mcp/mcp.json", home);
+    snprintf(skills_dir, sizeof(skills_dir), "%s/.junie/skills", home);
+    snprintf(agent_path, sizeof(agent_path), "%s/.junie/agents/codebase-memory.md", home);
+    uninstall_agent_mcp_instr((mcp_uninstall_args_t){"Junie", cp, NULL}, dry_run,
+                              cbm_remove_junie_mcp_owned);
+    uninstall_agent_skill("Junie", skills_dir, dry_run);
+    uninstall_tiered_agent_profiles(
+        (cbm_tiered_profile_set_t){
+            .label = "Junie",
+            .verify_path = agent_path,
+            .legacy_verify_content = legacy_junie_verify_agent_content,
+            .dialect = CBM_GRAPH_DIALECT_JUNIE,
+        },
+        dry_run);
+}
+
 static void uninstall_editor_agents(const cbm_detected_agents_t *agents, const char *home,
                                     bool dry_run) {
     char installed_binary[CLI_BUF_1K];
     cbm_agent_installed_binary_path(home, installed_binary, sizeof(installed_binary));
     if (agents->zed) {
-        char config_dir[CLI_BUF_1K];
-        char cp[CLI_BUF_1K];
-        char ip[CLI_BUF_1K];
-        char skills_dir[CLI_BUF_1K];
-        cbm_zed_config_dir(home, config_dir, sizeof(config_dir));
-        cbm_zed_instructions_path(home, ip, sizeof(ip));
-        snprintf(cp, sizeof(cp), "%s/settings.json", config_dir);
-        snprintf(skills_dir, sizeof(skills_dir), "%s/.agents/skills", home);
-        uninstall_agent_mcp_instr((mcp_uninstall_args_t){"Zed", cp, ip}, dry_run,
-                                  cbm_remove_zed_mcp_owned);
-        uninstall_agent_skill("Zed", skills_dir, dry_run);
+        cli_uninstall_editor_zed(home, dry_run);
     }
     if (agents->kilocode) {
-        char cp[CLI_BUF_1K];
-        char ip[CLI_BUF_1K];
-        char ap[CLI_BUF_1K];
-        snprintf(cp, sizeof(cp), "%s/.config/kilo/kilo.jsonc", home);
-        snprintf(ip, sizeof(ip), "%s/.config/kilo/rules/codebase-memory-mcp.md", home);
-        snprintf(ap, sizeof(ap), "%s/.config/kilo/agents/codebase-memory.md", home);
-        if (!dry_run) {
-            if (cbm_remove_kilo_mcp_owned(installed_binary, cp) != CLI_OK) {
-                record_agent_config_error(true, "KiloCode", "mcp_uninstall", cp);
-            }
-            if (cbm_json_like_remove_string(cp, "instructions", ip) != CLI_OK) {
-                record_agent_config_error(true, "KiloCode", "instruction_reference_uninstall", cp);
-            }
-            if (cbm_remove_instructions(ip) != CLI_OK) {
-                record_agent_config_error(true, "KiloCode", "instructions_uninstall", ip);
-            }
-
-            char legacy_cp[CLI_BUF_1K];
-            char legacy_ip[CLI_BUF_1K];
-#ifdef __APPLE__
-            snprintf(legacy_cp, sizeof(legacy_cp),
-                     "%s/Library/Application Support/Code/User/globalStorage/"
-                     "kilocode.kilo-code/settings/mcp_settings.json",
-                     home);
-#elif defined(_WIN32)
-            snprintf(legacy_cp, sizeof(legacy_cp),
-                     "%s/AppData/Roaming/Code/User/globalStorage/"
-                     "kilocode.kilo-code/settings/mcp_settings.json",
-                     home);
-#else
-            snprintf(legacy_cp, sizeof(legacy_cp),
-                     "%s/.config/Code/User/globalStorage/"
-                     "kilocode.kilo-code/settings/mcp_settings.json",
-                     home);
-#endif
-            snprintf(legacy_ip, sizeof(legacy_ip), "%s/.kilocode/rules/codebase-memory-mcp.md",
-                     home);
-            if (cbm_file_exists(legacy_cp) &&
-                cbm_remove_editor_mcp_owned(installed_binary, legacy_cp) != CLI_OK) {
-                record_agent_config_error(true, "KiloCode", "legacy_mcp_uninstall", legacy_cp);
-            }
-            if (cbm_file_exists(legacy_ip) && cbm_remove_instructions(legacy_ip) != CLI_OK) {
-                record_agent_config_error(true, "KiloCode", "legacy_rules_uninstall", legacy_ip);
-            }
-        }
-        uninstall_tiered_agent_profiles(
-            (cbm_tiered_profile_set_t){
-                .label = "KiloCode",
-                .verify_path = ap,
-                .legacy_verify_content = legacy_kilo_verify_agent_content,
-                .dialect = CBM_GRAPH_DIALECT_KILO,
-            },
-            dry_run);
-        printf("KiloCode: removed MCP config + instruction reference\n");
+        cli_uninstall_editor_kilocode(home, installed_binary, dry_run);
     }
     if (agents->vscode) {
-        char code_user[CLI_BUF_1K];
-        char cp[CLI_BUF_1K];
-#ifdef __APPLE__
-        snprintf(code_user, sizeof(code_user), "%s/Library/Application Support/Code/User", home);
-#else
-        snprintf(code_user, sizeof(code_user), "%s/Code/User", cbm_app_config_dir());
-#endif
-        snprintf(cp, sizeof(cp), "%s/mcp.json", code_user);
-        uninstall_agent_mcp_instr((mcp_uninstall_args_t){"VS Code", cp, NULL}, dry_run,
-                                  cbm_remove_vscode_mcp_owned);
-        uninstall_vscode_profile_configs(code_user, installed_binary, dry_run);
+        cli_uninstall_editor_vscode(home, installed_binary, dry_run);
     }
     if (agents->cursor) {
-        char cp[CLI_BUF_1K];
-        char skills_dir[CLI_BUF_1K];
-        char ap[CLI_BUF_1K];
-        snprintf(cp, sizeof(cp), "%s/.cursor/mcp.json", home);
-        snprintf(skills_dir, sizeof(skills_dir), "%s/.cursor/skills", home);
-        snprintf(ap, sizeof(ap), "%s/.cursor/agents/codebase-memory.md", home);
-        uninstall_agent_mcp_instr((mcp_uninstall_args_t){"Cursor", cp, NULL}, dry_run,
-                                  cbm_remove_editor_mcp_owned);
-        uninstall_agent_skill("Cursor", skills_dir, dry_run);
-        uninstall_tiered_agent_profiles(
-            (cbm_tiered_profile_set_t){
-                .label = "Cursor",
-                .verify_path = ap,
-                .legacy_verify_content = legacy_cursor_verify_agent_content,
-                .dialect = CBM_GRAPH_DIALECT_CURSOR,
-            },
-            dry_run);
+        cli_uninstall_editor_cursor(home, dry_run);
     }
     if (agents->windsurf) {
-        char cp[CLI_BUF_1K];
-        char ip[CLI_BUF_1K];
-        snprintf(cp, sizeof(cp), "%s/.codeium/windsurf/mcp_config.json", home);
-        snprintf(ip, sizeof(ip), "%s/.codeium/windsurf/memories/global_rules.md", home);
-        uninstall_agent_mcp_instr((mcp_uninstall_args_t){"Windsurf", cp, ip}, dry_run,
-                                  cbm_remove_editor_mcp_owned);
+        cli_uninstall_editor_windsurf(home, dry_run);
     }
     if (agents->openclaw) {
-        char cp[CLI_BUF_1K];
-        if (cbm_openclaw_config_path(home, cp, sizeof(cp))) {
-            char workspace[CLI_BUF_1K];
-            bool workspace_ok = cbm_openclaw_workspace_path(home, cp, workspace, sizeof(workspace));
-            uninstall_agent_mcp_instr((mcp_uninstall_args_t){"OpenClaw", cp, NULL}, dry_run,
-                                      cbm_remove_openclaw_mcp_owned);
-            if (!dry_run && cbm_remove_openclaw_compaction(cp) != CLI_OK) {
-                record_agent_config_error(true, "OpenClaw", "compaction_uninstall", cp);
-            }
-            if (workspace_ok) {
-                char agents_path[CLI_BUF_1K];
-                char tools_path[CLI_BUF_1K];
-                snprintf(agents_path, sizeof(agents_path), "%s/AGENTS.md", workspace);
-                snprintf(tools_path, sizeof(tools_path), "%s/TOOLS.md", workspace);
-                if (!dry_run) {
-                    if (cbm_remove_instructions(agents_path) != CLI_OK) {
-                        record_agent_config_error(true, "OpenClaw", "instructions_uninstall",
-                                                  agents_path);
-                    }
-                    if (cbm_remove_instructions(tools_path) != CLI_OK) {
-                        record_agent_config_error(true, "OpenClaw", "tools_context_uninstall",
-                                                  tools_path);
-                    }
-                }
-                printf("  removed workspace instructions + compaction augmentation\n");
-            } else {
-                printf("  removed compaction augmentation; workspace instructions unresolved\n");
-            }
-        }
+        cli_uninstall_editor_openclaw(home, dry_run);
     }
     if (agents->kiro) {
-        char kiro_home[CLI_BUF_1K];
-        char cp[CLI_BUF_1K];
-        char ip[CLI_BUF_1K];
-        char skills_dir[CLI_BUF_1K];
-        char ap[CLI_BUF_1K];
-        cbm_kiro_home_dir(home, kiro_home, sizeof(kiro_home));
-        snprintf(cp, sizeof(cp), "%s/settings/mcp.json", kiro_home);
-        snprintf(ip, sizeof(ip), "%s/steering/codebase-memory.md", kiro_home);
-        snprintf(skills_dir, sizeof(skills_dir), "%s/skills", kiro_home);
-        snprintf(ap, sizeof(ap), "%s/agents/codebase-memory.json", kiro_home);
-        uninstall_agent_mcp_instr((mcp_uninstall_args_t){"Kiro", cp, ip}, dry_run,
-                                  cbm_remove_editor_mcp_owned);
-        uninstall_agent_skill("Kiro", skills_dir, dry_run);
-        char *legacy_agent_content = cbm_build_legacy_kiro_verify_agent_content(installed_binary);
-        if (!legacy_agent_content) {
-            record_agent_config_error(true, "Kiro", "legacy_agent_build", ap);
-        }
-        uninstall_tiered_agent_profiles(
-            (cbm_tiered_profile_set_t){
-                .label = "Kiro",
-                .verify_path = ap,
-                .binary_path = installed_binary,
-                .legacy_verify_content = legacy_agent_content,
-                .dialect = CBM_GRAPH_DIALECT_KIRO,
-            },
-            dry_run);
-        free(legacy_agent_content);
+        cli_uninstall_editor_kiro(home, installed_binary, dry_run);
     }
     if (agents->junie) {
-        char cp[CLI_BUF_1K];
-        char skills_dir[CLI_BUF_1K];
-        char agent_path[CLI_BUF_1K];
-        snprintf(cp, sizeof(cp), "%s/.junie/mcp/mcp.json", home);
-        snprintf(skills_dir, sizeof(skills_dir), "%s/.junie/skills", home);
-        snprintf(agent_path, sizeof(agent_path), "%s/.junie/agents/codebase-memory.md", home);
-        uninstall_agent_mcp_instr((mcp_uninstall_args_t){"Junie", cp, NULL}, dry_run,
-                                  cbm_remove_junie_mcp_owned);
-        uninstall_agent_skill("Junie", skills_dir, dry_run);
-        uninstall_tiered_agent_profiles(
-            (cbm_tiered_profile_set_t){
-                .label = "Junie",
-                .verify_path = agent_path,
-                .legacy_verify_content = legacy_junie_verify_agent_content,
-                .dialect = CBM_GRAPH_DIALECT_JUNIE,
-            },
-            dry_run);
+        cli_uninstall_editor_junie(home, dry_run);
     }
+}
+
+static void cli_uninstall_additional_hermes(const char *home, bool dry_run) {
+    char hermes_home[CLI_BUF_1K];
+    char cp[CLI_BUF_1K];
+    char skills_dir[CLI_BUF_1K];
+    char binary_path[CLI_BUF_1K];
+    cbm_hermes_home_dir(home, hermes_home, sizeof(hermes_home));
+    snprintf(cp, sizeof(cp), "%s/config.yaml", hermes_home);
+    snprintf(skills_dir, sizeof(skills_dir), "%s/skills", hermes_home);
+    cbm_agent_installed_binary_path(home, binary_path, sizeof(binary_path));
+    int hook_result =
+        dry_run ? CBM_YAML_IDENTITY_EDIT_OK : cbm_remove_hermes_context_hook(cp, binary_path);
+    if (hook_result == CBM_YAML_IDENTITY_EDIT_FOREIGN) {
+        printf("  hook: preserved modified pre_llm_call entry\n");
+    } else if (hook_result != CBM_YAML_IDENTITY_EDIT_OK) {
+        record_agent_config_error(true, "Hermes", "pre_llm_hook_uninstall", cp);
+    } else {
+        printf("  hook: removed canonical pre_llm_call entry\n");
+    }
+    uninstall_agent_mcp_instr((mcp_uninstall_args_t){"Hermes", cp, NULL}, dry_run,
+                              cbm_remove_hermes_mcp_owned);
+    uninstall_agent_skill("Hermes", skills_dir, dry_run);
+}
+
+static void cli_uninstall_additional_openhands(const char *home, bool dry_run) {
+    char cp[CLI_BUF_1K];
+    char skills_dir[CLI_BUF_1K];
+    snprintf(cp, sizeof(cp), "%s/.openhands/mcp.json", home);
+    snprintf(skills_dir, sizeof(skills_dir), "%s/.agents/skills", home);
+    uninstall_agent_mcp_instr((mcp_uninstall_args_t){"OpenHands", cp, NULL}, dry_run,
+                              cbm_remove_editor_mcp_owned);
+    printf("  removed %d skill(s)\n", cbm_remove_skills(skills_dir, dry_run));
+}
+
+static void cli_uninstall_additional_augment(const char *home, bool dry_run) {
+    char cp[CLI_BUF_1K];
+    char ip[CLI_BUF_1K];
+    char ap[CLI_BUF_1K];
+    char session_hp[CLI_BUF_1K];
+    char coverage_hp[CLI_BUF_1K];
+    char binary_path[CLI_BUF_1K];
+    snprintf(cp, sizeof(cp), "%s/.augment/settings.json", home);
+    snprintf(ip, sizeof(ip), "%s/.augment/rules/codebase-memory.md", home);
+    snprintf(ap, sizeof(ap), "%s/.augment/agents/codebase-memory.md", home);
+    snprintf(session_hp, sizeof(session_hp), "%s/.augment/hooks/%s", home, AUGMENT_SESSION_SCRIPT);
+    snprintf(coverage_hp, sizeof(coverage_hp), "%s/.augment/hooks/%s", home,
+             AUGMENT_COVERAGE_SCRIPT);
+    /* The owned-document match must rebuild the scripts with the exact
+     * binary path the install embedded — the managed canonical plain form
+     * on Windows, not a hand-assembled default. */
+    cbm_agent_installed_binary_path(home, binary_path, sizeof(binary_path));
+    uninstall_agent_mcp_instr((mcp_uninstall_args_t){"Augment/Auggie", cp, ip}, dry_run,
+                              cbm_remove_editor_mcp_owned);
+    uninstall_tiered_agent_profiles(
+        (cbm_tiered_profile_set_t){
+            .label = "Augment/Auggie",
+            .verify_path = ap,
+            .binary_path = binary_path,
+            .legacy_verify_content = legacy_augment_verify_agent_content,
+            .dialect = CBM_GRAPH_DIALECT_AUGMENT,
+        },
+        dry_run);
+    if (!dry_run) {
+        if (cbm_remove_augment_session_hook(cp, session_hp) != CLI_OK) {
+            record_agent_config_error(true, "Augment/Auggie", "session_hook_uninstall", cp);
+        }
+        if (cbm_remove_augment_coverage_hook(cp, coverage_hp) != CLI_OK) {
+            record_agent_config_error(true, "Augment/Auggie", "coverage_hook_uninstall", cp);
+        }
+        char session_script[CLI_BUF_8K];
+        if (cbm_build_augment_session_script(binary_path, session_script, sizeof(session_script)) !=
+            CLI_OK) {
+            record_agent_config_error(true, "Augment/Auggie", "session_script_build", session_hp);
+        } else {
+            int script_rc = cbm_text_remove_owned_document(session_hp, session_script);
+            if (script_rc < 0) {
+                record_agent_config_error(true, "Augment/Auggie", "session_script_uninstall",
+                                          session_hp);
+            }
+        }
+        char coverage_script[CLI_BUF_8K];
+        if (cbm_build_augment_coverage_script(binary_path, coverage_script,
+                                              sizeof(coverage_script)) != CLI_OK) {
+            record_agent_config_error(true, "Augment/Auggie", "coverage_script_build", coverage_hp);
+        } else {
+            int script_rc = cbm_text_remove_owned_document(coverage_hp, coverage_script);
+            if (script_rc < 0) {
+                record_agent_config_error(true, "Augment/Auggie", "coverage_script_uninstall",
+                                          coverage_hp);
+            }
+        }
+    }
+    printf("  removed SessionStart + PostToolUse hooks + dedicated subagent\n");
+}
+
+static void cli_uninstall_additional_cline(const char *home, const char *installed_binary,
+                                           bool dry_run) {
+    char cline_root[CLI_BUF_1K];
+    char cline_data[CLI_BUF_1K];
+    char cli_cp[CLI_BUF_1K];
+    char ide_cp[CLI_BUF_1K];
+    char ip[CLI_BUF_1K];
+    char skills_dir[CLI_BUF_1K];
+    cbm_cline_root_dir(home, cline_root, sizeof(cline_root));
+    cbm_cline_data_dir(home, cline_data, sizeof(cline_data));
+    snprintf(cli_cp, sizeof(cli_cp), "%s/mcp.json", cline_root);
+    snprintf(ide_cp, sizeof(ide_cp), "%s/settings/cline_mcp_settings.json", cline_data);
+    snprintf(ip, sizeof(ip), "%s/rules/codebase-memory-mcp.md", cline_root);
+    snprintf(skills_dir, sizeof(skills_dir), "%s/skills", cline_root);
+    uninstall_agent_mcp_instr((mcp_uninstall_args_t){"Cline", cli_cp, ip}, dry_run,
+                              cbm_remove_cline_mcp_owned);
+    uninstall_agent_mcp_instr((mcp_uninstall_args_t){"Cline IDE", ide_cp, NULL}, dry_run,
+                              cbm_remove_cline_mcp_owned);
+    uninstall_agent_skill("Cline", skills_dir, dry_run);
+    (void)remove_cline_context_hooks(cline_root, installed_binary, dry_run, true);
+}
+
+static void cli_uninstall_additional_warp(const char *home, bool dry_run) {
+    char skills_dir[CLI_BUF_1K];
+    snprintf(skills_dir, sizeof(skills_dir), "%s/.agents/skills", home);
+    uninstall_agent_skill("Warp", skills_dir, dry_run);
+}
+
+static void cli_uninstall_additional_qwen(const char *home, const char *installed_binary,
+                                          bool dry_run) {
+    char qwen_home[CLI_BUF_1K];
+    char cp[CLI_BUF_1K];
+    char ip[CLI_BUF_1K];
+    char skills_dir[CLI_BUF_1K];
+    char ap[CLI_BUF_1K];
+    cbm_qwen_home_dir(home, qwen_home, sizeof(qwen_home));
+    snprintf(cp, sizeof(cp), "%s/settings.json", qwen_home);
+    snprintf(ip, sizeof(ip), "%s/QWEN.md", qwen_home);
+    snprintf(skills_dir, sizeof(skills_dir), "%s/skills", qwen_home);
+    snprintf(ap, sizeof(ap), "%s/agents/codebase-memory.md", qwen_home);
+    uninstall_agent_mcp_instr((mcp_uninstall_args_t){"Qwen Code", cp, ip}, dry_run,
+                              cbm_remove_editor_mcp_owned);
+    if (!dry_run) {
+#ifdef _WIN32
+        bool windows = true;
+#else
+        bool windows = false;
+#endif
+        if (cbm_remove_qwen_lifecycle_hooks(cp, installed_binary, windows) != CLI_OK) {
+            record_agent_config_error(true, "Qwen Code", "lifecycle_hook_uninstall", cp);
+        }
+    }
+    uninstall_agent_skill("Qwen Code", skills_dir, dry_run);
+    uninstall_tiered_agent_profiles(
+        (cbm_tiered_profile_set_t){
+            .label = "Qwen Code",
+            .verify_path = ap,
+            .legacy_verify_content = legacy_qwen_verify_agent_content,
+            .dialect = CBM_GRAPH_DIALECT_QWEN,
+        },
+        dry_run);
+}
+
+static void cli_uninstall_additional_copilot_cli(const char *home, bool dry_run) {
+    char config_dir[CLI_BUF_1K];
+    char cp[CLI_BUF_1K];
+    char ip[CLI_BUF_1K];
+    cbm_copilot_config_dir(home, config_dir, sizeof(config_dir));
+    snprintf(cp, sizeof(cp), "%s/mcp-config.json", config_dir);
+    snprintf(ip, sizeof(ip), "%s/copilot-instructions.md", config_dir);
+    uninstall_agent_mcp_instr((mcp_uninstall_args_t){"Copilot CLI", cp, ip}, dry_run,
+                              cbm_remove_copilot_mcp_owned);
+}
+
+static void cli_uninstall_additional_vscode_copilot_cli(const char *home, bool dry_run) {
+    uninstall_copilot_durable_context(home, dry_run);
+}
+
+static void cli_uninstall_additional_factory_droid(const char *home, const char *installed_binary,
+                                                   bool dry_run) {
+    char cp[CLI_BUF_1K];
+    char ip[CLI_BUF_1K];
+    char hp[CLI_BUF_1K];
+    char ap[CLI_BUF_1K];
+    char skills_dir[CLI_BUF_1K];
+    snprintf(cp, sizeof(cp), "%s/.factory/mcp.json", home);
+    snprintf(ip, sizeof(ip), "%s/.factory/AGENTS.md", home);
+    snprintf(hp, sizeof(hp), "%s/.factory/hooks.json", home);
+    snprintf(ap, sizeof(ap), "%s/.factory/droids/codebase-memory.md", home);
+    snprintf(skills_dir, sizeof(skills_dir), "%s/.factory/skills", home);
+    uninstall_agent_mcp_instr((mcp_uninstall_args_t){"Factory Droid", cp, ip}, dry_run,
+                              cbm_remove_factory_mcp_owned);
+    if (!dry_run && cbm_remove_factory_hooks(hp, installed_binary) != CLI_OK) {
+        record_agent_config_error(true, "Factory Droid", "context_hook_uninstall", hp);
+    }
+    uninstall_agent_skill("Factory Droid", skills_dir, dry_run);
+    uninstall_tiered_agent_profiles(
+        (cbm_tiered_profile_set_t){
+            .label = "Factory Droid",
+            .verify_path = ap,
+            .legacy_verify_content = legacy_factory_verify_agent_content,
+            .dialect = CBM_GRAPH_DIALECT_FACTORY,
+        },
+        dry_run);
+    printf("  removed SessionStart + PostToolUse hooks\n");
+}
+
+static void cli_uninstall_additional_crush(const char *home, bool dry_run) {
+    char cp[CLI_BUF_1K];
+    char ip[CLI_BUF_1K];
+    cbm_crush_config_path(home, cp, sizeof(cp));
+    snprintf(ip, sizeof(ip), "%s/.config/crush/codebase-memory.md", home);
+    if (!dry_run && cbm_remove_crush_context_path(cp, ip) != CLI_OK) {
+        record_agent_config_error(true, "Crush", "context_reference_uninstall", cp);
+    }
+    uninstall_agent_mcp_instr((mcp_uninstall_args_t){"Crush", cp, ip}, dry_run,
+                              cbm_remove_crush_mcp_owned);
+    char legacy_ip[CLI_BUF_1K];
+    snprintf(legacy_ip, sizeof(legacy_ip), "%s/.config/crush/CRUSH.md", home);
+    if (!dry_run && cbm_file_exists(legacy_ip) && cbm_remove_instructions(legacy_ip) != CLI_OK) {
+        record_agent_config_error(true, "Crush", "legacy_context_uninstall", legacy_ip);
+    }
+}
+
+static void cli_uninstall_additional_goose(const char *home, bool dry_run) {
+    char config_dir[CLI_BUF_1K];
+    char cp[CLI_BUF_1K];
+    char ip[CLI_BUF_1K];
+    cbm_goose_config_dir(home, config_dir, sizeof(config_dir));
+    snprintf(cp, sizeof(cp), "%s/config.yaml", config_dir);
+    snprintf(ip, sizeof(ip), "%s/.config/goose/.goosehints", home);
+    uninstall_agent_mcp_instr((mcp_uninstall_args_t){"Goose", cp, ip}, dry_run,
+                              cbm_remove_goose_mcp_owned);
+}
+
+static void cli_uninstall_additional_mistral_vibe(const char *home, bool dry_run) {
+    char config_dir[CLI_BUF_1K];
+    char cp[CLI_BUF_1K];
+    char ip[CLI_BUF_1K];
+    char skills_dir[CLI_BUF_1K];
+    char ap[CLI_BUF_1K];
+    char prompt_path[CLI_BUF_1K];
+    cbm_vibe_config_dir(home, config_dir, sizeof(config_dir));
+    snprintf(cp, sizeof(cp), "%s/config.toml", config_dir);
+    snprintf(ip, sizeof(ip), "%s/AGENTS.md", config_dir);
+    snprintf(skills_dir, sizeof(skills_dir), "%s/skills", config_dir);
+    snprintf(ap, sizeof(ap), "%s/agents/codebase-memory.toml", config_dir);
+    snprintf(prompt_path, sizeof(prompt_path), "%s/prompts/codebase-memory.md", config_dir);
+    uninstall_agent_mcp_instr((mcp_uninstall_args_t){"Mistral Vibe", cp, ip}, dry_run,
+                              cbm_remove_vibe_mcp_owned);
+    uninstall_agent_skill("Mistral Vibe", skills_dir, dry_run);
+    uninstall_tiered_agent_profiles(
+        (cbm_tiered_profile_set_t){
+            .label = "Mistral Vibe",
+            .verify_path = ap,
+            .legacy_verify_content = legacy_vibe_verify_agent_content,
+            .dialect = CBM_GRAPH_DIALECT_VIBE,
+        },
+        dry_run);
+    uninstall_tiered_profile_prompts("Mistral Vibe", prompt_path, CBM_GRAPH_DIALECT_VIBE,
+                                     legacy_vibe_verify_prompt_content, dry_run);
 }
 
 static void uninstall_additional_agents(const cbm_detected_agents_t *agents, const char *home,
@@ -10340,250 +11031,40 @@ static void uninstall_additional_agents(const cbm_detected_agents_t *agents, con
     char installed_binary[CLI_BUF_1K];
     cbm_agent_installed_binary_path(home, installed_binary, sizeof(installed_binary));
     if (agents->hermes) {
-        char hermes_home[CLI_BUF_1K];
-        char cp[CLI_BUF_1K];
-        char skills_dir[CLI_BUF_1K];
-        char binary_path[CLI_BUF_1K];
-        cbm_hermes_home_dir(home, hermes_home, sizeof(hermes_home));
-        snprintf(cp, sizeof(cp), "%s/config.yaml", hermes_home);
-        snprintf(skills_dir, sizeof(skills_dir), "%s/skills", hermes_home);
-        cbm_agent_installed_binary_path(home, binary_path, sizeof(binary_path));
-        int hook_result =
-            dry_run ? CBM_YAML_IDENTITY_EDIT_OK : cbm_remove_hermes_context_hook(cp, binary_path);
-        if (hook_result == CBM_YAML_IDENTITY_EDIT_FOREIGN) {
-            printf("  hook: preserved modified pre_llm_call entry\n");
-        } else if (hook_result != CBM_YAML_IDENTITY_EDIT_OK) {
-            record_agent_config_error(true, "Hermes", "pre_llm_hook_uninstall", cp);
-        } else {
-            printf("  hook: removed canonical pre_llm_call entry\n");
-        }
-        uninstall_agent_mcp_instr((mcp_uninstall_args_t){"Hermes", cp, NULL}, dry_run,
-                                  cbm_remove_hermes_mcp_owned);
-        uninstall_agent_skill("Hermes", skills_dir, dry_run);
+        cli_uninstall_additional_hermes(home, dry_run);
     }
     if (agents->openhands) {
-        char cp[CLI_BUF_1K];
-        char skills_dir[CLI_BUF_1K];
-        snprintf(cp, sizeof(cp), "%s/.openhands/mcp.json", home);
-        snprintf(skills_dir, sizeof(skills_dir), "%s/.agents/skills", home);
-        uninstall_agent_mcp_instr((mcp_uninstall_args_t){"OpenHands", cp, NULL}, dry_run,
-                                  cbm_remove_editor_mcp_owned);
-        printf("  removed %d skill(s)\n", cbm_remove_skills(skills_dir, dry_run));
+        cli_uninstall_additional_openhands(home, dry_run);
     }
     if (agents->augment) {
-        char cp[CLI_BUF_1K];
-        char ip[CLI_BUF_1K];
-        char ap[CLI_BUF_1K];
-        char session_hp[CLI_BUF_1K];
-        char coverage_hp[CLI_BUF_1K];
-        char binary_path[CLI_BUF_1K];
-        snprintf(cp, sizeof(cp), "%s/.augment/settings.json", home);
-        snprintf(ip, sizeof(ip), "%s/.augment/rules/codebase-memory.md", home);
-        snprintf(ap, sizeof(ap), "%s/.augment/agents/codebase-memory.md", home);
-        snprintf(session_hp, sizeof(session_hp), "%s/.augment/hooks/%s", home,
-                 AUGMENT_SESSION_SCRIPT);
-        snprintf(coverage_hp, sizeof(coverage_hp), "%s/.augment/hooks/%s", home,
-                 AUGMENT_COVERAGE_SCRIPT);
-        /* The owned-document match must rebuild the scripts with the exact
-         * binary path the install embedded — the managed canonical plain form
-         * on Windows, not a hand-assembled default. */
-        cbm_agent_installed_binary_path(home, binary_path, sizeof(binary_path));
-        uninstall_agent_mcp_instr((mcp_uninstall_args_t){"Augment/Auggie", cp, ip}, dry_run,
-                                  cbm_remove_editor_mcp_owned);
-        uninstall_tiered_agent_profiles(
-            (cbm_tiered_profile_set_t){
-                .label = "Augment/Auggie",
-                .verify_path = ap,
-                .binary_path = binary_path,
-                .legacy_verify_content = legacy_augment_verify_agent_content,
-                .dialect = CBM_GRAPH_DIALECT_AUGMENT,
-            },
-            dry_run);
-        if (!dry_run) {
-            if (cbm_remove_augment_session_hook(cp, session_hp) != CLI_OK) {
-                record_agent_config_error(true, "Augment/Auggie", "session_hook_uninstall", cp);
-            }
-            if (cbm_remove_augment_coverage_hook(cp, coverage_hp) != CLI_OK) {
-                record_agent_config_error(true, "Augment/Auggie", "coverage_hook_uninstall", cp);
-            }
-            char session_script[CLI_BUF_8K];
-            if (cbm_build_augment_session_script(binary_path, session_script,
-                                                 sizeof(session_script)) != CLI_OK) {
-                record_agent_config_error(true, "Augment/Auggie", "session_script_build",
-                                          session_hp);
-            } else {
-                int script_rc = cbm_text_remove_owned_document(session_hp, session_script);
-                if (script_rc < 0) {
-                    record_agent_config_error(true, "Augment/Auggie", "session_script_uninstall",
-                                              session_hp);
-                }
-            }
-            char coverage_script[CLI_BUF_8K];
-            if (cbm_build_augment_coverage_script(binary_path, coverage_script,
-                                                  sizeof(coverage_script)) != CLI_OK) {
-                record_agent_config_error(true, "Augment/Auggie", "coverage_script_build",
-                                          coverage_hp);
-            } else {
-                int script_rc = cbm_text_remove_owned_document(coverage_hp, coverage_script);
-                if (script_rc < 0) {
-                    record_agent_config_error(true, "Augment/Auggie", "coverage_script_uninstall",
-                                              coverage_hp);
-                }
-            }
-        }
-        printf("  removed SessionStart + PostToolUse hooks + dedicated subagent\n");
+        cli_uninstall_additional_augment(home, dry_run);
     }
     if (agents->cline) {
-        char cline_root[CLI_BUF_1K];
-        char cline_data[CLI_BUF_1K];
-        char cli_cp[CLI_BUF_1K];
-        char ide_cp[CLI_BUF_1K];
-        char ip[CLI_BUF_1K];
-        char skills_dir[CLI_BUF_1K];
-        cbm_cline_root_dir(home, cline_root, sizeof(cline_root));
-        cbm_cline_data_dir(home, cline_data, sizeof(cline_data));
-        snprintf(cli_cp, sizeof(cli_cp), "%s/mcp.json", cline_root);
-        snprintf(ide_cp, sizeof(ide_cp), "%s/settings/cline_mcp_settings.json", cline_data);
-        snprintf(ip, sizeof(ip), "%s/rules/codebase-memory-mcp.md", cline_root);
-        snprintf(skills_dir, sizeof(skills_dir), "%s/skills", cline_root);
-        uninstall_agent_mcp_instr((mcp_uninstall_args_t){"Cline", cli_cp, ip}, dry_run,
-                                  cbm_remove_cline_mcp_owned);
-        uninstall_agent_mcp_instr((mcp_uninstall_args_t){"Cline IDE", ide_cp, NULL}, dry_run,
-                                  cbm_remove_cline_mcp_owned);
-        uninstall_agent_skill("Cline", skills_dir, dry_run);
-        (void)remove_cline_context_hooks(cline_root, installed_binary, dry_run, true);
+        cli_uninstall_additional_cline(home, installed_binary, dry_run);
     }
     if (agents->warp) {
-        char skills_dir[CLI_BUF_1K];
-        snprintf(skills_dir, sizeof(skills_dir), "%s/.agents/skills", home);
-        uninstall_agent_skill("Warp", skills_dir, dry_run);
+        cli_uninstall_additional_warp(home, dry_run);
     }
     if (agents->qwen) {
-        char qwen_home[CLI_BUF_1K];
-        char cp[CLI_BUF_1K];
-        char ip[CLI_BUF_1K];
-        char skills_dir[CLI_BUF_1K];
-        char ap[CLI_BUF_1K];
-        cbm_qwen_home_dir(home, qwen_home, sizeof(qwen_home));
-        snprintf(cp, sizeof(cp), "%s/settings.json", qwen_home);
-        snprintf(ip, sizeof(ip), "%s/QWEN.md", qwen_home);
-        snprintf(skills_dir, sizeof(skills_dir), "%s/skills", qwen_home);
-        snprintf(ap, sizeof(ap), "%s/agents/codebase-memory.md", qwen_home);
-        uninstall_agent_mcp_instr((mcp_uninstall_args_t){"Qwen Code", cp, ip}, dry_run,
-                                  cbm_remove_editor_mcp_owned);
-        if (!dry_run) {
-#ifdef _WIN32
-            bool windows = true;
-#else
-            bool windows = false;
-#endif
-            if (cbm_remove_qwen_lifecycle_hooks(cp, installed_binary, windows) != CLI_OK) {
-                record_agent_config_error(true, "Qwen Code", "lifecycle_hook_uninstall", cp);
-            }
-        }
-        uninstall_agent_skill("Qwen Code", skills_dir, dry_run);
-        uninstall_tiered_agent_profiles(
-            (cbm_tiered_profile_set_t){
-                .label = "Qwen Code",
-                .verify_path = ap,
-                .legacy_verify_content = legacy_qwen_verify_agent_content,
-                .dialect = CBM_GRAPH_DIALECT_QWEN,
-            },
-            dry_run);
+        cli_uninstall_additional_qwen(home, installed_binary, dry_run);
     }
     if (agents->copilot_cli) {
-        char config_dir[CLI_BUF_1K];
-        char cp[CLI_BUF_1K];
-        char ip[CLI_BUF_1K];
-        cbm_copilot_config_dir(home, config_dir, sizeof(config_dir));
-        snprintf(cp, sizeof(cp), "%s/mcp-config.json", config_dir);
-        snprintf(ip, sizeof(ip), "%s/copilot-instructions.md", config_dir);
-        uninstall_agent_mcp_instr((mcp_uninstall_args_t){"Copilot CLI", cp, ip}, dry_run,
-                                  cbm_remove_copilot_mcp_owned);
+        cli_uninstall_additional_copilot_cli(home, dry_run);
     }
     if (agents->vscode || agents->copilot_cli) {
-        uninstall_copilot_durable_context(home, dry_run);
+        cli_uninstall_additional_vscode_copilot_cli(home, dry_run);
     }
     if (agents->factory_droid) {
-        char cp[CLI_BUF_1K];
-        char ip[CLI_BUF_1K];
-        char hp[CLI_BUF_1K];
-        char ap[CLI_BUF_1K];
-        char skills_dir[CLI_BUF_1K];
-        snprintf(cp, sizeof(cp), "%s/.factory/mcp.json", home);
-        snprintf(ip, sizeof(ip), "%s/.factory/AGENTS.md", home);
-        snprintf(hp, sizeof(hp), "%s/.factory/hooks.json", home);
-        snprintf(ap, sizeof(ap), "%s/.factory/droids/codebase-memory.md", home);
-        snprintf(skills_dir, sizeof(skills_dir), "%s/.factory/skills", home);
-        uninstall_agent_mcp_instr((mcp_uninstall_args_t){"Factory Droid", cp, ip}, dry_run,
-                                  cbm_remove_factory_mcp_owned);
-        if (!dry_run && cbm_remove_factory_hooks(hp, installed_binary) != CLI_OK) {
-            record_agent_config_error(true, "Factory Droid", "context_hook_uninstall", hp);
-        }
-        uninstall_agent_skill("Factory Droid", skills_dir, dry_run);
-        uninstall_tiered_agent_profiles(
-            (cbm_tiered_profile_set_t){
-                .label = "Factory Droid",
-                .verify_path = ap,
-                .legacy_verify_content = legacy_factory_verify_agent_content,
-                .dialect = CBM_GRAPH_DIALECT_FACTORY,
-            },
-            dry_run);
-        printf("  removed SessionStart + PostToolUse hooks\n");
+        cli_uninstall_additional_factory_droid(home, installed_binary, dry_run);
     }
     if (agents->crush) {
-        char cp[CLI_BUF_1K];
-        char ip[CLI_BUF_1K];
-        cbm_crush_config_path(home, cp, sizeof(cp));
-        snprintf(ip, sizeof(ip), "%s/.config/crush/codebase-memory.md", home);
-        if (!dry_run && cbm_remove_crush_context_path(cp, ip) != CLI_OK) {
-            record_agent_config_error(true, "Crush", "context_reference_uninstall", cp);
-        }
-        uninstall_agent_mcp_instr((mcp_uninstall_args_t){"Crush", cp, ip}, dry_run,
-                                  cbm_remove_crush_mcp_owned);
-        char legacy_ip[CLI_BUF_1K];
-        snprintf(legacy_ip, sizeof(legacy_ip), "%s/.config/crush/CRUSH.md", home);
-        if (!dry_run && cbm_file_exists(legacy_ip) &&
-            cbm_remove_instructions(legacy_ip) != CLI_OK) {
-            record_agent_config_error(true, "Crush", "legacy_context_uninstall", legacy_ip);
-        }
+        cli_uninstall_additional_crush(home, dry_run);
     }
     if (agents->goose) {
-        char config_dir[CLI_BUF_1K];
-        char cp[CLI_BUF_1K];
-        char ip[CLI_BUF_1K];
-        cbm_goose_config_dir(home, config_dir, sizeof(config_dir));
-        snprintf(cp, sizeof(cp), "%s/config.yaml", config_dir);
-        snprintf(ip, sizeof(ip), "%s/.config/goose/.goosehints", home);
-        uninstall_agent_mcp_instr((mcp_uninstall_args_t){"Goose", cp, ip}, dry_run,
-                                  cbm_remove_goose_mcp_owned);
+        cli_uninstall_additional_goose(home, dry_run);
     }
     if (agents->mistral_vibe) {
-        char config_dir[CLI_BUF_1K];
-        char cp[CLI_BUF_1K];
-        char ip[CLI_BUF_1K];
-        char skills_dir[CLI_BUF_1K];
-        char ap[CLI_BUF_1K];
-        char prompt_path[CLI_BUF_1K];
-        cbm_vibe_config_dir(home, config_dir, sizeof(config_dir));
-        snprintf(cp, sizeof(cp), "%s/config.toml", config_dir);
-        snprintf(ip, sizeof(ip), "%s/AGENTS.md", config_dir);
-        snprintf(skills_dir, sizeof(skills_dir), "%s/skills", config_dir);
-        snprintf(ap, sizeof(ap), "%s/agents/codebase-memory.toml", config_dir);
-        snprintf(prompt_path, sizeof(prompt_path), "%s/prompts/codebase-memory.md", config_dir);
-        uninstall_agent_mcp_instr((mcp_uninstall_args_t){"Mistral Vibe", cp, ip}, dry_run,
-                                  cbm_remove_vibe_mcp_owned);
-        uninstall_agent_skill("Mistral Vibe", skills_dir, dry_run);
-        uninstall_tiered_agent_profiles(
-            (cbm_tiered_profile_set_t){
-                .label = "Mistral Vibe",
-                .verify_path = ap,
-                .legacy_verify_content = legacy_vibe_verify_agent_content,
-                .dialect = CBM_GRAPH_DIALECT_VIBE,
-            },
-            dry_run);
-        uninstall_tiered_profile_prompts("Mistral Vibe", prompt_path, CBM_GRAPH_DIALECT_VIBE,
-                                         legacy_vibe_verify_prompt_content, dry_run);
+        cli_uninstall_additional_mistral_vibe(home, dry_run);
     }
 }
 
@@ -10705,9 +11186,11 @@ static int cli_uninstall_activate(void *opaque) {
     return CLI_OK;
 }
 
-int cbm_cmd_uninstall(int argc, char **argv) {
-    parse_auto_answer(argc, argv);
-    bool dry_run = false;
+static bool cli_uninstall_parse_options(int argc, char **argv, bool *dry_run) {
+    if (!dry_run) {
+        return false;
+    }
+    *dry_run = false;
     for (int i = 0; i < argc; i++) {
         /* The public command dispatcher passes option-only argv, while the
          * long-standing direct API/tests include the subcommand at argv[0]. */
@@ -10715,12 +11198,21 @@ int cbm_cmd_uninstall(int argc, char **argv) {
             continue;
         }
         if (strcmp(argv[i], "--dry-run") == 0) {
-            dry_run = true;
+            *dry_run = true;
         } else if (strcmp(argv[i], "-y") != 0 && strcmp(argv[i], "--yes") != 0 &&
                    strcmp(argv[i], "-n") != 0 && strcmp(argv[i], "--no") != 0) {
             (void)fprintf(stderr, "error: unknown uninstall option: %s\n", argv[i]);
-            return CLI_TRUE;
+            return false;
         }
+    }
+    return true;
+}
+
+int cbm_cmd_uninstall(int argc, char **argv) {
+    parse_auto_answer(argc, argv);
+    bool dry_run = false;
+    if (!cli_uninstall_parse_options(argc, argv, &dry_run)) {
+        return CLI_TRUE;
     }
 
     const char *home = cbm_get_home_dir();
@@ -11496,22 +11988,25 @@ static int cli_edit_distance(const char *a, const char *b) {
     if (la >= CLI_ED_MAX || lb >= CLI_ED_MAX) {
         return CLI_ED_MAX;
     }
-    int prev[CLI_ED_MAX + 1];
-    int cur[CLI_ED_MAX + 1];
-    for (size_t j = 0; j <= lb; j++) {
+    int prev[CLI_ED_MAX + CLI_C_STRING_TERMINATOR_BYTES];
+    int cur[CLI_ED_MAX + CLI_C_STRING_TERMINATOR_BYTES];
+    prev[CLI_ARRAY_INDEX_FIRST] = CLI_STATUS_SUCCESS;
+    for (size_t j = CLI_ARRAY_INDEX_SECOND; j <= lb; j++) {
         prev[j] = (int)j;
     }
-    for (size_t i = 1; i <= la; i++) {
-        cur[0] = (int)i;
-        for (size_t j = 1; j <= lb; j++) {
-            int cost = (a[i - 1] == b[j - 1]) ? 0 : 1;
-            int del = prev[j] + 1;
-            int ins = cur[j - 1] + 1;
-            int sub = prev[j - 1] + cost;
+    for (size_t i = CLI_ARRAY_INDEX_SECOND; i <= la; i++) {
+        cur[CLI_ARRAY_INDEX_FIRST] = (int)i;
+        for (size_t j = CLI_ARRAY_INDEX_SECOND; j <= lb; j++) {
+            int cost = (a[i - CLI_ARRAY_INDEX_SECOND] == b[j - CLI_ARRAY_INDEX_SECOND])
+                           ? CLI_STATUS_SUCCESS
+                           : CLI_STATUS_PRESENT;
+            int del = prev[j] + CLI_ARRAY_LENGTH_ONE;
+            int ins = cur[j - CLI_ARRAY_INDEX_SECOND] + CLI_ARRAY_LENGTH_ONE;
+            int sub = prev[j - CLI_ARRAY_INDEX_SECOND] + cost;
             int m = del < ins ? del : ins;
             cur[j] = m < sub ? m : sub;
         }
-        memcpy(prev, cur, (lb + 1) * sizeof(int));
+        memcpy(prev, cur, (lb + CLI_C_STRING_TERMINATOR_BYTES) * sizeof(int));
     }
     return prev[lb];
 }
@@ -11519,6 +12014,9 @@ static int cli_edit_distance(const char *a, const char *b) {
 /* Closest schema property to `key` for a "did you mean" suggestion, or NULL
  * when nothing is plausibly near (distance > half the key length, min 2). */
 static const char *cli_closest_prop(yyjson_val *props, const char *key) {
+    if (!props || !yyjson_is_obj(props)) {
+        return NULL;
+    }
     const char *best = NULL;
     int best_d = 0;
     size_t idx;
@@ -11536,9 +12034,9 @@ static const char *cli_closest_prop(yyjson_val *props, const char *key) {
             best_d = d;
         }
     }
-    int limit = (int)(strlen(key) / 2);
-    if (limit < 2) {
-        limit = 2;
+    int limit = (int)(strlen(key) / CLI_EDIT_DISTANCE_MINIMUM_LIMIT);
+    if (limit < CLI_EDIT_DISTANCE_MINIMUM_LIMIT) {
+        limit = CLI_EDIT_DISTANCE_MINIMUM_LIMIT;
     }
     return (best && best_d <= limit) ? best : NULL;
 }
@@ -11576,40 +12074,106 @@ static const char *cli_schema_type(yyjson_val *props, const char *key) {
 
 /* Append a typed value to the output object under `key`. For array-typed
  * properties, repeated flags accumulate into a single JSON array. */
+static void cli_add_array_value(yyjson_mut_doc *out, yyjson_mut_val *obj, const char *key,
+                                const char *value, bool have_value) {
+    yyjson_mut_val *array = yyjson_mut_obj_get(obj, key);
+    if (!array || !yyjson_mut_is_arr(array)) {
+        array = yyjson_mut_arr(out);
+        yyjson_mut_obj_add(obj, yyjson_mut_strcpy(out, key), array);
+    }
+    yyjson_mut_arr_add_strcpy(out, array, have_value ? value : "");
+}
+
+static yyjson_mut_val *cli_typed_scalar_value(yyjson_mut_doc *out, const char *type,
+                                              const char *value, bool have_value) {
+    const char *text = have_value ? value : "";
+    if (type && strcmp(type, "boolean") == 0) {
+        bool enabled = !have_value || strcmp(text, "true") == 0 || strcmp(text, "1") == 0 ||
+                       strcmp(text, "yes") == 0;
+        return yyjson_mut_bool(out, enabled);
+    }
+    if (type && strcmp(type, "integer") == 0) {
+        char *end = NULL;
+        long integer = strtol(text, &end, CLI_STRTOL_BASE);
+        return end && end != text && *end == '\0' ? yyjson_mut_int(out, (int64_t)integer)
+                                                  : yyjson_mut_strcpy(out, text);
+    }
+    if (type && strcmp(type, "number") == 0) {
+        char *end = NULL;
+        double number = strtod(text, &end);
+        return end && end != text && *end == '\0' ? yyjson_mut_real(out, number)
+                                                  : yyjson_mut_strcpy(out, text);
+    }
+    return yyjson_mut_strcpy(out, text);
+}
+
 static void cli_add_typed(yyjson_mut_doc *out, yyjson_mut_val *obj, const char *key,
                           const char *type, const char *value, bool have_value) {
     if (type && strcmp(type, "array") == 0) {
-        yyjson_mut_val *arr = yyjson_mut_obj_get(obj, key);
-        if (!arr || !yyjson_mut_is_arr(arr)) {
-            arr = yyjson_mut_arr(out);
-            yyjson_mut_obj_add(obj, yyjson_mut_strcpy(out, key), arr);
-        }
-        yyjson_mut_arr_add_strcpy(out, arr, have_value ? value : "");
+        cli_add_array_value(out, obj, key, value, have_value);
         return;
     }
+    yyjson_mut_obj_add(obj, yyjson_mut_strcpy(out, key),
+                       cli_typed_scalar_value(out, type, value, have_value));
+}
 
-    yyjson_mut_val *vv;
-    if (type && strcmp(type, "boolean") == 0) {
-        bool b = !have_value || strcmp(value, "true") == 0 || strcmp(value, "1") == 0 ||
-                 strcmp(value, "yes") == 0;
-        vv = yyjson_mut_bool(out, b);
-    } else if (type && strcmp(type, "integer") == 0) {
-        char *endp = NULL;
-        const char *v = have_value ? value : "";
-        long n = strtol(v, &endp, CLI_STRTOL_BASE);
-        vv = (endp && endp != v && *endp == '\0') ? yyjson_mut_int(out, (int64_t)n)
-                                                  : yyjson_mut_strcpy(out, v);
-    } else if (type && strcmp(type, "number") == 0) {
-        char *endp = NULL;
-        const char *v = have_value ? value : "";
-        double d = strtod(v, &endp);
-        vv = (endp && endp != v && *endp == '\0') ? yyjson_mut_real(out, d)
-                                                  : yyjson_mut_strcpy(out, v);
-    } else {
-        /* string or unknown type */
-        vv = yyjson_mut_strcpy(out, have_value ? value : "");
+static void cli_parse_flag_value(int argc, char **argv, int *index, const char *argument,
+                                 char key[CLI_BUF_256], const char **value, bool *have_value) {
+    const char *body = argument + CLI_PAIR_LEN;
+    const char *equals = strchr(body, '=');
+    *value = NULL;
+    *have_value = false;
+    if (equals) {
+        size_t key_length = (size_t)(equals - body);
+        if (key_length >= CLI_BUF_256) {
+            key_length = CLI_BUF_256 - CLI_SKIP_ONE;
+        }
+        memcpy(key, body, key_length);
+        key[key_length] = '\0';
+        *value = equals + CLI_SKIP_ONE;
+        *have_value = true;
+        return;
     }
-    yyjson_mut_obj_add(obj, yyjson_mut_strcpy(out, key), vv);
+    snprintf(key, CLI_BUF_256, "%s", body);
+    if (*index + CLI_SKIP_ONE < argc &&
+        strncmp(argv[*index + CLI_SKIP_ONE], "--", CLI_PAIR_LEN) != 0) {
+        *index += CLI_SKIP_ONE;
+        *value = argv[*index];
+        *have_value = true;
+    }
+}
+
+static bool cli_validate_schema_flag(yyjson_val *properties, const char *key, const char *type,
+                                     bool have_value, const char *tool_name, char **error_out) {
+    if (properties && !type) {
+        char kebab_key[CLI_BUF_256];
+        snprintf(kebab_key, sizeof(kebab_key), "%s", key);
+        cli_snake_to_kebab(kebab_key);
+        const char *close = cli_closest_prop(properties, key);
+        char suggestion[CLI_BUF_256] = "";
+        if (close) {
+            char close_kebab[CLI_BUF_256];
+            snprintf(close_kebab, sizeof(close_kebab), "%s", close);
+            cli_snake_to_kebab(close_kebab);
+            snprintf(suggestion, sizeof(suggestion), " (did you mean --%s?)", close_kebab);
+        }
+        if (error_out) {
+            char message[CLI_BUF_512];
+            snprintf(
+                message, sizeof(message),
+                "unknown flag --%s for this tool%s — run 'cli %s --help' for the supported flags",
+                kebab_key, suggestion, tool_name);
+            *error_out = cbm_strdup(message);
+        }
+        return false;
+    }
+    if (type && strcmp(type, "array") == 0 && !have_value) {
+        if (error_out) {
+            *error_out = cli_heap_msgf("flag --%s requires a value", key);
+        }
+        return false;
+    }
+    return true;
 }
 
 char *cbm_cli_build_args_json(const char *tool_name, int argc, char **argv, char **err_out) {
@@ -11653,69 +12217,13 @@ char *cbm_cli_build_args_json(const char *tool_name, int argc, char **argv, char
             break;
         }
 
-        const char *body = arg + CLI_PAIR_LEN; /* skip leading "--" */
-        const char *eq = strchr(body, '=');
         char key[CLI_BUF_256];
         const char *value = NULL;
         bool have_value = false;
-
-        if (eq) {
-            /* --key=value : split on the FIRST '='; value may contain '='/spaces. */
-            size_t klen = (size_t)(eq - body);
-            if (klen >= sizeof(key)) {
-                klen = sizeof(key) - CLI_SKIP_ONE;
-            }
-            memcpy(key, body, klen);
-            key[klen] = '\0';
-            value = eq + CLI_SKIP_ONE;
-            have_value = true;
-        } else {
-            snprintf(key, sizeof(key), "%s", body);
-            /* Consume the next token as the value unless it is itself a flag
-             * (then this is a bare boolean/string flag). */
-            if (i + CLI_SKIP_ONE < argc &&
-                strncmp(argv[i + CLI_SKIP_ONE], "--", CLI_PAIR_LEN) != 0) {
-                value = argv[i + CLI_SKIP_ONE];
-                have_value = true;
-                i++;
-            }
-        }
-
+        cli_parse_flag_value(argc, argv, &i, arg, key, &value, &have_value);
         cli_kebab_to_snake(key);
         const char *type = cli_schema_type(props, key);
-
-        /* Unknown flag for a known tool: reject loudly (#997). Silently
-         * typing it as a string ships it as an ignored JSON arg — the
-         * server applies its default and the caller gets silently-wrong
-         * output (e.g. `trace_path --max-depth 1` traced at depth 3). */
-        if (props && !type) {
-            char kebab_key[CLI_BUF_256];
-            snprintf(kebab_key, sizeof(kebab_key), "%s", key);
-            cli_snake_to_kebab(kebab_key);
-            const char *close = cli_closest_prop(props, key);
-            char suggestion[CLI_BUF_256] = "";
-            if (close) {
-                char close_kebab[CLI_BUF_256];
-                snprintf(close_kebab, sizeof(close_kebab), "%s", close);
-                cli_snake_to_kebab(close_kebab);
-                snprintf(suggestion, sizeof(suggestion), " (did you mean --%s?)", close_kebab);
-            }
-            if (err_out) {
-                char buf[CLI_BUF_512];
-                snprintf(buf, sizeof(buf),
-                         "unknown flag --%s for this tool%s — run 'cli %s --help' for the "
-                         "supported flags",
-                         kebab_key, suggestion, tool_name);
-                *err_out = cbm_strdup(buf);
-            }
-            ok = false;
-            break;
-        }
-
-        if (type && strcmp(type, "array") == 0 && !have_value) {
-            if (err_out) {
-                *err_out = cli_heap_msgf("flag --%s requires a value", key);
-            }
+        if (!cli_validate_schema_flag(props, key, type, have_value, tool_name, err_out)) {
             ok = false;
             break;
         }
@@ -11736,6 +12244,46 @@ char *cbm_cli_build_args_json(const char *tool_name, int argc, char **argv, char
     return result;
 }
 
+static void cli_print_schema_property(yyjson_val *key, yyjson_val *value, yyjson_val *required) {
+    const char *name = yyjson_get_str(key);
+    if (!name) {
+        return;
+    }
+    const char *type = "string";
+    const char *description = "";
+    if (yyjson_is_obj(value)) {
+        yyjson_val *type_value = yyjson_obj_get(value, "type");
+        yyjson_val *description_value = yyjson_obj_get(value, "description");
+        if (type_value && yyjson_is_str(type_value)) {
+            type = yyjson_get_str(type_value);
+        }
+        if (description_value && yyjson_is_str(description_value)) {
+            description = yyjson_get_str(description_value);
+        }
+    }
+    char flag[CLI_BUF_256];
+    snprintf(flag, sizeof(flag), "%s", name);
+    cli_snake_to_kebab(flag);
+    printf("  --%s <%s>%s", flag, type,
+           cli_schema_required_has(required, name) ? " [required]" : "");
+    if (description[0]) {
+        printf("  %s", description);
+    }
+    printf("\n");
+}
+
+static void cli_print_schema_flags(yyjson_val *properties, yyjson_val *required) {
+    if (!properties || !yyjson_is_obj(properties)) {
+        return;
+    }
+    yyjson_obj_iter iterator;
+    yyjson_obj_iter_init(properties, &iterator);
+    yyjson_val *key;
+    while ((key = yyjson_obj_iter_next(&iterator)) != NULL) {
+        cli_print_schema_property(key, yyjson_obj_iter_get_val(key), required);
+    }
+}
+
 int cbm_cli_print_tool_help(const char *tool_name) {
     const char *schema_str = cbm_mcp_tool_input_schema(tool_name);
     if (!schema_str) {
@@ -11744,7 +12292,7 @@ int cbm_cli_print_tool_help(const char *tool_name) {
 
     yyjson_doc *doc = yyjson_read(schema_str, strlen(schema_str), 0);
     yyjson_val *root = doc ? yyjson_doc_get_root(doc) : NULL;
-    yyjson_val *props = root ? yyjson_obj_get(root, "properties") : NULL;
+    yyjson_val *properties = root ? yyjson_obj_get(root, "properties") : NULL;
     yyjson_val *required = root ? yyjson_obj_get(root, "required") : NULL;
 
     printf("Usage:\n");
@@ -11754,40 +12302,7 @@ int cbm_cli_print_tool_help(const char *tool_name) {
     printf("  codebase-memory-mcp cli %s '<raw-json-args>'\n", tool_name);
 
     printf("\nFlags:\n");
-    if (props && yyjson_is_obj(props)) {
-        yyjson_obj_iter iter;
-        yyjson_obj_iter_init(props, &iter);
-        yyjson_val *pkey;
-        while ((pkey = yyjson_obj_iter_next(&iter)) != NULL) {
-            yyjson_val *pval = yyjson_obj_iter_get_val(pkey);
-            const char *name = yyjson_get_str(pkey);
-            if (!name) {
-                continue;
-            }
-            const char *type = "string";
-            const char *desc = "";
-            if (yyjson_is_obj(pval)) {
-                yyjson_val *t = yyjson_obj_get(pval, "type");
-                if (t && yyjson_is_str(t)) {
-                    type = yyjson_get_str(t);
-                }
-                yyjson_val *d = yyjson_obj_get(pval, "description");
-                if (d && yyjson_is_str(d)) {
-                    desc = yyjson_get_str(d);
-                }
-            }
-            char flag[CLI_BUF_256];
-            snprintf(flag, sizeof(flag), "%s", name);
-            cli_snake_to_kebab(flag);
-            bool req = cli_schema_required_has(required, name);
-            printf("  --%s <%s>%s", flag, type, req ? " [required]" : "");
-            if (desc[0]) {
-                printf("  %s", desc);
-            }
-            printf("\n");
-        }
-    }
-
+    cli_print_schema_flags(properties, required);
     if (doc) {
         yyjson_doc_free(doc);
     }

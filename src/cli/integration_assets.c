@@ -155,26 +155,129 @@ static bool assets_parse_body(yyjson_val *value, cbm_integration_body_t *body) {
     return true;
 }
 
-/* Parse verified bytes into the template table. The variant picked here is
- * the platform's ("windows" on _WIN32, else "posix", with "all" accepted for
- * platform-independent templates such as the JS adapters). */
-static bool assets_adopt_bytes(char *bytes, size_t length) {
-    yyjson_doc *doc = yyjson_read(bytes, length, 0);
-    yyjson_val *root = doc ? yyjson_doc_get_root(doc) : NULL;
-    yyjson_val *format = root && yyjson_is_obj(root) ? yyjson_obj_get(root, "format") : NULL;
-    yyjson_val *templates = root && yyjson_is_obj(root) ? yyjson_obj_get(root, "templates") : NULL;
-    if (!format || !yyjson_is_int(format) || yyjson_get_int(format) != ASSETS_FORMAT_VERSION ||
-        !templates || !yyjson_is_obj(templates)) {
-        if (doc) {
-            yyjson_doc_free(doc);
-        }
-        return false;
+static void assets_entries_free(asset_entry_t *entries, size_t entry_count) {
+    for (size_t index = 0U; index < entry_count; index++) {
+        free(entries[index].released_storage);
     }
+    free(entries);
+}
+
+static yyjson_val *assets_platform_variant(yyjson_val *template_value) {
 #ifdef _WIN32
     static const char platform_variant[] = "windows";
 #else
     static const char platform_variant[] = "posix";
 #endif
+    yyjson_val *variant = yyjson_obj_get(template_value, platform_variant);
+    return variant ? variant : yyjson_obj_get(template_value, "all");
+}
+
+static bool assets_parse_released(yyjson_val *released, asset_entry_t *entry) {
+    if (!released) {
+        return true;
+    }
+    if (!yyjson_is_arr(released)) {
+        return false;
+    }
+    size_t released_count = yyjson_arr_size(released);
+    if (released_count == 0U) {
+        return true;
+    }
+    entry->released_storage = calloc(released_count, sizeof(*entry->released_storage));
+    if (!entry->released_storage) {
+        return false;
+    }
+    size_t index;
+    size_t max;
+    yyjson_val *value;
+    size_t stored = 0U;
+    yyjson_arr_foreach(released, index, max, value) {
+        if (!assets_parse_body(value, &entry->released_storage[stored])) {
+            return false;
+        }
+        stored++;
+    }
+    entry->tpl.released = entry->released_storage;
+    entry->tpl.released_count = stored;
+    return true;
+}
+
+static bool assets_parse_entry(yyjson_val *key, yyjson_val *template_value, asset_entry_t *entry,
+                               bool *included) {
+    *included = false;
+    if (!yyjson_is_str(key) || !yyjson_is_obj(template_value)) {
+        return false;
+    }
+    yyjson_val *variant = assets_platform_variant(template_value);
+    if (!variant) {
+        return true;
+    }
+    entry->id = yyjson_get_str(key);
+    if (!assets_parse_body(variant, &entry->tpl.current)) {
+        return false;
+    }
+    yyjson_val *tool_line = yyjson_obj_get(template_value, "tool_line");
+    if (tool_line && !yyjson_is_str(tool_line)) {
+        return false;
+    }
+    entry->tpl.tool_line = tool_line ? yyjson_get_str(tool_line) : NULL;
+    if (!assets_parse_released(yyjson_obj_get(template_value, "released"), entry)) {
+        return false;
+    }
+    *included = true;
+    return true;
+}
+
+static bool assets_parse_entries(yyjson_val *templates, asset_entry_t *entries,
+                                 size_t *entry_count_out) {
+    size_t index;
+    size_t max;
+    yyjson_val *key;
+    yyjson_val *value;
+    *entry_count_out = 0U;
+    yyjson_obj_foreach(templates, index, max, key, value) {
+        asset_entry_t *entry = &entries[*entry_count_out];
+        bool included = false;
+        if (!assets_parse_entry(key, value, entry, &included)) {
+            free(entry->released_storage);
+            return false;
+        }
+        if (included) {
+            (*entry_count_out)++;
+        }
+    }
+    return true;
+}
+
+static yyjson_doc *assets_parse_document(char *bytes, size_t length, yyjson_val **templates_out) {
+    yyjson_doc *doc = yyjson_read(bytes, length, 0);
+    yyjson_val *root = doc ? yyjson_doc_get_root(doc) : NULL;
+    if (!root || !yyjson_is_obj(root)) {
+        if (doc) {
+            yyjson_doc_free(doc);
+        }
+        return NULL;
+    }
+    yyjson_val *format = yyjson_obj_get(root, "format");
+    yyjson_val *templates = yyjson_obj_get(root, "templates");
+    if (!format || !yyjson_is_int(format) || yyjson_get_int(format) != ASSETS_FORMAT_VERSION ||
+        !templates || !yyjson_is_obj(templates)) {
+        yyjson_doc_free(doc);
+        return NULL;
+    }
+    *templates_out = templates;
+    return doc;
+}
+
+/* Parse verified bytes into the template table. The variant picked here is
+ * the platform's ("windows" on _WIN32, else "posix", with "all" accepted for
+ * platform-independent templates such as the JS adapters). */
+static bool assets_adopt_bytes(char *bytes, size_t length) {
+    yyjson_val *templates = NULL;
+    yyjson_doc *doc = assets_parse_document(bytes, length, &templates);
+    if (!doc) {
+        return false;
+    }
     size_t template_count = yyjson_obj_size(templates);
     asset_entry_t *entries = calloc(template_count ? template_count : SKIP_ONE, sizeof(*entries));
     if (!entries) {
@@ -182,76 +285,8 @@ static bool assets_adopt_bytes(char *bytes, size_t length) {
         return false;
     }
     size_t entry_count = 0U;
-    size_t index;
-    size_t max;
-    yyjson_val *key;
-    yyjson_val *value;
-    bool parse_ok = true;
-    yyjson_obj_foreach(templates, index, max, key, value) {
-        if (!yyjson_is_str(key) || !yyjson_is_obj(value)) {
-            parse_ok = false;
-            break;
-        }
-        yyjson_val *variant = yyjson_obj_get(value, platform_variant);
-        if (!variant) {
-            variant = yyjson_obj_get(value, "all");
-        }
-        if (!variant) {
-            /* Not offered for this platform: skip rather than reject, so a
-             * future platform-scoped template does not brick the others. */
-            continue;
-        }
-        asset_entry_t *entry = &entries[entry_count];
-        entry->id = yyjson_get_str(key);
-        if (!assets_parse_body(variant, &entry->tpl.current)) {
-            parse_ok = false;
-            break;
-        }
-        yyjson_val *tool_line = yyjson_obj_get(value, "tool_line");
-        if (tool_line && !yyjson_is_str(tool_line)) {
-            parse_ok = false;
-            break;
-        }
-        entry->tpl.tool_line = tool_line ? yyjson_get_str(tool_line) : NULL;
-        yyjson_val *released = yyjson_obj_get(value, "released");
-        if (released) {
-            if (!yyjson_is_arr(released)) {
-                parse_ok = false;
-                break;
-            }
-            size_t released_count = yyjson_arr_size(released);
-            if (released_count > 0U) {
-                entry->released_storage = calloc(released_count, sizeof(*entry->released_storage));
-                if (!entry->released_storage) {
-                    parse_ok = false;
-                    break;
-                }
-                size_t released_index;
-                size_t released_max;
-                yyjson_val *released_value;
-                size_t stored = 0U;
-                yyjson_arr_foreach(released, released_index, released_max, released_value) {
-                    if (!assets_parse_body(released_value, &entry->released_storage[stored])) {
-                        parse_ok = false;
-                        break;
-                    }
-                    stored++;
-                }
-                if (!parse_ok) {
-                    entry_count++;
-                    break;
-                }
-                entry->tpl.released = entry->released_storage;
-                entry->tpl.released_count = stored;
-            }
-        }
-        entry_count++;
-    }
-    if (!parse_ok) {
-        for (size_t i = 0U; i < entry_count; i++) {
-            free(entries[i].released_storage);
-        }
-        free(entries);
+    if (!assets_parse_entries(templates, entries, &entry_count)) {
+        assets_entries_free(entries, entry_count);
         yyjson_doc_free(doc);
         return false;
     }
@@ -328,23 +363,20 @@ bool cbm_integration_assets_require(const char *home, char *err, size_t err_sz) 
     return false;
 }
 
-bool cbm_integration_assets_install(const char *home, bool dry_run, char *err, size_t err_sz) {
-    if (!home || !home[0] || !cbm_integration_assets_require(home, err, err_sz)) {
-        if (!home || !home[0]) {
-            assets_fill_error(err, err_sz);
-        }
-        return false;
+static void assets_fill_install_error(char *err, size_t err_sz, const char *format,
+                                      const char *path) {
+    if (err && err_sz > 0U) {
+        (void)snprintf(err, err_sz, format, path, CBM_INTEGRATIONS_ASSET_NAME);
     }
-    if (dry_run) {
-        return true;
-    }
-    char stored[CBM_SZ_4K];
-    char parent[CBM_SZ_4K];
-    if (!assets_stored_copy_path(home, stored, sizeof(stored))) {
+}
+
+static bool assets_prepare_storage(const char *home, char stored[CBM_SZ_4K], char parent[CBM_SZ_4K],
+                                   char *err, size_t err_sz) {
+    if (!assets_stored_copy_path(home, stored, CBM_SZ_4K)) {
         assets_fill_error(err, err_sz);
         return false;
     }
-    (void)snprintf(parent, sizeof(parent), "%s", stored);
+    (void)snprintf(parent, CBM_SZ_4K, "%s", stored);
     char *slash = strrchr(parent, '/');
     if (!slash) {
         assets_fill_error(err, err_sz);
@@ -352,12 +384,14 @@ bool cbm_integration_assets_install(const char *home, bool dry_run, char *err, s
     }
     *slash = '\0';
     if (!cbm_mkdir_p(parent, ASSETS_DIR_PERM)) {
-        if (err && err_sz > 0U) {
-            (void)snprintf(err, err_sz, "cannot create %s to store the verified %s copy", parent,
-                           CBM_INTEGRATIONS_ASSET_NAME);
-        }
+        assets_fill_install_error(err, err_sz, "cannot create %s to store the verified %s copy",
+                                  parent);
         return false;
     }
+    return true;
+}
+
+static bool assets_publish_stored_copy(const char *stored, char *err, size_t err_sz) {
     /* Publish by rename so a concurrent reader never sees a torn copy. */
     char temp_path[CBM_SZ_4K];
     int written = snprintf(temp_path, sizeof(temp_path), "%s.tmp", stored);
@@ -368,10 +402,8 @@ bool cbm_integration_assets_install(const char *home, bool dry_run, char *err, s
     FILE *file = cbm_fopen(temp_path, "wb");
     bool wrote = file && fwrite(g_assets.bytes, sizeof(*g_assets.bytes), g_assets.length, file) ==
                              g_assets.length;
-    if (file && fclose(file) != 0) {
-        wrote = false;
-    }
-    if (!wrote || cbm_rename_replace(temp_path, stored) != 0) {
+    int close_result = file ? fclose(file) : EOF;
+    if (!wrote || close_result != 0 || cbm_rename_replace(temp_path, stored) != 0) {
         (void)cbm_unlink(temp_path);
         if (err && err_sz > 0U) {
             (void)snprintf(err, err_sz, "cannot write the verified %s copy to %s",
@@ -380,6 +412,23 @@ bool cbm_integration_assets_install(const char *home, bool dry_run, char *err, s
         return false;
     }
     return true;
+}
+
+bool cbm_integration_assets_install(const char *home, bool dry_run, char *err, size_t err_sz) {
+    if (!home || !home[0]) {
+        assets_fill_error(err, err_sz);
+        return false;
+    }
+    if (!cbm_integration_assets_require(home, err, err_sz)) {
+        return false;
+    }
+    if (dry_run) {
+        return true;
+    }
+    char stored[CBM_SZ_4K];
+    char parent[CBM_SZ_4K];
+    return assets_prepare_storage(home, stored, parent, err, err_sz) &&
+           assets_publish_stored_copy(stored, err, err_sz);
 }
 
 const cbm_integration_template_t *cbm_integration_template(const char *id) {

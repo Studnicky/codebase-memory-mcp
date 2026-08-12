@@ -8,6 +8,7 @@
 #include "cli/agent_profiles.h"
 
 #include "cli/config_toml_edit.h"
+#include "foundation/constants.h"
 #include "yyjson/yyjson.h"
 
 #include <stdbool.h>
@@ -22,6 +23,13 @@ typedef struct {
     size_t capacity;
     bool failed;
 } profile_buffer_t;
+
+enum {
+    PROFILE_BUFFER_INITIAL_CAPACITY = CBM_SZ_1K,
+    PROFILE_TOOL_IDENTIFIER_CAPACITY =
+        sizeof("mcp__codebase-memory-mcp__") + sizeof("check_index_coverage"),
+    PROFILE_TOML_ESCAPED_BINARY_CAPACITY = CBM_SZ_8K,
+};
 
 typedef enum {
     PROFILE_TOOL_SEARCH_GRAPH = 0,
@@ -86,21 +94,21 @@ static void profile_buffer_init(profile_buffer_t *buffer) {
 }
 
 static bool profile_buffer_reserve(profile_buffer_t *buffer, size_t extra) {
-    if (buffer->failed || extra > SIZE_MAX - buffer->length - 1U) {
+    if (buffer->failed || extra > SIZE_MAX - buffer->length - SKIP_ONE) {
         buffer->failed = true;
         return false;
     }
-    size_t required = buffer->length + extra + 1U;
+    size_t required = buffer->length + extra + SKIP_ONE;
     if (required <= buffer->capacity) {
         return true;
     }
-    size_t capacity = buffer->capacity ? buffer->capacity : 1024U;
+    size_t capacity = buffer->capacity ? buffer->capacity : PROFILE_BUFFER_INITIAL_CAPACITY;
     while (capacity < required) {
-        if (capacity > SIZE_MAX / 2U) {
+        if (capacity > SIZE_MAX / CBM_SZ_2) {
             capacity = required;
             break;
         }
-        capacity *= 2U;
+        capacity *= CBM_SZ_2;
     }
     char *grown = (char *)realloc(buffer->data, capacity);
     if (!grown) {
@@ -134,7 +142,7 @@ static char *profile_buffer_finish(profile_buffer_t *buffer) {
         return NULL;
     }
     if (!buffer->data) {
-        buffer->data = (char *)calloc(1U, 1U);
+        buffer->data = (char *)calloc(CBM_ALLOC_ONE, CBM_ALLOC_ONE);
     }
     char *result = buffer->data;
     profile_buffer_init(buffer);
@@ -333,7 +341,7 @@ static bool append_yaml_mcp_tools(profile_buffer_t *buffer, cbm_graph_profile_di
     size_t count = 0U;
     tier_tool_set(tier, &tools, &count);
     for (size_t i = 0U; i < count; i++) {
-        char identifier[160];
+        char identifier[PROFILE_TOOL_IDENTIFIER_CAPACITY];
         if (!tool_identifier(dialect, tools[i], identifier, sizeof(identifier)) ||
             !profile_buffer_append(buffer, "  - ") || !profile_buffer_append(buffer, identifier) ||
             !profile_buffer_append(buffer, "\n")) {
@@ -349,7 +357,7 @@ static bool append_csv_mcp_tools(profile_buffer_t *buffer, cbm_graph_profile_dia
     size_t count = 0U;
     tier_tool_set(tier, &tools, &count);
     for (size_t i = 0U; i < count; i++) {
-        char identifier[160];
+        char identifier[PROFILE_TOOL_IDENTIFIER_CAPACITY];
         if (!tool_identifier(dialect, tools[i], identifier, sizeof(identifier)) ||
             (i > 0U && !profile_buffer_append(buffer, ",")) ||
             !profile_buffer_append(buffer, identifier)) {
@@ -365,7 +373,7 @@ static bool append_toml_mcp_tools(profile_buffer_t *buffer, cbm_graph_profile_di
     size_t count = 0U;
     tier_tool_set(tier, &tools, &count);
     for (size_t i = 0U; i < count; i++) {
-        char identifier[160];
+        char identifier[PROFILE_TOOL_IDENTIFIER_CAPACITY];
         if (!tool_identifier(dialect, tools[i], identifier, sizeof(identifier)) ||
             ((leading_items || i > 0U) && !profile_buffer_append(buffer, ", ")) ||
             !profile_buffer_append(buffer, "\"") || !profile_buffer_append(buffer, identifier) ||
@@ -383,7 +391,7 @@ static bool append_permission_mcp_tools(profile_buffer_t *buffer,
     size_t count = 0U;
     tier_tool_set(tier, &tools, &count);
     for (size_t i = 0U; i < count; i++) {
-        char identifier[160];
+        char identifier[PROFILE_TOOL_IDENTIFIER_CAPACITY];
         if (!tool_identifier(dialect, tools[i], identifier, sizeof(identifier)) ||
             !profile_buffer_append(buffer, "  \"") || !profile_buffer_append(buffer, identifier) ||
             !profile_buffer_append(buffer, "\": allow\n")) {
@@ -427,7 +435,7 @@ static char *render_kiro_profile(cbm_graph_tier_t tier, cbm_graph_access_t acces
         size_t count = 0U;
         tier_tool_set(tier, &tier_tools, &count);
         for (size_t i = 0U; ok && i < count; i++) {
-            char identifier[160];
+            char identifier[PROFILE_TOOL_IDENTIFIER_CAPACITY];
             ok = tool_identifier(CBM_GRAPH_DIALECT_KIRO, tier_tools[i], identifier,
                                  sizeof(identifier)) &&
                  yyjson_mut_arr_add_strcpy(doc, tools, identifier);
@@ -475,7 +483,7 @@ static bool append_codex_profile(profile_buffer_t *buffer, cbm_graph_tier_t tier
         return false;
     }
     if (!rc1_transportless) {
-        char escaped_binary[8192];
+        char escaped_binary[PROFILE_TOML_ESCAPED_BINARY_CAPACITY];
         if (!binary_path || !binary_path[0] ||
             cbm_toml_escape_basic_string(binary_path, escaped_binary, sizeof(escaped_binary)) !=
                 0) {
@@ -494,146 +502,178 @@ static bool append_codex_profile(profile_buffer_t *buffer, cbm_graph_tier_t tier
            profile_buffer_append(buffer, "]\n");
 }
 
+typedef struct {
+    profile_buffer_t *buffer;
+    cbm_graph_profile_dialect_t dialect;
+    cbm_graph_tier_t tier;
+    const char *slug;
+    const char *display;
+    const char *description;
+    const char *prompt;
+    bool direct;
+} profile_render_context_t;
+
+static bool render_yaml_mcp_profile(const profile_render_context_t *context,
+                                    const char *tool_fragment, const char *tail_fragment,
+                                    const char *direct_server_fragment) {
+    return append_yaml_identity(context->buffer, context->slug, context->description) &&
+           profile_buffer_append(context->buffer, tool_fragment) &&
+           (!context->direct ||
+            append_yaml_mcp_tools(context->buffer, context->dialect, context->tier)) &&
+           (!context->direct || !direct_server_fragment ||
+            profile_buffer_append(context->buffer, direct_server_fragment)) &&
+           profile_buffer_append(context->buffer, tail_fragment) &&
+           profile_buffer_append(context->buffer, context->prompt);
+}
+
+static bool render_yaml_static_profile(const profile_render_context_t *context,
+                                       const char *fragment) {
+    return append_yaml_identity(context->buffer, context->slug, context->description) &&
+           profile_buffer_append(context->buffer, fragment) &&
+           profile_buffer_append(context->buffer, context->prompt);
+}
+
+static bool render_permission_profile(const profile_render_context_t *context) {
+    return profile_buffer_append(context->buffer, "---\ndescription: ") &&
+           profile_buffer_append(context->buffer, context->description) &&
+           profile_buffer_append(context->buffer,
+                                 "\nmode: subagent\npermission:\n  \"*\": deny\n  read: allow\n  "
+                                 "grep: allow\n  glob: allow\n") &&
+           (!context->direct ||
+            append_permission_mcp_tools(context->buffer, context->dialect, context->tier)) &&
+           profile_buffer_append(context->buffer, "---\n") &&
+           profile_buffer_append(context->buffer, context->prompt);
+}
+
+static bool append_junie_direct_server(const profile_render_context_t *context) {
+    return profile_buffer_append(context->buffer, "mcpServers: [\"codebase-memory-") &&
+           profile_buffer_append(context->buffer, tier_server_profile(context->tier)) &&
+           profile_buffer_append(context->buffer, "\"]\n");
+}
+
+static bool append_junie_direct_notice(const profile_render_context_t *context) {
+    return profile_buffer_append(context->buffer, "The dedicated server hard-enforces the ") &&
+           profile_buffer_append(context->buffer, tier_server_profile(context->tier)) &&
+           profile_buffer_append(context->buffer,
+                                 " tool profile; mutation and unlisted tools are unavailable.\n\n");
+}
+
+static bool render_junie_profile(const profile_render_context_t *context) {
+    return profile_buffer_append(context->buffer, "---\nname: \"") &&
+           profile_buffer_append(context->buffer, context->slug) &&
+           profile_buffer_append(context->buffer, "\"\ndescription: \"") &&
+           profile_buffer_append(context->buffer, context->description) &&
+           profile_buffer_append(context->buffer, "\"\ntools: [\"Read\", \"Grep\", \"Glob\"]\n") &&
+           (!context->direct || append_junie_direct_server(context)) &&
+           profile_buffer_append(context->buffer, "---\n") &&
+           (!context->direct || append_junie_direct_notice(context)) &&
+           profile_buffer_append(context->buffer, context->prompt);
+}
+
+static bool render_qoder_profile(const profile_render_context_t *context) {
+    return append_yaml_identity(context->buffer, context->slug, context->description) &&
+           profile_buffer_append(context->buffer, "tools: Read,Grep,Glob") &&
+           (!context->direct ||
+            (profile_buffer_append(context->buffer, ",") &&
+             append_csv_mcp_tools(context->buffer, context->dialect, context->tier))) &&
+           profile_buffer_append(context->buffer, "\n") &&
+           (!context->direct ||
+            profile_buffer_append(context->buffer, "mcpServers:\n  - codebase-memory-mcp\n")) &&
+           profile_buffer_append(context->buffer, "---\n") &&
+           profile_buffer_append(context->buffer, context->prompt);
+}
+
+static bool render_codebuddy_profile(const profile_render_context_t *context) {
+    return append_yaml_identity(context->buffer, context->slug, context->description) &&
+           profile_buffer_append(context->buffer, "tools: Read,Grep,Glob") &&
+           (!context->direct ||
+            (profile_buffer_append(context->buffer, ",") &&
+             append_csv_mcp_tools(context->buffer, context->dialect, context->tier))) &&
+           profile_buffer_append(
+               context->buffer,
+               "\nmodel: inherit\npermissionMode: plan\nskills: codebase-memory\n---\n") &&
+           profile_buffer_append(context->buffer, context->prompt);
+}
+
+static bool render_factory_profile(const profile_render_context_t *context) {
+    return append_yaml_identity(context->buffer, context->slug, context->description) &&
+           profile_buffer_append(context->buffer,
+                                 "model: inherit\ntools: [\"Read\", \"LS\", \"Grep\", \"Glob\"") &&
+           (!context->direct ||
+            append_toml_mcp_tools(context->buffer, context->dialect, context->tier, true)) &&
+           profile_buffer_append(context->buffer, "]\n") &&
+           profile_buffer_append(context->buffer, "---\n") &&
+           profile_buffer_append(context->buffer, context->prompt);
+}
+
+static bool render_vibe_profile(const profile_render_context_t *context) {
+    return profile_buffer_append(context->buffer, "agent_type = \"subagent\"\ndisplay_name = \"") &&
+           profile_buffer_append(context->buffer, context->display) &&
+           profile_buffer_append(context->buffer, "\"\ndescription = \"") &&
+           profile_buffer_append(context->buffer, context->description) &&
+           profile_buffer_append(context->buffer, "\"\nsafety = \"safe\"\nsystem_prompt_id = \"") &&
+           profile_buffer_append(context->buffer, context->slug) &&
+           profile_buffer_append(context->buffer,
+                                 "\"\nenabled_tools = [\"read_file\", \"grep_search\"") &&
+           (!context->direct ||
+            append_toml_mcp_tools(context->buffer, context->dialect, context->tier, true)) &&
+           profile_buffer_append(context->buffer, "]\n");
+}
+
 static bool render_profile_text(profile_buffer_t *buffer, cbm_graph_profile_dialect_t dialect,
                                 cbm_graph_tier_t tier, cbm_graph_access_t access,
                                 const char *binary_path, const char *prompt) {
-    const char *slug = cbm_graph_tier_slug(tier);
-    const char *display = cbm_graph_tier_display_name(tier);
-    const char *description = profile_description(tier, access);
-    bool direct = access == CBM_GRAPH_ACCESS_DIRECT;
+    profile_render_context_t context = {
+        .buffer = buffer,
+        .dialect = dialect,
+        .tier = tier,
+        .slug = cbm_graph_tier_slug(tier),
+        .display = cbm_graph_tier_display_name(tier),
+        .description = profile_description(tier, access),
+        .prompt = prompt,
+        .direct = access == CBM_GRAPH_ACCESS_DIRECT,
+    };
     switch (dialect) {
     case CBM_GRAPH_DIALECT_CLAUDE:
-        if (!append_yaml_identity(buffer, slug, description) ||
-            !profile_buffer_append(buffer, "tools:\n  - Read\n  - Grep\n  - Glob\n") ||
-            (direct && !append_yaml_mcp_tools(buffer, dialect, tier)) ||
-            (direct && !profile_buffer_append(buffer, "mcpServers: [codebase-memory-mcp]\n")) ||
-            !profile_buffer_append(buffer,
-                                   "permissionMode: plan\nskills: [codebase-memory]\n---\n") ||
-            !profile_buffer_append(buffer, prompt)) {
-            return false;
-        }
-        return true;
+        return render_yaml_mcp_profile(&context, "tools:\n  - Read\n  - Grep\n  - Glob\n",
+                                       "permissionMode: plan\nskills: [codebase-memory]\n---\n",
+                                       "mcpServers: [codebase-memory-mcp]\n");
     case CBM_GRAPH_DIALECT_CODEX:
         return append_codex_profile(buffer, tier, access, binary_path, prompt, false);
     case CBM_GRAPH_DIALECT_GEMINI:
-        if (!append_yaml_identity(buffer, slug, description) ||
-            !profile_buffer_append(buffer,
-                                   "kind: local\ntools:\n  - read_file\n  - grep_search\n") ||
-            (direct && !append_yaml_mcp_tools(buffer, dialect, tier)) ||
-            !profile_buffer_append(buffer, "---\n") || !profile_buffer_append(buffer, prompt)) {
-            return false;
-        }
-        return true;
+        return render_yaml_mcp_profile(
+            &context, "kind: local\ntools:\n  - read_file\n  - grep_search\n", "---\n", NULL);
     case CBM_GRAPH_DIALECT_QWEN:
-        if (!append_yaml_identity(buffer, slug, description) ||
-            !profile_buffer_append(buffer,
-                                   "model: inherit\napprovalMode: plan\ntools:\n  - read_file\n  - "
-                                   "grep_search\n  - glob\n  - list_directory\n") ||
-            (direct && !append_yaml_mcp_tools(buffer, dialect, tier)) ||
-            !profile_buffer_append(buffer, "---\n") || !profile_buffer_append(buffer, prompt)) {
-            return false;
-        }
-        return true;
+        return render_yaml_mcp_profile(
+            &context,
+            "model: inherit\napprovalMode: plan\ntools:\n  - read_file\n  - grep_search\n  - "
+            "glob\n  - list_directory\n",
+            "---\n", NULL);
     case CBM_GRAPH_DIALECT_COPILOT:
-        if (!append_yaml_identity(buffer, slug, description) ||
-            !profile_buffer_append(buffer, "tools:\n  - read\n  - search\n") ||
-            (direct && !append_yaml_mcp_tools(buffer, dialect, tier)) ||
-            !profile_buffer_append(buffer, "---\n") || !profile_buffer_append(buffer, prompt)) {
-            return false;
-        }
-        return true;
+        return render_yaml_mcp_profile(&context, "tools:\n  - read\n  - search\n", "---\n", NULL);
     case CBM_GRAPH_DIALECT_OPENCODE:
     case CBM_GRAPH_DIALECT_KILO:
-        if (!profile_buffer_append(buffer, "---\ndescription: ") ||
-            !profile_buffer_append(buffer, description) ||
-            !profile_buffer_append(
-                buffer, "\nmode: subagent\npermission:\n  \"*\": deny\n  read: allow\n  grep: "
-                        "allow\n  glob: allow\n") ||
-            (direct && !append_permission_mcp_tools(buffer, dialect, tier)) ||
-            !profile_buffer_append(buffer, "---\n") || !profile_buffer_append(buffer, prompt)) {
-            return false;
-        }
-        return true;
+        return render_permission_profile(&context);
     case CBM_GRAPH_DIALECT_JUNIE:
-        if (!profile_buffer_append(buffer, "---\nname: \"") ||
-            !profile_buffer_append(buffer, slug) ||
-            !profile_buffer_append(buffer, "\"\ndescription: \"") ||
-            !profile_buffer_append(buffer, description) ||
-            !profile_buffer_append(buffer, "\"\ntools: [\"Read\", \"Grep\", \"Glob\"]\n") ||
-            (direct && !profile_buffer_append(buffer, "mcpServers: [\"codebase-memory-")) ||
-            (direct && !profile_buffer_append(buffer, tier_server_profile(tier))) ||
-            (direct && !profile_buffer_append(buffer, "\"]\n")) ||
-            !profile_buffer_append(buffer, "---\n") ||
-            (direct && !profile_buffer_append(buffer, "The dedicated server hard-enforces the ")) ||
-            (direct && !profile_buffer_append(buffer, tier_server_profile(tier))) ||
-            (direct &&
-             !profile_buffer_append(
-                 buffer, " tool profile; mutation and unlisted tools are unavailable.\n\n")) ||
-            !profile_buffer_append(buffer, prompt)) {
-            return false;
-        }
-        return true;
+        return render_junie_profile(&context);
     case CBM_GRAPH_DIALECT_QODER:
-        if (!append_yaml_identity(buffer, slug, description) ||
-            !profile_buffer_append(buffer, "tools: Read,Grep,Glob") ||
-            (direct && (!profile_buffer_append(buffer, ",") ||
-                        !append_csv_mcp_tools(buffer, dialect, tier))) ||
-            !profile_buffer_append(buffer, "\n") ||
-            (direct && !profile_buffer_append(buffer, "mcpServers:\n  - codebase-memory-mcp\n")) ||
-            !profile_buffer_append(buffer, "---\n") || !profile_buffer_append(buffer, prompt)) {
-            return false;
-        }
-        return true;
+        return render_qoder_profile(&context);
     case CBM_GRAPH_DIALECT_CODEBUDDY:
-        if (!append_yaml_identity(buffer, slug, description) ||
-            !profile_buffer_append(buffer, "tools: Read,Grep,Glob") ||
-            (direct && (!profile_buffer_append(buffer, ",") ||
-                        !append_csv_mcp_tools(buffer, dialect, tier))) ||
-            !profile_buffer_append(
-                buffer, "\nmodel: inherit\npermissionMode: plan\nskills: codebase-memory\n---\n") ||
-            !profile_buffer_append(buffer, prompt)) {
-            return false;
-        }
-        return true;
+        return render_codebuddy_profile(&context);
     case CBM_GRAPH_DIALECT_FACTORY:
-        if (!append_yaml_identity(buffer, slug, description) ||
-            !profile_buffer_append(
-                buffer, "model: inherit\ntools: [\"Read\", \"LS\", \"Grep\", \"Glob\"") ||
-            (direct && !append_toml_mcp_tools(buffer, dialect, tier, true)) ||
-            !profile_buffer_append(buffer, "]\n") || !profile_buffer_append(buffer, "---\n") ||
-            !profile_buffer_append(buffer, prompt)) {
-            return false;
-        }
-        return true;
+        return render_factory_profile(&context);
     case CBM_GRAPH_DIALECT_VIBE:
-        if (!profile_buffer_append(buffer, "agent_type = \"subagent\"\ndisplay_name = \"") ||
-            !profile_buffer_append(buffer, display) ||
-            !profile_buffer_append(buffer, "\"\ndescription = \"") ||
-            !profile_buffer_append(buffer, description) ||
-            !profile_buffer_append(buffer, "\"\nsafety = \"safe\"\nsystem_prompt_id = \"") ||
-            !profile_buffer_append(buffer, slug) ||
-            !profile_buffer_append(buffer, "\"\nenabled_tools = [\"read_file\", \"grep_search\"") ||
-            (direct && !append_toml_mcp_tools(buffer, dialect, tier, true)) ||
-            !profile_buffer_append(buffer, "]\n")) {
-            return false;
-        }
-        return true;
+        return render_vibe_profile(&context);
     case CBM_GRAPH_DIALECT_AUGMENT:
-        return append_yaml_identity(buffer, slug, description) &&
-               profile_buffer_append(buffer, "---\n") && profile_buffer_append(buffer, prompt);
+        return render_yaml_static_profile(&context, "---\n");
     case CBM_GRAPH_DIALECT_CURSOR:
-        return append_yaml_identity(buffer, slug, description) &&
-               profile_buffer_append(buffer, "model: inherit\nreadonly: true\n---\n") &&
-               profile_buffer_append(buffer, prompt);
+        return render_yaml_static_profile(&context, "model: inherit\nreadonly: true\n---\n");
     case CBM_GRAPH_DIALECT_ROVO:
-        return append_yaml_identity(buffer, slug, description) &&
-               profile_buffer_append(buffer, "tools:\n  - open_files\n  - expand_code_chunks\n  - "
-                                             "expand_folder\n  - grep\n---\n") &&
-               profile_buffer_append(buffer, prompt);
+        return render_yaml_static_profile(
+            &context,
+            "tools:\n  - open_files\n  - expand_code_chunks\n  - expand_folder\n  - grep\n---\n");
     case CBM_GRAPH_DIALECT_POCHI:
-        return append_yaml_identity(buffer, slug, description) &&
-               profile_buffer_append(buffer, "tools:\n  - readFile\n---\n") &&
-               profile_buffer_append(buffer, prompt);
+        return render_yaml_static_profile(&context, "tools:\n  - readFile\n---\n");
     default:
         return false;
     }

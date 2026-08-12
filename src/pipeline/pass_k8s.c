@@ -186,6 +186,25 @@ typedef struct {
     int cap;
 } k8s_record_array_t;
 
+typedef struct {
+    int kustomize;
+    int manifest;
+    int helm;
+} k8s_pass_counts_t;
+
+enum {
+    K8S_PATH_DEPTH = 12,
+    K8S_PATH_KEY_LEN = 64,
+    K8S_LINE_TERMINATOR_RESERVE = 1,
+    K8S_YAML_DOCUMENT_SEPARATOR_LEN = 3,
+    K8S_PATH_PARENT_DEPTH = 1,
+};
+
+typedef struct {
+    int indent;
+    char key[K8S_PATH_KEY_LEN];
+} k8s_path_entry_t;
+
 /* Count leading-space indentation of a line (tabs are invalid YAML indent). */
 static int k8s_indent(const char *line) {
     int n = 0;
@@ -198,6 +217,11 @@ static int k8s_indent(const char *line) {
 /* Split `key: value` (already de-indented). Returns 1 if a key was found; fills
  * key/val (val empty when the key opens a nested block). */
 static int k8s_split_kv(const char *t, char *key, size_t key_sz, char *val, size_t val_sz) {
+    enum {
+        K8S_VALUE_TERMINATOR_RESERVE = 1,
+        K8S_QUOTED_VALUE_DELIMITERS = 2,
+        K8S_PARSE_KEY_VALUE_FOUND = 1,
+    };
     key[0] = '\0';
     val[0] = '\0';
     if (t[0] == '#' || t[0] == '-' || t[0] == '\0') {
@@ -213,26 +237,29 @@ static int k8s_split_kv(const char *t, char *key, size_t key_sz, char *val, size
     }
     memcpy(key, t, klen);
     key[klen] = '\0';
-    const char *v = colon + 1;
+    const char *v = colon + SKIP_ONE;
     while (*v == ' ' || *v == '\t') {
         v++;
     }
     size_t vn = 0;
-    while (v[vn] && v[vn] != '\r' && v[vn] != '\n' && v[vn] != '#' && vn + 1 < val_sz) {
+    while (v[vn] && v[vn] != '\r' && v[vn] != '\n' && v[vn] != '#' &&
+           vn + K8S_VALUE_TERMINATOR_RESERVE < val_sz) {
         val[vn] = v[vn];
         vn++;
     }
     /* trim trailing space */
-    while (vn > 0 && (val[vn - 1] == ' ' || val[vn - 1] == '\t')) {
+    while (vn > 0 && (val[vn - K8S_VALUE_TERMINATOR_RESERVE] == ' ' ||
+                      val[vn - K8S_VALUE_TERMINATOR_RESERVE] == '\t')) {
         vn--;
     }
     val[vn] = '\0';
     /* strip surrounding quotes */
-    if (vn >= 2 && (val[0] == '"' || val[0] == '\'') && val[vn - 1] == val[0]) {
-        memmove(val, val + 1, vn - 2);
-        val[vn - 2] = '\0';
+    if (vn >= K8S_QUOTED_VALUE_DELIMITERS && (val[0] == '"' || val[0] == '\'') &&
+        val[vn - K8S_VALUE_TERMINATOR_RESERVE] == val[0]) {
+        memmove(val, val + SKIP_ONE, vn - K8S_QUOTED_VALUE_DELIMITERS);
+        val[vn - K8S_QUOTED_VALUE_DELIMITERS] = '\0';
     }
-    return 1;
+    return K8S_PARSE_KEY_VALUE_FOUND;
 }
 
 static void k8s_add_val(char dst[][K8S_LABEL_LEN], int *n, const char *v) {
@@ -243,84 +270,126 @@ static void k8s_add_val(char dst[][K8S_LABEL_LEN], int *n, const char *v) {
     (*n)++;
 }
 
+static bool k8s_next_line(const char **cursor, char *line, size_t line_size) {
+    if (!*cursor || !**cursor || line_size <= K8S_LINE_TERMINATOR_RESERVE) {
+        return false;
+    }
+    const char *start = *cursor;
+    const char *eol = strchr(start, '\n');
+    size_t length = eol ? (size_t)(eol - start) : strlen(start);
+    size_t copied = length < line_size - K8S_LINE_TERMINATOR_RESERVE
+                        ? length
+                        : line_size - K8S_LINE_TERMINATOR_RESERVE;
+    memcpy(line, start, copied);
+    line[copied] = '\0';
+    *cursor = eol ? eol + SKIP_ONE : NULL;
+    return true;
+}
+
+static const char *k8s_trim_indent(const char *line) {
+    while (*line == ' ') {
+        line++;
+    }
+    return line;
+}
+
+static const char *k8s_trim_whitespace(const char *line) {
+    while (*line == ' ' || *line == '\t') {
+        line++;
+    }
+    return line;
+}
+
+static bool k8s_is_document_separator(const char *line, const char *trimmed) {
+    return line == trimmed && strncmp(trimmed, "---", K8S_YAML_DOCUMENT_SEPARATOR_LEN) == 0;
+}
+
+static void k8s_pop_path(k8s_path_entry_t *stack, int *depth, int indent) {
+    while (*depth > 0 && stack[*depth - SKIP_ONE].indent >= indent) {
+        (*depth)--;
+    }
+}
+
+static bool k8s_under_path(const k8s_path_entry_t *stack, int depth, const char *key) {
+    return depth >= K8S_PATH_PARENT_DEPTH && strcmp(stack[depth - SKIP_ONE].key, key) == 0;
+}
+
+static void k8s_push_path(k8s_path_entry_t *stack, int *depth, int indent, const char *key) {
+    if (*depth >= K8S_PATH_DEPTH) {
+        return;
+    }
+    stack[*depth].indent = indent;
+    snprintf(stack[*depth].key, sizeof(stack[*depth].key), "%s", key);
+    (*depth)++;
+}
+
+static void k8s_set_resource_kind(k8s_record_t *rec, const char *value) {
+    rec->is_service = strcmp(value, "Service") == 0;
+    rec->is_workload = strcmp(value, "Deployment") == 0 || strcmp(value, "StatefulSet") == 0 ||
+                       strcmp(value, "DaemonSet") == 0 || strcmp(value, "ReplicaSet") == 0 ||
+                       strcmp(value, "ReplicationController") == 0 || strcmp(value, "Pod") == 0 ||
+                       strcmp(value, "Job") == 0 || strcmp(value, "CronJob") == 0;
+}
+
+static void k8s_scan_leaf(k8s_record_t *rec, const char *key, const char *value,
+                          bool under_metadata, bool under_selector, bool under_labels,
+                          bool *got_name, int indent) {
+    if (indent == 0 && strcmp(key, "kind") == 0) {
+        k8s_set_resource_kind(rec, value);
+        return;
+    }
+    if (!*got_name && under_metadata && strcmp(key, "name") == 0) {
+        snprintf(rec->name, sizeof(rec->name), "%s", value);
+        *got_name = true;
+        return;
+    }
+    if (under_selector) {
+        k8s_add_val(rec->selector_vals, &rec->n_selector, value);
+        return;
+    }
+    if (under_labels) {
+        k8s_add_val(rec->label_vals, &rec->n_label, value);
+    }
+}
+
+static void k8s_scan_label_line(const char *line, const char *trimmed, k8s_path_entry_t *stack,
+                                int *depth, k8s_record_t *rec, bool *got_name) {
+    if (!trimmed[0] || trimmed[0] == '#') {
+        return;
+    }
+    int indent = k8s_indent(line);
+    k8s_pop_path(stack, depth, indent);
+    char key[K8S_PATH_KEY_LEN];
+    char value[K8S_LABEL_LEN];
+    if (!k8s_split_kv(trimmed, key, sizeof(key), value, sizeof(value))) {
+        return;
+    }
+    if (!value[0]) {
+        k8s_push_path(stack, depth, indent, key);
+        return;
+    }
+    bool under_selector = k8s_under_path(stack, *depth, "selector");
+    bool under_labels = k8s_under_path(stack, *depth, "labels");
+    bool under_metadata = k8s_under_path(stack, *depth, "metadata");
+    k8s_scan_leaf(rec, key, value, under_metadata, under_selector, under_labels, got_name, indent);
+}
+
 /* Scan a single-document k8s manifest's text for the resource name, selector
  * label-values (Service) and pod-template label-values (workload).  A small
  * indentation path-stack distinguishes spec.selector from
  * spec.template.metadata.labels and from top-level metadata.name. */
 static void k8s_scan_labels(const char *source, k8s_record_t *rec) {
-    enum { K8S_PATH_DEPTH = 12 };
-    struct {
-        int indent;
-        char key[64];
-    } stack[K8S_PATH_DEPTH];
+    k8s_path_entry_t stack[K8S_PATH_DEPTH];
     int depth = 0;
     bool got_name = false;
-
-    const char *p = source;
-    while (p && *p) {
-        const char *eol = strchr(p, '\n');
-        size_t len = eol ? (size_t)(eol - p) : strlen(p);
-        char line[CBM_SZ_512];
-        size_t cp = len < sizeof(line) - 1 ? len : sizeof(line) - 1;
-        memcpy(line, p, cp);
-        line[cp] = '\0';
-
-        /* End of first YAML document — stop (one Resource per file). */
-        const char *trimmed = line;
-        while (*trimmed == ' ') {
-            trimmed++;
-        }
-        if (strncmp(trimmed, "---", 3) == 0 && line == trimmed) {
+    const char *cursor = source;
+    char line[CBM_SZ_512];
+    while (k8s_next_line(&cursor, line, sizeof(line))) {
+        const char *trimmed = k8s_trim_indent(line);
+        if (k8s_is_document_separator(line, trimmed)) {
             break;
         }
-
-        if (trimmed[0] && trimmed[0] != '#') {
-            int ind = k8s_indent(line);
-            while (depth > 0 && stack[depth - 1].indent >= ind) {
-                depth--;
-            }
-            char key[64];
-            char val[K8S_LABEL_LEN];
-            if (k8s_split_kv(trimmed, key, sizeof(key), val, sizeof(val))) {
-                /* Build the current dotted path for context decisions. */
-                bool under_selector = (depth >= 1 && strcmp(stack[depth - 1].key, "selector") == 0);
-                bool under_labels = (depth >= 1 && strcmp(stack[depth - 1].key, "labels") == 0);
-                bool under_metadata = (depth >= 1 && strcmp(stack[depth - 1].key, "metadata") == 0);
-
-                if (val[0] == '\0') {
-                    /* Block-opening key: push onto the path stack. */
-                    if (depth < K8S_PATH_DEPTH) {
-                        stack[depth].indent = ind;
-                        snprintf(stack[depth].key, sizeof(stack[depth].key), "%s", key);
-                        depth++;
-                    }
-                } else {
-                    /* Leaf key: value. */
-                    if (ind == 0 && strcmp(key, "kind") == 0) {
-                        rec->is_service = (strcmp(val, "Service") == 0);
-                        rec->is_workload =
-                            (strcmp(val, "Deployment") == 0 || strcmp(val, "StatefulSet") == 0 ||
-                             strcmp(val, "DaemonSet") == 0 || strcmp(val, "ReplicaSet") == 0 ||
-                             strcmp(val, "ReplicationController") == 0 || strcmp(val, "Pod") == 0 ||
-                             strcmp(val, "Job") == 0 || strcmp(val, "CronJob") == 0);
-                    } else if (!got_name && under_metadata && strcmp(key, "name") == 0) {
-                        snprintf(rec->name, sizeof(rec->name), "%s", val);
-                        got_name = true;
-                    } else if (under_selector) {
-                        /* Service spec.selector matchLabels values. */
-                        k8s_add_val(rec->selector_vals, &rec->n_selector, val);
-                    } else if (under_labels) {
-                        /* Pod-template / metadata labels values. */
-                        k8s_add_val(rec->label_vals, &rec->n_label, val);
-                    }
-                }
-            }
-        }
-
-        if (!eol) {
-            break;
-        }
-        p = eol + 1;
+        k8s_scan_label_line(line, trimmed, stack, &depth, rec, &got_name);
     }
 }
 
@@ -502,6 +571,7 @@ static bool is_requirements_file(const char *base) {
  * external Package node.  Mirrors the Helm Chart.yaml DEPENDS_ON shape. */
 static int emit_dep_edge(cbm_pipeline_ctx_t *ctx, const cbm_gbuf_node_t *src, const char *rel_path,
                          const char *ecosystem, const char *name) {
+    enum { K8S_DEPENDENCY_EDGE_CREATED = 1 };
     if (!name || !name[0]) {
         return 0;
     }
@@ -515,24 +585,68 @@ static int emit_dep_edge(cbm_pipeline_ctx_t *ctx, const cbm_gbuf_node_t *src, co
         cbm_gbuf_insert_edge_props(ctx->gbuf,
                                    (cbm_edge_endpoints_t){.source = src->id, .target = dep_id},
                                    "DEPENDS_ON", NULL, 0);
-        return 1;
+        return K8S_DEPENDENCY_EDGE_CREATED;
     }
     return 0;
 }
 
 /* Copy the first whitespace-delimited token of `line` into `out`. */
 static void first_token(const char *line, char *out, size_t out_sz) {
+    enum { K8S_TOKEN_TERMINATOR_RESERVE = 1 };
     out[0] = '\0';
     while (*line == ' ' || *line == '\t') {
         line++;
     }
     size_t n = 0;
     while (line[n] && line[n] != ' ' && line[n] != '\t' && line[n] != '\r' && line[n] != '\n' &&
-           n + 1 < out_sz) {
+           n + K8S_TOKEN_TERMINATOR_RESERVE < out_sz) {
         out[n] = line[n];
         n++;
     }
     out[n] = '\0';
+}
+
+static const char *k8s_gomod_require_payload(const char *line) {
+    enum { K8S_GOMOD_REQUIRE_KEYWORD_LEN = 7 };
+    if (strncmp(line, "require", K8S_GOMOD_REQUIRE_KEYWORD_LEN) != 0) {
+        return NULL;
+    }
+    char delimiter = line[K8S_GOMOD_REQUIRE_KEYWORD_LEN];
+    if (delimiter != ' ' && delimiter != '\t' && delimiter != '(') {
+        return NULL;
+    }
+    const char *payload = line + K8S_GOMOD_REQUIRE_KEYWORD_LEN;
+    return k8s_trim_whitespace(payload);
+}
+
+static int k8s_emit_gomod_dependency(cbm_pipeline_ctx_t *ctx, const cbm_gbuf_node_t *src,
+                                     const char *rel_path, const char *line) {
+    char name[CBM_SZ_256];
+    first_token(line, name, sizeof(name));
+    return emit_dep_edge(ctx, src, rel_path, "gomod", name);
+}
+
+static int k8s_parse_gomod_line(cbm_pipeline_ctx_t *ctx, const cbm_gbuf_node_t *src,
+                                const char *rel_path, const char *line, bool *in_block) {
+    const char *trimmed = k8s_trim_whitespace(line);
+    if (*in_block) {
+        if (trimmed[0] == ')') {
+            *in_block = false;
+            return 0;
+        }
+        return trimmed[0] && trimmed[0] != '/'
+                   ? k8s_emit_gomod_dependency(ctx, src, rel_path, trimmed)
+                   : 0;
+    }
+    const char *payload = k8s_gomod_require_payload(trimmed);
+    if (!payload) {
+        return 0;
+    }
+    if (*payload == '(') {
+        *in_block = true;
+        return 0;
+    }
+    return *payload ? k8s_emit_gomod_dependency(ctx, src, rel_path, payload) : 0;
 }
 
 /* Parse go.mod `require` directives (single-line and block forms) and emit a
@@ -542,43 +656,10 @@ static int parse_gomod_deps(cbm_pipeline_ctx_t *ctx, const cbm_gbuf_node_t *src,
                             const char *rel_path, const char *source) {
     int edges = 0;
     bool in_block = false;
-    const char *p = source;
-    while (p && *p) {
-        const char *eol = strchr(p, '\n');
-        size_t len = eol ? (size_t)(eol - p) : strlen(p);
-        char line[CBM_SZ_512];
-        size_t cp = len < sizeof(line) - 1 ? len : sizeof(line) - 1;
-        memcpy(line, p, cp);
-        line[cp] = '\0';
-        const char *t = line;
-        while (*t == ' ' || *t == '\t') {
-            t++;
-        }
-        if (in_block) {
-            if (t[0] == ')') {
-                in_block = false;
-            } else if (t[0] && t[0] != '/') {
-                char name[CBM_SZ_256];
-                first_token(t, name, sizeof(name));
-                edges += emit_dep_edge(ctx, src, rel_path, "gomod", name);
-            }
-        } else if (strncmp(t, "require", 7) == 0 && (t[7] == ' ' || t[7] == '\t' || t[7] == '(')) {
-            const char *rest = t + 7;
-            while (*rest == ' ' || *rest == '\t') {
-                rest++;
-            }
-            if (*rest == '(') {
-                in_block = true;
-            } else if (*rest) {
-                char name[CBM_SZ_256];
-                first_token(rest, name, sizeof(name));
-                edges += emit_dep_edge(ctx, src, rel_path, "gomod", name);
-            }
-        }
-        if (!eol) {
-            break;
-        }
-        p = eol + 1;
+    const char *cursor = source;
+    char line[CBM_SZ_512];
+    while (k8s_next_line(&cursor, line, sizeof(line))) {
+        edges += k8s_parse_gomod_line(ctx, src, rel_path, line, &in_block);
     }
     return edges;
 }
@@ -594,7 +675,9 @@ static int parse_requirements_deps(cbm_pipeline_ctx_t *ctx, const cbm_gbuf_node_
         const char *eol = strchr(p, '\n');
         size_t len = eol ? (size_t)(eol - p) : strlen(p);
         char line[CBM_SZ_512];
-        size_t cp = len < sizeof(line) - 1 ? len : sizeof(line) - 1;
+        size_t cp = len < sizeof(line) - K8S_LINE_TERMINATOR_RESERVE
+                        ? len
+                        : sizeof(line) - K8S_LINE_TERMINATOR_RESERVE;
         memcpy(line, p, cp);
         line[cp] = '\0';
         const char *t = line;
@@ -607,7 +690,7 @@ static int parse_requirements_deps(cbm_pipeline_ctx_t *ctx, const cbm_gbuf_node_
             size_t n = 0;
             while (t[n] && t[n] != '=' && t[n] != '<' && t[n] != '>' && t[n] != '!' &&
                    t[n] != '~' && t[n] != '[' && t[n] != ';' && t[n] != ' ' && t[n] != '\t' &&
-                   t[n] != '\r' && n + 1 < sizeof(name)) {
+                   t[n] != '\r' && n + K8S_LINE_TERMINATOR_RESERVE < sizeof(name)) {
                 name[n] = t[n];
                 n++;
             }
@@ -617,7 +700,7 @@ static int parse_requirements_deps(cbm_pipeline_ctx_t *ctx, const cbm_gbuf_node_
         if (!eol) {
             break;
         }
-        p = eol + 1;
+        p = eol + SKIP_ONE;
     }
     return edges;
 }
@@ -641,77 +724,88 @@ static void handle_dep_manifest(cbm_pipeline_ctx_t *ctx, const char *rel_path, c
 
 /* ── Pass entry point ────────────────────────────────────────────── */
 
+static k8s_record_t *k8s_next_record(k8s_record_array_t *records) {
+    return records->count < records->cap ? &records->items[records->count] : NULL;
+}
+
+static CBMFileResult *k8s_cached_result(cbm_pipeline_ctx_t *ctx, int index) {
+    return ctx->result_cache ? ctx->result_cache[index] : NULL;
+}
+
+static void k8s_process_dependency_file(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *file,
+                                        const char *base) {
+    int source_length = 0;
+    char *source = k8s_read_file(file->path, &source_length);
+    if (!source) {
+        return;
+    }
+    const char *ecosystem = is_requirements_file(base) ? "pypi" : "gomod";
+    handle_dep_manifest(ctx, file->rel_path, source, ecosystem);
+    free(source);
+}
+
+static void k8s_process_yaml_file(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *file,
+                                  const char *base, k8s_record_array_t *records,
+                                  k8s_pass_counts_t *counts) {
+    int source_length = 0;
+    char *source = k8s_read_file(file->path, &source_length);
+    if (!source) {
+        return;
+    }
+    if (is_helm_chart_file(base)) {
+        handle_helm_chart(ctx, file->rel_path, source);
+        counts->helm++;
+    } else if (cbm_is_k8s_manifest(base, source)) {
+        k8s_record_t *record = k8s_next_record(records);
+        handle_k8s_manifest(ctx, file->path, file->rel_path, source, source_length, record);
+        if (record && cbm_node_id_valid(record->node_id)) {
+            records->count++;
+        }
+        counts->manifest++;
+    }
+    free(source);
+}
+
+static void k8s_process_file(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *file, int index,
+                             k8s_record_array_t *records, k8s_pass_counts_t *counts) {
+    const char *base = k8s_basename(file->rel_path);
+    if (is_gomod_file(base) || file->language == CBM_LANG_GOMOD || is_requirements_file(base)) {
+        k8s_process_dependency_file(ctx, file, base);
+        return;
+    }
+    if (cbm_is_kustomize_file(base)) {
+        handle_kustomize(ctx, file->path, file->rel_path, k8s_cached_result(ctx, index));
+        counts->kustomize++;
+        return;
+    }
+    if (file->language == CBM_LANG_YAML || file->language == CBM_LANG_K8S) {
+        k8s_process_yaml_file(ctx, file, base, records, counts);
+    }
+}
+
 int cbm_pipeline_pass_k8s(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, int file_count) {
     cbm_log_info("pass.start", "pass", "k8s", "files", itoa_k8s(file_count));
 
     cbm_init();
-
-    int kustomize_count = 0;
-    int manifest_count = 0;
-    int helm_count = 0;
-
-    /* Collect per-manifest selector/label records for cross-manifest matching. */
     k8s_record_array_t recs = {0};
     recs.items = calloc(K8S_MAX_RECORDS, sizeof(*recs.items));
     recs.cap = recs.items ? K8S_MAX_RECORDS : 0;
+    k8s_pass_counts_t counts = {0};
 
     for (int i = 0; i < file_count; i++) {
         if (cbm_pipeline_check_cancel(ctx)) {
             free(recs.items);
             return CBM_NOT_FOUND;
         }
-
-        const char *path = files[i].path;
-        const char *rel = files[i].rel_path;
-        CBMLanguage lang = files[i].language;
-        const char *base = k8s_basename(rel);
-
-        CBMFileResult *cached =
-            (ctx->result_cache && ctx->result_cache[i]) ? ctx->result_cache[i] : NULL;
-
-        if (is_gomod_file(base) || lang == CBM_LANG_GOMOD || is_requirements_file(base)) {
-            int dep_len = 0;
-            char *dep_src = k8s_read_file(path, &dep_len);
-            if (dep_src) {
-                handle_dep_manifest(ctx, rel, dep_src,
-                                    is_requirements_file(base) ? "pypi" : "gomod");
-                free(dep_src);
-            }
-        } else if (cbm_is_kustomize_file(base)) {
-            handle_kustomize(ctx, path, rel, cached);
-            kustomize_count++;
-        } else if (lang == CBM_LANG_YAML || lang == CBM_LANG_K8S) {
-            /* Read source once to classify (and reuse for uncached extraction). */
-            int src_len = 0;
-            char *source = k8s_read_file(path, &src_len);
-            if (source) {
-                if (is_helm_chart_file(base)) {
-                    handle_helm_chart(ctx, rel, source);
-                    helm_count++;
-                } else if (cbm_is_k8s_manifest(base, source)) {
-                    /* Always re-extract with CBM_LANG_K8S regardless of any cached
-                     * result: cached results were produced during the parallel YAML
-                     * pass and contain no "Resource" definitions.  Pass the already-
-                     * read source buffer so handle_k8s_manifest does not re-read. */
-                    (void)cached; /* cached YAML result intentionally discarded */
-                    k8s_record_t *rec = (recs.count < recs.cap) ? &recs.items[recs.count] : NULL;
-                    handle_k8s_manifest(ctx, path, rel, source, src_len, rec);
-                    if (rec && cbm_node_id_valid(rec->node_id)) {
-                        recs.count++;
-                    }
-                    manifest_count++;
-                }
-                free(source);
-            }
-        }
+        k8s_process_file(ctx, &files[i], i, &recs, &counts);
     }
 
     /* Connect Services to the workloads their selectors target (INFRA_MAPS). */
     k8s_link_selectors(ctx, &recs);
     free(recs.items);
 
-    cbm_log_info("pass.done", "pass", "k8s", "kustomize", itoa_k8s(kustomize_count), "manifests",
-                 itoa_k8s(manifest_count));
-    (void)helm_count;
+    cbm_log_info("pass.done", "pass", "k8s", "kustomize", itoa_k8s(counts.kustomize), "manifests",
+                 itoa_k8s(counts.manifest));
+    (void)counts.helm;
     return 0;
 }

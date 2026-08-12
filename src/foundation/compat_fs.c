@@ -883,15 +883,7 @@ static int cbm_open_directory_component(int parent, const char *component, int f
     return descriptor;
 }
 
-bool cbm_mkdir_p(const char *path, int mode) {
-    if (!path || path[0] == '\0') {
-        return false;
-    }
-    char *tmp = strdup(path);
-    if (!tmp) {
-        return false;
-    }
-
+static int cbm_mkdir_directory_flags(void) {
     int flags = O_RDONLY;
 #ifdef O_DIRECTORY
     flags |= O_DIRECTORY;
@@ -902,48 +894,74 @@ bool cbm_mkdir_p(const char *path, int mode) {
 #ifdef O_CLOEXEC
     flags |= O_CLOEXEC;
 #endif
+    return flags;
+}
+
+static int cbm_mkdir_open_component(int directory, const char *component, int flags, int mode) {
+    int next = cbm_open_directory_component(directory, component, flags);
+    if (next >= 0 || errno != ENOENT) {
+        return next;
+    }
+    if (mkdirat(directory, component, (mode_t)mode) != 0 && errno != EEXIST) {
+        return CBM_NOT_FOUND;
+    }
+    return cbm_open_directory_component(directory, component, flags);
+}
+
+static bool cbm_mkdir_visit_component(int *directory, const char *component, int flags, int mode) {
+    if (component[0] == '\0' || strcmp(component, ".") == 0) {
+        return true;
+    }
+    int next = cbm_mkdir_open_component(*directory, component, flags, mode);
+    if (next < 0) {
+        return false;
+    }
+    (void)close(*directory);
+    *directory = next;
+    return true;
+}
+
+static char *cbm_mkdir_skip_separators(char *cursor) {
+    while (*cursor == '/') {
+        cursor++;
+    }
+    return cursor;
+}
+
+static bool cbm_mkdir_walk_components(char *path, int *directory, int flags, int mode) {
+    char *cursor = cbm_mkdir_skip_separators(path);
+    while (*cursor) {
+        char *separator = strchr(cursor, '/');
+        if (separator) {
+            *separator = '\0';
+        }
+        bool opened = cbm_mkdir_visit_component(directory, cursor, flags, mode);
+        if (!separator || !opened) {
+            return opened;
+        }
+        *separator = '/';
+        cursor = cbm_mkdir_skip_separators(separator + SKIP_ONE);
+    }
+    return true;
+}
+
+bool cbm_mkdir_p(const char *path, int mode) {
+    if (!path || path[0] == '\0') {
+        return false;
+    }
+    char *tmp = strdup(path);
+    if (!tmp) {
+        return false;
+    }
+
+    int flags = cbm_mkdir_directory_flags();
     int directory = open(path[0] == '/' ? "/" : ".", flags);
     if (directory < 0) {
         free(tmp);
         return false;
     }
 
-    bool ok = true;
-    char *cursor = tmp;
-    while (*cursor == '/') {
-        cursor++;
-    }
-    while (ok && *cursor) {
-        char *separator = strchr(cursor, '/');
-        if (separator) {
-            *separator = '\0';
-        }
-        if (cursor[0] != '\0' && strcmp(cursor, ".") != 0) {
-            int next = cbm_open_directory_component(directory, cursor, flags);
-            if (next < 0 && errno == ENOENT) {
-                if (mkdirat(directory, cursor, (mode_t)mode) != 0 && errno != EEXIST) {
-                    ok = false;
-                } else {
-                    next = cbm_open_directory_component(directory, cursor, flags);
-                }
-            }
-            if (ok && next < 0) {
-                ok = false;
-            }
-            if (ok) {
-                (void)close(directory);
-                directory = next;
-            }
-        }
-        if (!separator) {
-            break;
-        }
-        *separator = '/';
-        cursor = separator + SKIP_ONE;
-        while (*cursor == '/') {
-            cursor++;
-        }
-    }
+    bool ok = cbm_mkdir_walk_components(tmp, &directory, flags, mode);
     (void)close(directory);
     free(tmp);
     return ok;
@@ -1269,16 +1287,19 @@ static int stream_copy_file(const char *src, const char *dst) {
         return CBM_NOT_FOUND;
     }
     char buf[CBM_SZ_64K];
-    size_t n;
     int rc = 0;
-    while ((n = fread(buf, sizeof(*buf), sizeof(buf), in)) > 0) {
-        if (fwrite(buf, sizeof(*buf), n, out) != n) {
+    for (;;) {
+        size_t count = fread(buf, sizeof(*buf), sizeof(buf), in);
+        if (count > 0 && fwrite(buf, sizeof(*buf), count, out) != count) {
             rc = CBM_NOT_FOUND;
             break;
         }
-    }
-    if (ferror(in)) {
-        rc = CBM_NOT_FOUND;
+        if (count < sizeof(buf)) {
+            if (ferror(in)) {
+                rc = CBM_NOT_FOUND;
+            }
+            break;
+        }
     }
     (void)fclose(in);
     if (fclose(out) != 0) {

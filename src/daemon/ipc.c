@@ -1568,12 +1568,58 @@ static bool private_directory_component_allowed(const char *component) {
     return component[0] && strcmp(component, "..") != 0;
 }
 
-static bool private_directory_path_is_usable(const char *directory_path) {
-    return directory_path && directory_path[0] && O_DIRECTORY != 0 && O_NOFOLLOW != 0;
+static char *private_directory_next_component(char **cursor_io) {
+    char *cursor = *cursor_io;
+    while (*cursor == '/') {
+        cursor++;
+    }
+    if (!*cursor) {
+        *cursor_io = cursor;
+        return NULL;
+    }
+    char *component = cursor;
+    while (*cursor && *cursor != '/') {
+        cursor++;
+    }
+    *cursor_io = cursor;
+    return component;
+}
+
+static bool private_directory_open_component(int *current_fd_io, const char *component,
+                                             bool *visited_io) {
+    if (strcmp(component, ".") == 0) {
+        return true;
+    }
+    int next_fd = CBM_DAEMON_IPC_STATUS_FAILURE;
+    if (!private_directory_component_allowed(component) ||
+        !private_directory_component_open(*current_fd_io, component, &next_fd)) {
+        return false;
+    }
+    (void)close(*current_fd_io);
+    *current_fd_io = next_fd;
+    *visited_io = true;
+    return true;
+}
+
+static bool private_directory_walk_components(int *current_fd_io, char *path, bool *visited_io) {
+    for (char *cursor = path; *cursor;) {
+        char *component = private_directory_next_component(&cursor);
+        if (!component) {
+            break;
+        }
+        char saved = *cursor;
+        *cursor = '\0';
+        bool valid = private_directory_open_component(current_fd_io, component, visited_io);
+        *cursor = saved;
+        if (!valid) {
+            return false;
+        }
+    }
+    return true;
 }
 
 static int private_directory_tree_open(const char *directory_path) {
-    if (!private_directory_path_is_usable(directory_path)) {
+    if (!directory_path || !directory_path[0]) {
         return CBM_DAEMON_IPC_STATUS_FAILURE;
     }
     char *path = private_log_directory_path_copy(directory_path);
@@ -1584,31 +1630,7 @@ static int private_directory_tree_open(const char *directory_path) {
         open(path[0] == '/' ? "/" : ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     bool valid = current_fd >= 0 && fd_set_cloexec(current_fd);
     bool visited = false;
-    for (char *cursor = path; valid && *cursor;) {
-        while (*cursor == '/') {
-            cursor++;
-        }
-        if (!*cursor) {
-            break;
-        }
-        char *component = cursor;
-        while (*cursor && *cursor != '/') {
-            cursor++;
-        }
-        char saved = *cursor;
-        *cursor = '\0';
-        if (strcmp(component, ".") != 0) {
-            int next_fd = CBM_DAEMON_IPC_STATUS_FAILURE;
-            valid = private_directory_component_allowed(component) &&
-                    private_directory_component_open(current_fd, component, &next_fd);
-            if (valid) {
-                (void)close(current_fd);
-                current_fd = next_fd;
-                visited = true;
-            }
-        }
-        *cursor = saved;
-    }
+    valid = valid && private_directory_walk_components(&current_fd, path, &visited);
     free(path);
     if (valid && !visited) {
         ipc_validation_detail_set("%s: no path components resolved", directory_path);
@@ -2204,7 +2226,7 @@ static int posix_socket_record_publication_recover(
     int recovered_state = posix_socket_record_publication_recovery_read(
         endpoint, record_name, temp_name, magic, record_state, temp_state, &record_status,
         &temp_status, &recovered, &recovered_status);
-    if (recovered_state != POSIX_PATH_STATUS_PRESENT) {
+    if (temp_state == POSIX_PATH_STATUS_ABSENT || recovered_state != POSIX_PATH_STATUS_PRESENT) {
         return recovered_state;
     }
 

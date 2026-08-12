@@ -28,7 +28,13 @@
 #include "store/store.h"
 #include "yyjson/yyjson.h"
 
-enum { SURFACE_CODEC_VERSION = 1 };
+enum {
+    SURFACE_CODEC_VERSION = 1,
+    SURFACE_STATUS_ERROR = -1,
+    SURFACE_NEXT_DEF_START = 1,
+    SURFACE_TERMINATOR_SLOTS = 1,
+    SURFACE_NULL_TERMINATED_ARRAY = -1,
+};
 
 /* Labels the incremental name registry serves that pxc_map_label does NOT
  * carry into the CBMLSPDef set. Their (name, qn, label) triple must still
@@ -101,7 +107,7 @@ static char *surface_file_to_json(const CBMFileResult *result, const CBMLSPDef *
         add_str_or_null(doc, o, "tq", d->trait_qn);
         yyjson_mut_obj_add_bool(doc, o, "ir", d->is_rust_impl_relation);
         yyjson_mut_obj_add_bool(doc, o, "ab", d->is_abstract);
-        add_str_array_or_null(doc, o, "dec", d->decorators, -1);
+        add_str_array_or_null(doc, o, "dec", d->decorators, SURFACE_NULL_TERMINATED_ARRAY);
         yyjson_mut_arr_add_val(lsp, o);
     }
     yyjson_mut_obj_add_val(doc, root, "lsp", lsp);
@@ -138,7 +144,7 @@ int cbm_lsp_surface_build_rows(const char *project, CBMFileResult **cache,
     }
     cbm_lsp_surface_row_t *rows = calloc((size_t)file_count, sizeof(*rows));
     if (!rows) {
-        return -1;
+        return SURFACE_STATUS_ERROR;
     }
     int n = 0;
     for (int i = 0; i < file_count; i++) {
@@ -150,14 +156,14 @@ int cbm_lsp_surface_build_rows(const char *project, CBMFileResult **cache,
             continue;
         }
         int start = def_starts ? def_starts[i] : 0;
-        int end = def_starts ? def_starts[i + 1] : 0;
+        int end = def_starts ? def_starts[i + SURFACE_NEXT_DEF_START] : 0;
         char *json =
             surface_file_to_json(cache[i], all_defs ? all_defs + start : NULL, end - start);
         if (!json) {
             cbm_store_free_lsp_surfaces(rows, n);
-            return -1;
+            return SURFACE_STATUS_ERROR;
         }
-        char sha[CBM_SHA256_HEX_LEN + 1];
+        char sha[CBM_SHA256_HEX_LEN + SURFACE_TERMINATOR_SLOTS];
         cbm_sha256_hex(json, strlen(json), sha);
         cbm_lsp_surface_row_t *r = &rows[n];
         r->project = strdup(project);
@@ -170,7 +176,7 @@ int cbm_lsp_surface_build_rows(const char *project, CBMFileResult **cache,
         if (!r->project || !r->rel_path || !r->surface_sha || !r->config_ctx) {
             n++;
             cbm_store_free_lsp_surfaces(rows, n);
-            return -1;
+            return SURFACE_STATUS_ERROR;
         }
         n++;
     }
@@ -194,8 +200,8 @@ static const char **arena_str_array(CBMArena *arena, yyjson_val *arr, bool null_
         return NULL;
     }
     int count = (int)yyjson_arr_size(arr);
-    const char **items =
-        cbm_arena_alloc(arena, (size_t)(count + (null_terminated ? 1 : 0)) * sizeof(char *));
+    const char **items = cbm_arena_alloc(
+        arena, (size_t)(count + (null_terminated ? SURFACE_TERMINATOR_SLOTS : 0)) * sizeof(char *));
     if (!items) {
         return NULL;
     }
@@ -213,18 +219,18 @@ static const char **arena_str_array(CBMArena *arena, yyjson_val *arr, bool null_
 int cbm_lsp_surface_defs_from_json(CBMArena *arena, const char *defs_json, CBMLSPDef **out_defs) {
     *out_defs = NULL;
     if (!defs_json) {
-        return -1;
+        return SURFACE_STATUS_ERROR;
     }
     yyjson_doc *doc = yyjson_read(defs_json, strlen(defs_json), 0);
     if (!doc) {
-        return -1;
+        return SURFACE_STATUS_ERROR;
     }
     yyjson_val *root = yyjson_doc_get_root(doc);
     yyjson_val *ver = root ? yyjson_obj_get(root, "v") : NULL;
     yyjson_val *lsp = root ? yyjson_obj_get(root, "lsp") : NULL;
     if (!ver || yyjson_get_int(ver) != SURFACE_CODEC_VERSION || !lsp || !yyjson_is_arr(lsp)) {
         yyjson_doc_free(doc);
-        return -1;
+        return SURFACE_STATUS_ERROR;
     }
     int count = (int)yyjson_arr_size(lsp);
     if (count == 0) {
@@ -234,7 +240,7 @@ int cbm_lsp_surface_defs_from_json(CBMArena *arena, const char *defs_json, CBMLS
     CBMLSPDef *defs = cbm_arena_alloc(arena, (size_t)count * sizeof(CBMLSPDef));
     if (!defs) {
         yyjson_doc_free(doc);
-        return -1;
+        return SURFACE_STATUS_ERROR;
     }
     memset(defs, 0, (size_t)count * sizeof(CBMLSPDef));
     for (int i = 0; i < count; i++) {
@@ -263,7 +269,7 @@ int cbm_lsp_surface_defs_from_json(CBMArena *arena, const char *defs_json, CBMLS
             /* A def the writer could not have produced: qn/sn/label are
              * unconditionally present in build_lsp_def output. Corrupt row. */
             yyjson_doc_free(doc);
-            return -1;
+            return SURFACE_STATUS_ERROR;
         }
     }
     yyjson_doc_free(doc);

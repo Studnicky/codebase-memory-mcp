@@ -37,6 +37,28 @@
 #define CBM_WIN_CRASH_CODE_MIN 0xC0000000u
 #define CBM_WIN_CONTROL_C_EXIT 0xC000013Au
 
+enum {
+    CBM_SUBPROCESS_TAIL_LINE_BYTES = 1024,
+    CBM_SUBPROCESS_STRING_TERMINATOR_BYTES = 1,
+    CBM_SUBPROCESS_QUOTE_ESCAPE_MULTIPLIER = 2,
+    CBM_SUBPROCESS_WINDOWS_DRIVE_LETTER_INDEX = 0,
+    CBM_SUBPROCESS_WINDOWS_DRIVE_SEPARATOR_INDEX = 1,
+    CBM_SUBPROCESS_WINDOWS_PATH_ROOT_INDEX = 2,
+    CBM_SUBPROCESS_WINDOWS_ABSOLUTE_PATH_MIN_BYTES = 3,
+    CBM_SUBPROCESS_SINGLE_ARGUMENT = 1,
+    CBM_SUBPROCESS_ARGV_TERMINATOR_SLOTS = 1,
+    CBM_SUBPROCESS_INITIAL_SIGNAL = 1,
+    CBM_SUBPROCESS_EXEC_FAILURE_EXIT_CODE = 127,
+    CBM_SUBPROCESS_LOG_FILE_MODE = 0600,
+    CBM_SUBPROCESS_MAX_OPEN_FDS = 1048576L,
+    CBM_SUBPROCESS_DEFAULT_MAX_OPEN_FDS = 65536L,
+    CBM_SUBPROCESS_REAP_ATTEMPTS = 4,
+    CBM_SUBPROCESS_FAILURE = -1,
+    CBM_SUBPROCESS_UNKNOWN_EXIT_CODE = -1,
+};
+
+#define CBM_SUBPROCESS_FIRST_NON_STANDARD_FD (STDERR_FILENO + CBM_SUBPROCESS_SINGLE_ARGUMENT)
+
 #ifndef _WIN32
 static bool cbm_is_fault_signal(int sig) {
     switch (sig) {
@@ -109,6 +131,50 @@ typedef struct {
     bool progressed;
 } cbm_tail_result_t;
 
+static cbm_tail_result_t cbm_tail_stream(FILE *stream, long *tail_pos, cbm_proc_log_cb callback,
+                                         void *userdata, bool final) {
+    cbm_tail_result_t result = {.status = CBM_TAIL_ERROR, .progressed = false};
+    if (fseek(stream, *tail_pos, SEEK_SET) != 0) {
+        return result;
+    }
+    char line[CBM_SUBPROCESS_TAIL_LINE_BYTES];
+    size_t delivered_lines = 0;
+    size_t delivered_bytes = 0;
+    enum { CBM_TAIL_MAX_LINES_PER_POLL = 64, CBM_TAIL_MAX_BYTES_PER_POLL = 64 * 1024 };
+    while (delivered_lines < CBM_TAIL_MAX_LINES_PER_POLL &&
+           delivered_bytes < CBM_TAIL_MAX_BYTES_PER_POLL) {
+        long before = ftell(stream);
+        if (!fgets(line, sizeof(line), stream)) {
+            result.status = ferror(stream) ? CBM_TAIL_ERROR : CBM_TAIL_CAUGHT_UP;
+            break;
+        }
+        size_t length = strlen(line);
+        delivered_bytes += length;
+        bool complete = length > 0 && line[length - CBM_SUBPROCESS_STRING_TERMINATOR_BYTES] == '\n';
+        if (complete) {
+            line[length - CBM_SUBPROCESS_STRING_TERMINATOR_BYTES] = '\0';
+        } else if (length < sizeof(line) - CBM_SUBPROCESS_STRING_TERMINATOR_BYTES && !final) {
+            *tail_pos = before;
+            result.status = CBM_TAIL_MORE;
+            break;
+        }
+        *tail_pos = ftell(stream);
+        result.progressed = true;
+        delivered_lines++;
+        if (line[0] && callback) {
+            callback(line, userdata);
+        }
+        if (!complete && length < sizeof(line) - CBM_SUBPROCESS_STRING_TERMINATOR_BYTES) {
+            result.status = CBM_TAIL_CAUGHT_UP;
+            break;
+        }
+    }
+    if (result.status == CBM_TAIL_ERROR && !ferror(stream)) {
+        result.status = CBM_TAIL_MORE;
+    }
+    return result;
+}
+
 /* Tail one bounded batch from the child log. While the owned tree can still
  * write, a partial final line remains buffered. Once the tree is quiescent,
  * final=true delivers that last fragment exactly once. */
@@ -145,63 +211,7 @@ static cbm_tail_result_t cbm_tail_log(const char *log_file, long *tail_pos, cbm_
 #endif
         return result;
     }
-    if (fseek(lf, *tail_pos, SEEK_SET) == 0) {
-        char line[1024];
-        size_t delivered_lines = 0;
-        size_t delivered_bytes = 0;
-        enum {
-            CBM_TAIL_MAX_LINES_PER_POLL = 64,
-            CBM_TAIL_MAX_BYTES_PER_POLL = 64 * 1024,
-        };
-        while (delivered_lines < CBM_TAIL_MAX_LINES_PER_POLL &&
-               delivered_bytes < CBM_TAIL_MAX_BYTES_PER_POLL) {
-            long before = ftell(lf);
-            if (!fgets(line, sizeof(line), lf)) {
-                result.status = ferror(lf) ? CBM_TAIL_ERROR : CBM_TAIL_CAUGHT_UP;
-                break;
-            }
-            size_t l = strlen(line);
-            delivered_bytes += l;
-            bool complete = (l > 0 && line[l - 1] == '\n');
-            if (complete) {
-                line[l - 1] = '\0';
-                *tail_pos = ftell(lf);
-                result.progressed = true;
-                delivered_lines++;
-                if (line[0] && cb) {
-                    cb(line, ud);
-                }
-            } else if (l == sizeof(line) - 1) {
-                /* Oversized line filled the buffer without a newline — consume it
-                 * anyway (counts as progress) so we never stall on one long line. */
-                *tail_pos = ftell(lf);
-                result.progressed = true;
-                delivered_lines++;
-                if (cb) {
-                    cb(line, ud);
-                }
-            } else if (!final) {
-                /* Genuine partial final line — keep it buffered for next poll. */
-                *tail_pos = before;
-                result.status = CBM_TAIL_MORE;
-                break;
-            } else {
-                /* No writer remains: deliver the final unterminated fragment. */
-                *tail_pos = ftell(lf);
-                result.progressed = true;
-                if (line[0] && cb) {
-                    cb(line, ud);
-                }
-                result.status = CBM_TAIL_CAUGHT_UP;
-                break;
-            }
-        }
-        if (result.status == CBM_TAIL_ERROR && !ferror(lf)) {
-            /* Reaching either work cap is conservatively MORE. An exact batch
-             * boundary needs one empty follow-up poll to prove EOF. */
-            result.status = CBM_TAIL_MORE;
-        }
-    }
+    result = cbm_tail_stream(lf, tail_pos, cb, ud, final);
     if (fclose(lf) != 0) {
         result.status = CBM_TAIL_ERROR;
     }
@@ -214,12 +224,12 @@ static cbm_tail_result_t cbm_tail_log(const char *log_file, long *tail_pos, cbm_
  * On overflow: sets *ovf, stops writing, and returns pos UNCHANGED — callers detect
  * the overflow via the *ovf flag (not via the return value). */
 static size_t cbm_cmdline_put(char *buf, size_t cap, size_t pos, char c, bool *ovf) {
-    if (pos + 1 >= cap) {
+    if (pos + CBM_SUBPROCESS_STRING_TERMINATOR_BYTES >= cap) {
         *ovf = true;
         return pos;
     }
     buf[pos] = c;
-    return pos + 1;
+    return pos + CBM_SUBPROCESS_STRING_TERMINATOR_BYTES;
 }
 
 /* Append one argv element to the command line using the Microsoft C runtime
@@ -246,14 +256,16 @@ static size_t cbm_cmdline_append_arg(char *buf, size_t cap, size_t pos, const ch
         if (*p == '\0') {
             /* Trailing backslashes precede the closing quote: double them so the
              * quote stays a delimiter, not an escaped literal. */
-            for (size_t k = 0; k < nbs * 2; k++) {
+            for (size_t k = 0; k < nbs * CBM_SUBPROCESS_QUOTE_ESCAPE_MULTIPLIER; k++) {
                 pos = cbm_cmdline_put(buf, cap, pos, '\\', ovf);
             }
             break;
         }
         if (*p == '"') {
             /* N backslashes then a quote -> 2N+1 backslashes then an escaped quote. */
-            for (size_t k = 0; k < (nbs * 2) + 1; k++) {
+            for (size_t k = 0; k < (nbs * CBM_SUBPROCESS_QUOTE_ESCAPE_MULTIPLIER) +
+                                       CBM_SUBPROCESS_STRING_TERMINATOR_BYTES;
+                 k++) {
                 pos = cbm_cmdline_put(buf, cap, pos, '\\', ovf);
             }
             pos = cbm_cmdline_put(buf, cap, pos, '"', ovf);
@@ -322,13 +334,21 @@ static bool cbm_win_cmd_path_is_absolute(const char *path) {
         return false;
     }
     size_t path_len = strlen(path);
-    if (path_len < 3) {
+    if (path_len < CBM_SUBPROCESS_WINDOWS_ABSOLUTE_PATH_MIN_BYTES) {
         return false;
     }
-    bool drive_absolute =
-        ((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) &&
-        path[1] == ':' && (path[2] == '\\' || path[2] == '/');
-    bool unc_absolute = (path[0] == '\\' || path[0] == '/') && path[1] == path[0] && path[2];
+    bool drive_absolute = ((path[CBM_SUBPROCESS_WINDOWS_DRIVE_LETTER_INDEX] >= 'A' &&
+                            path[CBM_SUBPROCESS_WINDOWS_DRIVE_LETTER_INDEX] <= 'Z') ||
+                           (path[CBM_SUBPROCESS_WINDOWS_DRIVE_LETTER_INDEX] >= 'a' &&
+                            path[CBM_SUBPROCESS_WINDOWS_DRIVE_LETTER_INDEX] <= 'z')) &&
+                          path[CBM_SUBPROCESS_WINDOWS_DRIVE_SEPARATOR_INDEX] == ':' &&
+                          (path[CBM_SUBPROCESS_WINDOWS_PATH_ROOT_INDEX] == '\\' ||
+                           path[CBM_SUBPROCESS_WINDOWS_PATH_ROOT_INDEX] == '/');
+    bool unc_absolute = (path[CBM_SUBPROCESS_WINDOWS_DRIVE_LETTER_INDEX] == '\\' ||
+                         path[CBM_SUBPROCESS_WINDOWS_DRIVE_LETTER_INDEX] == '/') &&
+                        path[CBM_SUBPROCESS_WINDOWS_DRIVE_SEPARATOR_INDEX] ==
+                            path[CBM_SUBPROCESS_WINDOWS_DRIVE_LETTER_INDEX] &&
+                        path[CBM_SUBPROCESS_WINDOWS_PATH_ROOT_INDEX];
     if (!drive_absolute && !unc_absolute) {
         return false;
     }
@@ -339,7 +359,7 @@ static bool cbm_win_cmd_path_is_absolute(const char *path) {
             return false;
         }
         if (*cursor == '\\' || *cursor == '/') {
-            basename = cursor + 1;
+            basename = cursor + CBM_SUBPROCESS_STRING_TERMINATOR_BYTES;
         }
     }
     return cbm_ascii_case_equal(basename, "cmd.exe");
@@ -358,8 +378,8 @@ bool cbm_build_win_cmd_payload(char *buf, size_t cap, const char *cmd_executable
     static const char prefix[] = "\" /D /S /V:OFF /C ";
     size_t executable_len = strlen(cmd_executable);
     size_t payload_len = strlen(payload);
-    size_t remaining = cap - 1; /* reserve the final NUL */
-    if (remaining < 1) {
+    size_t remaining = cap - CBM_SUBPROCESS_STRING_TERMINATOR_BYTES; /* reserve the final NUL */
+    if (remaining < CBM_SUBPROCESS_STRING_TERMINATOR_BYTES) {
         return false;
     }
     remaining--; /* opening quote */
@@ -367,10 +387,10 @@ bool cbm_build_win_cmd_payload(char *buf, size_t cap, const char *cmd_executable
         return false;
     }
     remaining -= executable_len;
-    if (sizeof(prefix) - 1 > remaining) {
+    if (sizeof(prefix) - CBM_SUBPROCESS_STRING_TERMINATOR_BYTES > remaining) {
         return false;
     }
-    remaining -= sizeof(prefix) - 1;
+    remaining -= sizeof(prefix) - CBM_SUBPROCESS_STRING_TERMINATOR_BYTES;
     if (payload_len > remaining) {
         return false;
     }
@@ -380,7 +400,7 @@ bool cbm_build_win_cmd_payload(char *buf, size_t cap, const char *cmd_executable
     memcpy(buf + pos, cmd_executable, executable_len);
     pos += executable_len;
     memcpy(buf + pos, prefix, sizeof(prefix) - 1);
-    pos += sizeof(prefix) - 1;
+    pos += sizeof(prefix) - CBM_SUBPROCESS_STRING_TERMINATOR_BYTES;
     memcpy(buf + pos, payload, payload_len);
     pos += payload_len;
     buf[pos] = '\0';
@@ -435,7 +455,7 @@ struct cbm_subprocess {
 
 static void cbm_subprocess_result_init(cbm_proc_result_t *result) {
     result->outcome = CBM_PROC_SPAWN_FAILED;
-    result->exit_code = -1;
+    result->exit_code = CBM_SUBPROCESS_UNKNOWN_EXIT_CODE;
     result->term_signal = 0;
     result->cancellation_requested = false;
     result->forced = false;
@@ -474,7 +494,7 @@ static cbm_subprocess_t *cbm_subprocess_copy_opts(const cbm_proc_opts_t *opts) {
     }
 #endif
 
-    size_t argc = 1;
+    size_t argc = CBM_SUBPROCESS_SINGLE_ARGUMENT;
     if (opts->argv) {
         argc = 0;
         while (argc < CBM_SUBPROCESS_ARGV_LIMIT && opts->argv[argc]) {
@@ -485,14 +505,16 @@ static cbm_subprocess_t *cbm_subprocess_copy_opts(const cbm_proc_opts_t *opts) {
         }
     }
 
-    cbm_subprocess_t *process = (cbm_subprocess_t *)calloc(1, sizeof(*process));
+    cbm_subprocess_t *process =
+        (cbm_subprocess_t *)calloc(CBM_SUBPROCESS_SINGLE_ARGUMENT, sizeof(*process));
     if (!process) {
         return NULL;
     }
     process->bin = cbm_strdup(opts->bin);
     process->windows_cmd_payload =
         opts->windows_cmd_payload ? cbm_strdup(opts->windows_cmd_payload) : NULL;
-    process->argv = (char **)calloc(argc + 1, sizeof(*process->argv));
+    process->argv =
+        (char **)calloc(argc + CBM_SUBPROCESS_ARGV_TERMINATOR_SLOTS, sizeof(*process->argv));
     process->argc = argc;
     if (!process->bin || !process->argv ||
         (opts->windows_cmd_payload && !process->windows_cmd_payload)) {
@@ -889,7 +911,7 @@ static void cbm_posix_reset_child_signals(void) {
     struct sigaction action = {0};
     action.sa_handler = SIG_DFL;
     (void)sigemptyset(&action.sa_mask);
-    for (int sig = 1; sig < NSIG; sig++) {
+    for (int sig = CBM_SUBPROCESS_INITIAL_SIGNAL; sig < NSIG; sig++) {
         if (sig != SIGKILL && sig != SIGSTOP) {
             (void)sigaction(sig, &action, NULL);
         }
@@ -904,7 +926,7 @@ static void cbm_posix_reset_child_signals(void) {
  * descendant. */
 static void cbm_posix_child_exec(cbm_subprocess_t *process, int input, int output, long max_fd) {
     if (setpgid(0, 0) < 0) {
-        _exit(127);
+        _exit(CBM_SUBPROCESS_EXEC_FAILURE_EXIT_CODE);
     }
     cbm_posix_reset_child_signals();
 
@@ -912,7 +934,7 @@ static void cbm_posix_child_exec(cbm_subprocess_t *process, int input, int outpu
      * async-signal-safe calls are used between fork and exec. */
     if (input < 0 || output < 0 || dup2(input, STDIN_FILENO) < 0 ||
         dup2(output, STDOUT_FILENO) < 0 || dup2(output, STDERR_FILENO) < 0) {
-        _exit(127);
+        _exit(CBM_SUBPROCESS_EXEC_FAILURE_EXIT_CODE);
     }
     if (input > STDERR_FILENO) {
         (void)close(input);
@@ -920,14 +942,14 @@ static void cbm_posix_child_exec(cbm_subprocess_t *process, int input, int outpu
     if (output > STDERR_FILENO) {
         (void)close(output);
     }
-    for (int fd = STDERR_FILENO + 1; fd < max_fd; fd++) {
+    for (int fd = CBM_SUBPROCESS_FIRST_NON_STANDARD_FD; fd < max_fd; fd++) {
         (void)close(fd);
     }
     /* A fixed literal tool name (for example "git" or "curl") uses the
      * caller's normal PATH without introducing a shell. An explicit path
      * still has execvp's exact-path semantics because it contains '/'. */
     execvp(process->bin, process->argv);
-    _exit(127);
+    _exit(CBM_SUBPROCESS_EXEC_FAILURE_EXIT_CODE);
 }
 
 static int cbm_posix_fd_at_least_three(int fd) {
@@ -935,15 +957,49 @@ static int cbm_posix_fd_at_least_three(int fd) {
         return fd;
     }
 #ifdef F_DUPFD_CLOEXEC
-    int duplicate = fcntl(fd, F_DUPFD_CLOEXEC, STDERR_FILENO + 1);
+    int duplicate = fcntl(fd, F_DUPFD_CLOEXEC, CBM_SUBPROCESS_FIRST_NON_STANDARD_FD);
 #else
-    int duplicate = fcntl(fd, F_DUPFD, STDERR_FILENO + 1);
+    int duplicate = fcntl(fd, F_DUPFD, CBM_SUBPROCESS_FIRST_NON_STANDARD_FD);
     if (duplicate >= 0) {
         (void)fcntl(duplicate, F_SETFD, FD_CLOEXEC);
     }
 #endif
     (void)close(fd);
     return duplicate;
+}
+
+static void cbm_posix_close_spawn_fds(int input, int output) {
+    if (input >= 0) {
+        (void)close(input);
+    }
+    if (output >= 0) {
+        (void)close(output);
+    }
+}
+
+static bool cbm_posix_output_is_secure(cbm_subprocess_t *process, int output) {
+    struct stat status;
+    if (fstat(output, &status) != 0 || (process->log_file && !S_ISREG(status.st_mode))) {
+        return false;
+    }
+    return !process->log_file || fchmod(output, CBM_SUBPROCESS_LOG_FILE_MODE) == 0;
+}
+
+static bool cbm_posix_establish_group(pid_t pid) {
+    if (setpgid(pid, pid) == 0) {
+        return true;
+    }
+    return (errno == EACCES || errno == EPERM || errno == ESRCH) && getpgid(pid) == pid;
+}
+
+static void cbm_posix_reap_killed_child(pid_t pid) {
+    (void)kill(pid, SIGKILL);
+    int status = 0;
+    for (int attempt = 0; attempt < CBM_SUBPROCESS_REAP_ATTEMPTS; attempt++) {
+        if (waitpid(pid, &status, 0) >= 0 || errno != EINTR) {
+            break;
+        }
+    }
 }
 
 static int cbm_subprocess_spawn_posix(cbm_subprocess_t *process) {
@@ -960,62 +1016,38 @@ static int cbm_subprocess_spawn_posix(cbm_subprocess_t *process) {
 #ifdef O_NOFOLLOW
     output_flags |= O_NOFOLLOW;
 #endif
-    int output = cbm_posix_fd_at_least_three(open(target, output_flags, 0600));
+    int output =
+        cbm_posix_fd_at_least_three(open(target, output_flags, CBM_SUBPROCESS_LOG_FILE_MODE));
     if (input < 0 || output < 0) {
-        if (input >= 0) {
-            (void)close(input);
-        }
-        if (output >= 0) {
-            (void)close(output);
-        }
-        return -1;
+        cbm_posix_close_spawn_fds(input, output);
+        return CBM_SUBPROCESS_FAILURE;
     }
-    struct stat output_status;
-    if (fstat(output, &output_status) != 0 ||
-        (process->log_file && !S_ISREG(output_status.st_mode))) {
-        (void)close(input);
-        (void)close(output);
-        return -1;
-    }
-    if (process->log_file && fchmod(output, 0600) != 0) {
-        (void)close(input);
-        (void)close(output);
-        return -1;
+    if (!cbm_posix_output_is_secure(process, output)) {
+        cbm_posix_close_spawn_fds(input, output);
+        return CBM_SUBPROCESS_FAILURE;
     }
 
     long max_fd = sysconf(_SC_OPEN_MAX);
-    if (max_fd < 0 || max_fd > 1048576L) {
-        max_fd = 65536L;
+    if (max_fd < 0 || max_fd > CBM_SUBPROCESS_MAX_OPEN_FDS) {
+        max_fd = CBM_SUBPROCESS_DEFAULT_MAX_OPEN_FDS;
     }
 
     pid_t pid = fork();
     if (pid < 0) {
-        (void)close(input);
-        (void)close(output);
-        return -1;
+        cbm_posix_close_spawn_fds(input, output);
+        return CBM_SUBPROCESS_FAILURE;
     }
     if (pid == 0) {
         cbm_posix_child_exec(process, input, output, max_fd);
     }
-    (void)close(input);
-    (void)close(output);
+    cbm_posix_close_spawn_fds(input, output);
 
     /* Parent and child both establish the group, removing scheduler-order races.
      * If the child won and already execed, EACCES is accepted only after proving
      * that its process group is the expected isolated one. */
-    bool contained = setpgid(pid, pid) == 0;
-    if (!contained && (errno == EACCES || errno == EPERM || errno == ESRCH)) {
-        contained = getpgid(pid) == pid;
-    }
-    if (!contained) {
-        (void)kill(pid, SIGKILL);
-        int status = 0;
-        for (int attempt = 0; attempt < 4; attempt++) {
-            if (waitpid(pid, &status, 0) >= 0 || errno != EINTR) {
-                break;
-            }
-        }
-        return -1;
+    if (!cbm_posix_establish_group(pid)) {
+        cbm_posix_reap_killed_child(pid);
+        return CBM_SUBPROCESS_FAILURE;
     }
 
     process->pid = pid;
@@ -1064,12 +1096,13 @@ static void cbm_posix_capture_root(cbm_subprocess_t *process, int status) {
         process->result.outcome =
             cbm_proc_classify(true, process->result.exit_code, 0, process->timed_out);
     } else if (WIFSIGNALED(status)) {
-        process->result.exit_code = -1;
+        process->result.exit_code = CBM_SUBPROCESS_UNKNOWN_EXIT_CODE;
         process->result.term_signal = WTERMSIG(status);
         process->result.outcome =
-            cbm_proc_classify(false, -1, process->result.term_signal, process->timed_out);
+            cbm_proc_classify(false, CBM_SUBPROCESS_UNKNOWN_EXIT_CODE, process->result.term_signal,
+                              process->timed_out);
     } else {
-        process->result.exit_code = -1;
+        process->result.exit_code = CBM_SUBPROCESS_UNKNOWN_EXIT_CODE;
         process->result.term_signal = 0;
         process->result.outcome = process->timed_out ? CBM_PROC_HANG : CBM_PROC_KILLED;
     }
@@ -1090,7 +1123,7 @@ static cbm_proc_poll_t cbm_subprocess_poll_posix(cbm_subprocess_t *process,
              * tree, and never spin forever on the failed wait operation. */
             process->root_reaped = true;
             process->result.outcome = process->timed_out ? CBM_PROC_HANG : CBM_PROC_KILLED;
-            process->result.exit_code = -1;
+            process->result.exit_code = CBM_SUBPROCESS_UNKNOWN_EXIT_CODE;
             process->result.term_signal = 0;
             cbm_posix_begin_termination(process, now);
         }
@@ -1098,15 +1131,14 @@ static cbm_proc_poll_t cbm_subprocess_poll_posix(cbm_subprocess_t *process,
 
     bool group_active = cbm_posix_group_active(process);
     if (!process->termination_started) {
-        if (cbm_subprocess_cancellation_requested(process)) {
-            cbm_posix_begin_termination(process, now);
-        } else if (!process->root_reaped && process->quiet_timeout_ms > 0 &&
-                   now - process->last_activity_ms >= (uint64_t)process->quiet_timeout_ms) {
+        bool cancellation = cbm_subprocess_cancellation_requested(process);
+        bool timed_out = !process->root_reaped && process->quiet_timeout_ms > 0 &&
+                         now - process->last_activity_ms >= (uint64_t)process->quiet_timeout_ms;
+        bool descendants_active = process->root_reaped && group_active;
+        if (timed_out) {
             process->timed_out = true;
-            cbm_posix_begin_termination(process, now);
-        } else if (process->root_reaped && group_active) {
-            /* A root that daemonizes children is not terminal. Preserve its exit
-             * classification, but drain the descendants through the same path. */
+        }
+        if (cancellation || timed_out || descendants_active) {
             cbm_posix_begin_termination(process, now);
         }
     }
@@ -1129,12 +1161,12 @@ static cbm_proc_poll_t cbm_subprocess_poll_posix(cbm_subprocess_t *process,
 
 int cbm_subprocess_spawn(const cbm_proc_opts_t *opts, cbm_subprocess_t **out) {
     if (!out) {
-        return -1;
+        return CBM_SUBPROCESS_FAILURE;
     }
     *out = NULL;
     cbm_subprocess_t *process = cbm_subprocess_copy_opts(opts);
     if (!process) {
-        return -1;
+        return CBM_SUBPROCESS_FAILURE;
     }
 #ifdef _WIN32
     int spawn_rc = cbm_subprocess_spawn_win(process);
@@ -1143,7 +1175,7 @@ int cbm_subprocess_spawn(const cbm_proc_opts_t *opts, cbm_subprocess_t **out) {
 #endif
     if (spawn_rc != 0) {
         cbm_subprocess_free_config(process);
-        return -1;
+        return CBM_SUBPROCESS_FAILURE;
     }
     process->last_activity_ms = cbm_now_ms();
     *out = process;
@@ -1223,14 +1255,14 @@ int cbm_subprocess_run(const cbm_proc_opts_t *opts, cbm_proc_result_t *out) {
 
     cbm_subprocess_t *process = NULL;
     if (cbm_subprocess_spawn(opts, &process) != 0) {
-        return -1;
+        return CBM_SUBPROCESS_FAILURE;
     }
     for (;;) {
         cbm_proc_poll_t state = cbm_subprocess_poll(process, out);
         if (state == CBM_PROC_POLL_TERMINAL) {
             bool supervised = out->tree_quiesced && !out->supervision_failed;
             cbm_subprocess_destroy(process);
-            return supervised ? 0 : -1;
+            return supervised ? 0 : CBM_SUBPROCESS_FAILURE;
         }
         /* A valid owned handle has no ERROR state; invalid-argument errors are
          * rejected before this compatibility loop is entered. */

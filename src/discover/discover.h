@@ -84,6 +84,9 @@ void cbm_gitignore_free(cbm_gitignore_t *gi);
  * partial merge — so a failed merge degrades to "as if src was absent". */
 bool cbm_gitignore_merge(cbm_gitignore_t *dst, const cbm_gitignore_t *src);
 
+/* Test seam for exercising atomic rollback when a pattern copy fails. */
+void cbm_gitignore_test_set_merge_dup_hook(char *(*hook)(const char *));
+
 /* ── Directory skip / suffix filters ─────────────────────────────── */
 
 /* Index mode controls filtering aggressiveness.

@@ -1187,6 +1187,27 @@ static void phase2_tokenize(const cbm_gbuf_node_t **node_ptrs, cbm_gbuf_t *gbuf,
     cbm_parallel_for(worker_count, tokenize_worker, &tc, opts);
 }
 
+static void phase2_allocate_and_tokenize(const cbm_gbuf_node_t **node_ptrs, cbm_gbuf_t *gbuf,
+                                         int func_count, int worker_count, char ***out_tokens,
+                                         int **out_counts, CBMHashTable ***out_pools) {
+    char **all_tokens = malloc((size_t)func_count * sizeof(char *) * CBM_SEM_MAX_TOKENS);
+    int *token_counts = calloc((size_t)func_count, sizeof(int));
+    CBMHashTable **token_pools = calloc((size_t)worker_count, sizeof(CBMHashTable *));
+    if (token_pools) {
+        for (int worker = 0; worker < worker_count; worker++) {
+            token_pools[worker] = cbm_ht_create(CBM_SZ_1K);
+        }
+    }
+
+    CBM_PROF_START(t_phase2);
+    phase2_tokenize(node_ptrs, gbuf, all_tokens, token_counts, func_count, worker_count,
+                    token_pools);
+    CBM_PROF_END_N("semantic_edges", "2_tokenize_parallel", t_phase2, func_count);
+    *out_tokens = all_tokens;
+    *out_counts = token_counts;
+    *out_pools = token_pools;
+}
+
 /* Phase 4a: build per-function TF-IDF + RI vectors in parallel, producing
  * int8-quantized qvecs for subsequent storage.  Phase 4b runs sequentially
  * to store them in gbuf because gbuf is not thread-safe. */
@@ -1394,21 +1415,12 @@ int cbm_pipeline_pass_semantic_edges(cbm_pipeline_ctx_t *ctx) {
         return 0;
     }
 
-    /* Phase 2: Tokenize all nodes (PARALLEL) */
     int worker_count = cbm_default_worker_count(false);
-    char **all_tokens = malloc((size_t)func_count * sizeof(char *) * CBM_SEM_MAX_TOKENS);
-    int *token_counts = calloc((size_t)func_count, sizeof(int));
-
-    CBM_PROF_START(t_phase2);
-    CBMHashTable **token_pools = calloc((size_t)worker_count, sizeof(CBMHashTable *));
-    if (token_pools) {
-        for (int w = 0; w < worker_count; w++) {
-            token_pools[w] = cbm_ht_create(CBM_SZ_1K);
-        }
-    }
-    phase2_tokenize(node_ptrs, gbuf, all_tokens, token_counts, func_count, worker_count,
-                    token_pools);
-    CBM_PROF_END_N("semantic_edges", "2_tokenize_parallel", t_phase2, func_count);
+    char **all_tokens = NULL;
+    int *token_counts = NULL;
+    CBMHashTable **token_pools = NULL;
+    phase2_allocate_and_tokenize(node_ptrs, gbuf, func_count, worker_count, &all_tokens,
+                                 &token_counts, &token_pools);
     free(node_ptrs);
 
     /* Phase 3: Build corpus (batch add), finalize, export enriched token vectors. */

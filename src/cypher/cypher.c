@@ -34,6 +34,23 @@ enum {
     CYP_FOUND_NONE = -1,
     /* search miss sentinel */ /* mask for ebuf ring buffer (8 entries) */
 };
+
+enum {
+    CYPHER_EXISTS_DIRECTION_OUTBOUND = 0,
+    CYPHER_EXISTS_DIRECTION_INBOUND = 1,
+    CYPHER_EXISTS_DIRECTION_ANY = 2,
+    CYPHER_RETURN_LIMIT_UNBOUNDED = -1,
+    CYPHER_DEADLINE_OVERRIDE_DEFAULT = -1,
+    CYPHER_FUNCTION_ARG_VALUE = 0,
+    CYPHER_FUNCTION_ARG_OFFSET = 1,
+    CYPHER_FUNCTION_ARG_LENGTH = 2,
+    CYPHER_SUBSTRING_MIN_ARGS = 2,
+    CYPHER_SUBSTRING_WITH_LENGTH_ARGS = 3,
+    CYPHER_REPLACE_ARGS = 3,
+    CYPHER_PATTERN_TERMINAL_NODE_INDEX = 1,
+    CYPHER_SINGLE_RELATIONSHIP_COUNT = 1,
+    CYPHER_UNTYPED_RELATION_ITERATIONS = 1,
+};
 #define CYP_DBL_MAX 1e308
 
 #include <ctype.h>
@@ -512,6 +529,37 @@ static const cbm_token_t *expect(parser_t *p, cbm_token_type_t type) {
 }
 
 /* Parse inline properties: {key: "value", ...} */
+static void prop_filters_free(cbm_prop_filter_t *filters, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        safe_str_free(&filters[i].key);
+        safe_str_free(&filters[i].value);
+    }
+    free(filters);
+}
+
+static bool prop_filter_append(cbm_prop_filter_t **filters, size_t *count, size_t *cap,
+                               const cbm_token_t *key, const cbm_token_t *value) {
+    if (*count >= *cap) {
+        size_t new_cap = *cap * PAIR_LEN;
+        cbm_prop_filter_t *grown = realloc(*filters, new_cap * sizeof(**filters));
+        if (!grown) {
+            return false;
+        }
+        *filters = grown;
+        *cap = new_cap;
+    }
+    const char *new_key = heap_strdup(key->text);
+    const char *new_value = heap_strdup(value->text);
+    if (!new_key || !new_value) {
+        safe_str_free(&new_key);
+        safe_str_free(&new_value);
+        return false;
+    }
+    (*filters)[*count] = (cbm_prop_filter_t){.key = new_key, .value = new_value};
+    (*count)++;
+    return true;
+}
+
 static int parse_props(parser_t *p, cbm_prop_filter_t **out, int *count) {
     *out = NULL;
     *count = 0;
@@ -529,49 +577,23 @@ static int parse_props(parser_t *p, cbm_prop_filter_t **out, int *count) {
     while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
         const cbm_token_t *key = expect(p, TOK_IDENT);
         if (!key) {
-            free(arr);
+            prop_filters_free(arr, n);
             return CBM_NOT_FOUND;
         }
         if (!expect(p, TOK_COLON)) {
-            free(arr);
+            prop_filters_free(arr, n);
             return CBM_NOT_FOUND;
         }
         const cbm_token_t *val = expect(p, TOK_STRING);
         if (!val) {
-            free(arr);
+            prop_filters_free(arr, n);
             return CBM_NOT_FOUND;
         }
 
-        if (n >= cap) {
-            size_t new_cap = cap * PAIR_LEN;
-            void *tmp = realloc(arr, new_cap * sizeof(cbm_prop_filter_t));
-            if (!tmp) {
-                for (size_t i = 0; i < n; i++) {
-                    safe_str_free(&arr[i].key);
-                    safe_str_free(&arr[i].value);
-                }
-                free(arr);
-                return CBM_NOT_FOUND;
-            }
-            arr = tmp;
-            cap = new_cap;
-        }
-        const char *new_key = heap_strdup(key->text);
-        const char *new_val = heap_strdup(val->text);
-        if (!new_key || !new_val) {
-            safe_str_free(&new_key);
-            safe_str_free(&new_val);
-            for (size_t i = 0; i < n; i++) {
-                safe_str_free(&arr[i].key);
-                safe_str_free(&arr[i].value);
-            }
-            free(arr);
+        if (!prop_filter_append(&arr, &n, &cap, key, val)) {
+            prop_filters_free(arr, n);
             return CBM_NOT_FOUND;
         }
-        arr[n].key = new_key;
-        arr[n].value = new_val;
-        n++;
-
         match(p, TOK_COMMA); /* optional comma */
     }
     expect(p, TOK_RBRACE);
@@ -580,16 +602,41 @@ static int parse_props(parser_t *p, cbm_prop_filter_t **out, int *count) {
         /* prop_count is `int` in cbm_node_pattern_t (cypher.h). A brace-delimited
          * property list can never realistically approach this, but truncating
          * the count silently would corrupt it rather than fail loudly. */
-        for (size_t i = 0; i < n; i++) {
-            safe_str_free(&arr[i].key);
-            safe_str_free(&arr[i].value);
-        }
-        free(arr);
+        prop_filters_free(arr, n);
         return CBM_NOT_FOUND;
     }
     *out = arr;
     *count = (int)n;
     return 0;
+}
+
+static int parse_node_label(parser_t *p, const char **out) {
+    if (!match(p, TOK_COLON)) {
+        return 0;
+    }
+    const cbm_token_t *label = expect(p, TOK_IDENT);
+    if (!label) {
+        return CBM_NOT_FOUND;
+    }
+    char labels[CBM_SZ_256];
+    int length = snprintf(labels, sizeof(labels), "%s", label->text);
+    while (match(p, TOK_PIPE)) {
+        const cbm_token_t *alternative = expect(p, TOK_IDENT);
+        if (!alternative) {
+            return CBM_NOT_FOUND;
+        }
+        int written = snprintf(labels + length,
+                               length < (int)sizeof(labels) ? sizeof(labels) - (size_t)length : 0,
+                               "|%s", alternative->text);
+        if (written > 0) {
+            length += written;
+        }
+        if (length >= (int)sizeof(labels)) {
+            break;
+        }
+    }
+    *out = heap_strdup(labels);
+    return *out ? 0 : CBM_NOT_FOUND;
 }
 
 /* Parse node: (variable:Label {props}) */
@@ -608,28 +655,8 @@ static int parse_node(parser_t *p, cbm_node_pattern_t *out) {
 
     /* Optional :Label, with openCypher label alternation :A|B|C (#242).
      * Stored as a single "A|B|C" string; the matcher splits on '|'. */
-    if (match(p, TOK_COLON)) {
-        const cbm_token_t *label = expect(p, TOK_IDENT);
-        if (!label) {
-            return CBM_NOT_FOUND;
-        }
-        char lbuf[CBM_SZ_256];
-        int ll = snprintf(lbuf, sizeof(lbuf), "%s", label->text);
-        while (match(p, TOK_PIPE)) {
-            const cbm_token_t *alt = expect(p, TOK_IDENT);
-            if (!alt) {
-                return CBM_NOT_FOUND;
-            }
-            int w = snprintf(lbuf + ll, (ll < (int)sizeof(lbuf)) ? sizeof(lbuf) - (size_t)ll : 0,
-                             "|%s", alt->text);
-            if (w > 0) {
-                ll += w;
-            }
-            if (ll >= (int)sizeof(lbuf)) {
-                break; /* buffer full */
-            }
-        }
-        out->label = heap_strdup(lbuf);
+    if (parse_node_label(p, &out->label) < 0) {
+        return CBM_NOT_FOUND;
     }
 
     /* Optional {props} */
@@ -671,6 +698,32 @@ static void parse_hop_range(parser_t *p, int *min_hops, int *max_hops) {
 }
 
 /* Parse relationship type list after ':' inside brackets. Returns -1 on error. */
+static void relation_types_free(const char **types, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        safe_str_free(&types[i]);
+    }
+    free(types);
+}
+
+static bool relation_type_append(const char ***types, size_t *count, size_t *cap,
+                                 const cbm_token_t *token) {
+    if (*count >= *cap) {
+        size_t new_cap = *cap * PAIR_LEN;
+        const char **grown = realloc(*types, new_cap * sizeof(**types));
+        if (!grown) {
+            return false;
+        }
+        *types = grown;
+        *cap = new_cap;
+    }
+    const char *type = heap_strdup(token->text);
+    if (!type) {
+        return false;
+    }
+    (*types)[(*count)++] = type;
+    return true;
+}
+
 static int parse_rel_types(parser_t *p, cbm_rel_pattern_t *out) {
     size_t cap = CYP_INIT_CAP4;
     size_t n = 0;
@@ -684,54 +737,28 @@ static int parse_rel_types(parser_t *p, cbm_rel_pattern_t *out) {
         free(types);
         return CBM_NOT_FOUND;
     }
-    const char *first_type = heap_strdup(t->text);
-    if (!first_type) {
+    if (!relation_type_append(&types, &n, &cap, t)) {
         free(types);
         return CBM_NOT_FOUND;
     }
-    types[n++] = first_type;
 
     while (match(p, TOK_PIPE)) {
         t = expect(p, TOK_IDENT);
         if (!t) {
-            for (size_t i = 0; i < n; i++) {
-                safe_str_free(&types[i]);
-            }
-            free(types);
+            relation_types_free(types, n);
             return CBM_NOT_FOUND;
         }
-        if (n >= cap) {
-            size_t new_cap = cap * PAIR_LEN;
-            void *tmp = realloc(types, new_cap * sizeof(const char *));
-            if (!tmp) {
-                for (size_t i = 0; i < n; i++) {
-                    safe_str_free(&types[i]);
-                }
-                free(types);
-                return CBM_NOT_FOUND;
-            }
-            types = (const char **)tmp;
-            cap = new_cap;
-        }
-        const char *next_type = heap_strdup(t->text);
-        if (!next_type) {
-            for (size_t i = 0; i < n; i++) {
-                safe_str_free(&types[i]);
-            }
-            free(types);
+        if (!relation_type_append(&types, &n, &cap, t)) {
+            relation_types_free(types, n);
             return CBM_NOT_FOUND;
         }
-        types[n++] = next_type;
     }
 
     if (n > (size_t)INT_MAX) {
         /* type_count is `int` in cbm_rel_pattern_t (cypher.h). A `|`-separated
          * type list can never realistically approach this, but truncating the
          * count silently would corrupt it rather than fail loudly. */
-        for (size_t i = 0; i < n; i++) {
-            safe_str_free(&types[i]);
-        }
-        free(types);
+        relation_types_free(types, n);
         return CBM_NOT_FOUND;
     }
     out->types = types;
@@ -802,14 +829,17 @@ static int parse_rel(parser_t *p, cbm_rel_pattern_t *out) {
 /* ── Expression tree helpers ────────────────────────────────────── */
 
 static void expr_free(cbm_expr_t *e) {
-    enum { EXPR_FREE_STACK = 128 };
-    cbm_expr_t *stack[EXPR_FREE_STACK];
-    int top = 0;
-    if (e) {
-        stack[top++] = e;
+    size_t cap = CYP_INIT_CAP8;
+    size_t count = e ? SKIP_ONE : 0;
+    cbm_expr_t **stack = e ? malloc(cap * sizeof(*stack)) : NULL;
+    if (e && !stack) {
+        return;
     }
-    while (top > 0) {
-        cbm_expr_t *cur = stack[--top];
+    if (e) {
+        stack[0] = e;
+    }
+    while (count > 0) {
+        cbm_expr_t *cur = stack[--count];
         if (cur->type == EXPR_CONDITION) {
             safe_str_free(&cur->cond.variable);
             safe_str_free(&cur->cond.property);
@@ -829,21 +859,22 @@ static void expr_free(cbm_expr_t *e) {
             free(cur->cond.args);
         }
         if (cur->right) {
-            if (top < EXPR_FREE_STACK) {
-                stack[top++] = cur->right;
-            } else {
-                expr_free(cur->right); /* recurse when stack overflows */
+            if (count == cap) {
+                cap *= PAIR_LEN;
+                stack = cbm_realloc_or_abort(stack, cap * sizeof(*stack));
             }
+            stack[count++] = cur->right;
         }
         if (cur->left) {
-            if (top < EXPR_FREE_STACK) {
-                stack[top++] = cur->left;
-            } else {
-                expr_free(cur->left); /* recurse when stack overflows */
+            if (count == cap) {
+                cap *= PAIR_LEN;
+                stack = cbm_realloc_or_abort(stack, cap * sizeof(*stack));
             }
+            stack[count++] = cur->left;
         }
         free(cur);
     }
+    free(stack);
 }
 
 static cbm_expr_t *expr_leaf(cbm_condition_t c) {
@@ -938,27 +969,54 @@ static void cond_func_fields_free(cbm_condition_t *c) {
 }
 
 /* Parse IN [val, val, ...] list. Returns expr_leaf or NULL on error. */
+static void condition_in_values_free(const char **values, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        safe_str_free(&values[i]);
+    }
+    free(values);
+}
+
+static void condition_parse_fields_free(cbm_condition_t *condition) {
+    safe_str_free(&condition->variable);
+    safe_str_free(&condition->property);
+    safe_str_free(&condition->op);
+}
+
+static bool condition_in_value_append(const char ***values, size_t *count, size_t *capacity,
+                                      const char *text) {
+    if (*count >= *capacity) {
+        size_t new_capacity = *capacity * PAIR_LEN;
+        const char **grown = realloc(*values, new_capacity * sizeof(**values));
+        if (!grown) {
+            return false;
+        }
+        *values = grown;
+        *capacity = new_capacity;
+    }
+    const char *value = heap_strdup(text);
+    if (!value) {
+        return false;
+    }
+    (*values)[(*count)++] = value;
+    return true;
+}
+
 static cbm_expr_t *parse_in_list(parser_t *p, cbm_condition_t *c) {
     advance(p);
     c->op = heap_strdup("IN");
     if (!c->op) {
-        safe_str_free(&c->variable);
-        safe_str_free(&c->property);
+        condition_parse_fields_free(c);
         return NULL;
     }
     if (!expect(p, TOK_LBRACKET)) {
-        safe_str_free(&c->variable);
-        safe_str_free(&c->property);
-        safe_str_free(&c->op);
+        condition_parse_fields_free(c);
         return NULL;
     }
     size_t vcap = CYP_INIT_CAP8;
     size_t vn = 0;
     const char **vals = malloc(vcap * sizeof(const char *));
     if (!vals) {
-        safe_str_free(&c->variable);
-        safe_str_free(&c->property);
-        safe_str_free(&c->op);
+        condition_parse_fields_free(c);
         return NULL;
     }
     while (!check(p, TOK_RBRACKET) && !check(p, TOK_EOF)) {
@@ -966,34 +1024,11 @@ static cbm_expr_t *parse_in_list(parser_t *p, cbm_condition_t *c) {
             match(p, TOK_COMMA);
         }
         if (check(p, TOK_STRING) || check(p, TOK_NUMBER)) {
-            if (vn >= vcap) {
-                size_t new_vcap = vcap * PAIR_LEN;
-                void *tmp = realloc((void *)vals, new_vcap * sizeof(const char *));
-                if (!tmp) {
-                    for (size_t i = 0; i < vn; i++) {
-                        safe_str_free(&vals[i]);
-                    }
-                    safe_free(vals);
-                    safe_str_free(&c->variable);
-                    safe_str_free(&c->property);
-                    safe_str_free(&c->op);
-                    return NULL;
-                }
-                vals = (const char **)tmp;
-                vcap = new_vcap;
-            }
-            const char *new_val = heap_strdup(advance(p)->text);
-            if (!new_val) {
-                for (size_t i = 0; i < vn; i++) {
-                    safe_str_free(&vals[i]);
-                }
-                safe_free(vals);
-                safe_str_free(&c->variable);
-                safe_str_free(&c->property);
-                safe_str_free(&c->op);
+            if (!condition_in_value_append(&vals, &vn, &vcap, advance(p)->text)) {
+                condition_in_values_free(vals, vn);
+                condition_parse_fields_free(c);
                 return NULL;
             }
-            vals[vn++] = new_val;
         } else {
             break;
         }
@@ -1003,13 +1038,8 @@ static cbm_expr_t *parse_in_list(parser_t *p, cbm_condition_t *c) {
         /* in_value_count is `int` in cbm_condition_t (cypher.h). An IN [...]
          * list can never realistically approach this, but truncating the
          * count silently would corrupt it rather than fail loudly. */
-        for (size_t i = 0; i < vn; i++) {
-            safe_str_free(&vals[i]);
-        }
-        safe_free(vals);
-        safe_str_free(&c->variable);
-        safe_str_free(&c->property);
-        safe_str_free(&c->op);
+        condition_in_values_free(vals, vn);
+        condition_parse_fields_free(c);
         return NULL;
     }
     c->in_values = vals;
@@ -1110,11 +1140,11 @@ static cbm_expr_t *parse_exists_predicate(parser_t *p, bool negated) {
     c.op = heap_strdup("EXISTS");
     c.variable = heap_strdup(anchor.variable ? anchor.variable : "");
     c.value = (rel.type_count > 0 && rel.types[0]) ? heap_strdup(rel.types[0]) : NULL;
-    c.exists_dir = 0;
+    c.exists_dir = CYPHER_EXISTS_DIRECTION_OUTBOUND;
     if (rel.direction && strcmp(rel.direction, "inbound") == 0) {
-        c.exists_dir = 1;
+        c.exists_dir = CYPHER_EXISTS_DIRECTION_INBOUND;
     } else if (rel.direction && strcmp(rel.direction, "any") == 0) {
-        c.exists_dir = 2;
+        c.exists_dir = CYPHER_EXISTS_DIRECTION_ANY;
     }
     free_one_node_pattern(&anchor);
     free_one_rel_pattern(&rel);
@@ -1821,7 +1851,7 @@ static int parse_return_or_with(parser_t *p, cbm_return_clause_t **out, bool is_
     /* -1 = no LIMIT clause (return all). An explicit `LIMIT 0` parses to 0 below
      * and must return 0 rows — distinguishing the two requires a sentinel, since
      * calloc zeroes limit and `limit > 0` would treat LIMIT 0 as "no limit". */
-    r->limit = -1;
+    r->limit = CYPHER_RETURN_LIMIT_UNBOUNDED;
     size_t cap = CYP_INIT_CAP8;
     r->items = malloc(cap * sizeof(cbm_return_item_t));
 
@@ -1937,42 +1967,39 @@ static int parse_match_pattern(parser_t *p, cbm_pattern_t *pat) {
 }
 
 /* Parse UNWIND [...] AS var clause into query */
+static const char *parse_unwind_list(parser_t *p) {
+    advance(p);
+    char buffer[CBM_SZ_2K] = "[";
+    int length = SKIP_ONE;
+    const int capacity = (int)sizeof(buffer);
+    while (!check(p, TOK_RBRACKET) && !check(p, TOK_EOF)) {
+        if (length > SKIP_ONE && length < capacity - SKIP_ONE) {
+            buffer[length++] = ',';
+        }
+        if (check(p, TOK_STRING)) {
+            length +=
+                snprintf(buffer + length, (size_t)(capacity - length), "\"%s\"", peek(p)->text);
+        } else if (check(p, TOK_NUMBER)) {
+            length += snprintf(buffer + length, (size_t)(capacity - length), "%s", peek(p)->text);
+        }
+        advance(p);
+        if (length >= capacity) {
+            length = capacity - SKIP_ONE;
+        }
+        match(p, TOK_COMMA);
+    }
+    expect(p, TOK_RBRACKET);
+    if (length < capacity - SKIP_ONE) {
+        buffer[length++] = ']';
+    }
+    buffer[length] = '\0';
+    return heap_strdup(buffer);
+}
+
 static void parse_unwind_clause(parser_t *p, cbm_query_t *q) {
     advance(p);
     if (check(p, TOK_LBRACKET)) {
-        /* Literal list: [1, 2, 3] — collect as JSON array string */
-        advance(p);
-        char buf[CBM_SZ_2K] = "[";
-        int blen = SKIP_ONE;
-        /* snprintf returns the length it WOULD have written, so a single
-         * oversized token (string literals lex up to CBM_SZ_4K-1) can push
-         * blen past sizeof(buf). Clamp after every write and guard the raw
-         * buf[blen++] stores, mirroring format_collect_list(). */
-        const int cap = (int)sizeof(buf);
-        while (!check(p, TOK_RBRACKET) && !check(p, TOK_EOF)) {
-            if (blen > SKIP_ONE && blen < cap - SKIP_ONE) {
-                buf[blen++] = ',';
-            }
-            if (check(p, TOK_STRING)) {
-                blen += snprintf(buf + blen, (size_t)(cap - blen), "\"%s\"", peek(p)->text);
-                advance(p);
-            } else if (check(p, TOK_NUMBER)) {
-                blen += snprintf(buf + blen, (size_t)(cap - blen), "%s", peek(p)->text);
-                advance(p);
-            } else {
-                advance(p);
-            }
-            if (blen >= cap) {
-                blen = cap - SKIP_ONE;
-            }
-            match(p, TOK_COMMA);
-        }
-        expect(p, TOK_RBRACKET);
-        if (blen < cap - SKIP_ONE) {
-            buf[blen++] = ']';
-        }
-        buf[blen] = '\0';
-        q->unwind_expr = heap_strdup(buf);
+        q->unwind_expr = parse_unwind_list(p);
     } else if (check(p, TOK_IDENT)) {
         q->unwind_expr = heap_strdup(advance(p)->text);
     }
@@ -2312,6 +2339,53 @@ static const char *node_string_field(const cbm_node_t *n, const char *prop) {
 static const char *json_extract_prop(const char *json, const char *key, char *buf, size_t buf_sz);
 static void node_fields_free(cbm_node_t *n); /* defined below; used by the stub re-fetch */
 
+static const char *node_virtual_prop(const cbm_node_t *node, const char *prop, cbm_store_t *store,
+                                     char *buf) {
+    if (!buf) {
+        return NULL;
+    }
+    if (strcmp(prop, "start_line") == 0) {
+        snprintf(buf, CBM_SZ_512, "%d", node->start_line);
+        return buf;
+    }
+    if (strcmp(prop, "end_line") == 0) {
+        snprintf(buf, CBM_SZ_512, "%d", node->end_line);
+        return buf;
+    }
+    if (!store || (strcmp(prop, "in_degree") != 0 && strcmp(prop, "out_degree") != 0)) {
+        return NULL;
+    }
+    int inbound = 0;
+    int outbound = 0;
+    cbm_store_node_degree(store, node->id, &inbound, &outbound);
+    snprintf(buf, CBM_SZ_512, "%d", strcmp(prop, "in_degree") == 0 ? inbound : outbound);
+    return buf;
+}
+
+static const char *node_stub_prop(const cbm_node_t *node, const char *prop, cbm_store_t *store,
+                                  char *buf) {
+    if (!buf || !store || node->id <= 0 || node->file_path || node->label) {
+        return NULL;
+    }
+    cbm_node_t full = {0};
+    if (cbm_store_find_node_by_id(store, node->id, &full) != CBM_STORE_OK) {
+        return NULL;
+    }
+    const char *result = node_string_field(&full, prop);
+    if (result && result[0]) {
+        snprintf(buf, CBM_SZ_512, "%s", result);
+        result = buf;
+    } else {
+        result = node_virtual_prop(&full, prop, NULL, buf);
+        if (!result && full.properties_json && full.properties_json[0] == '{') {
+            result = json_extract_prop(full.properties_json, prop, buf, CBM_SZ_512);
+        }
+    }
+    bool found = result && result[0];
+    node_fields_free(&full);
+    return found ? buf : NULL;
+}
+
 static const char *node_prop(const cbm_node_t *n, const char *prop, cbm_store_t *store) {
     if (!n || !prop) {
         return "";
@@ -2331,24 +2405,12 @@ static const char *node_prop(const cbm_node_t *n, const char *prop, cbm_store_t 
     char *out = bufs[buf_idx];
     buf_idx = (buf_idx + SKIP_ONE) % CYP_BUF_8;
 
-    if (strcmp(prop, "start_line") == 0) {
-        snprintf(out, CBM_SZ_512, "%d", n->start_line);
-        return out;
-    }
-    if (strcmp(prop, "end_line") == 0) {
-        snprintf(out, CBM_SZ_512, "%d", n->end_line);
-        return out;
+    const char *virtual_value = node_virtual_prop(n, prop, store, out);
+    if (virtual_value) {
+        return virtual_value;
     }
     /* Virtual computed properties: in_degree/out_degree via CALLS edges.
      * Enables Cypher dead-code detection: WHERE n.in_degree = '0'. */
-    if (store && (strcmp(prop, "in_degree") == 0 || strcmp(prop, "out_degree") == 0)) {
-        int in_deg = 0;
-        int out_deg = 0;
-        cbm_store_node_degree(store, n->id, &in_deg, &out_deg);
-        int val = (strcmp(prop, "in_degree") == 0) ? in_deg : out_deg;
-        snprintf(out, CBM_SZ_512, "%d", val);
-        return out;
-    }
     /* Fall back to any value stored in the node's properties JSON — exposes the
      * extraction metrics (complexity, cognitive, loop_count, loop_depth,
      * transitive_loop_depth, recursive) and any other persisted property to
@@ -2367,44 +2429,78 @@ static const char *node_prop(const cbm_node_t *n, const char *prop, cbm_store_t 
      * stub discriminator: a real bound node with NULL label AND file_path would
      * also match, but in that case the worst case is one redundant indexed fetch
      * that returns the same value — never a wrong result. */
-    if (store && n->id > 0 && !n->file_path && !n->label) {
-        cbm_node_t full = {0};
-        if (cbm_store_find_node_by_id(store, n->id, &full) == CBM_STORE_OK) {
-            const char *res = NULL;
-            const char *rv = node_string_field(&full, prop);
-            if (rv && rv[0]) {
-                snprintf(out, CBM_SZ_512, "%s", rv);
-                res = out;
-            } else if (strcmp(prop, "start_line") == 0) {
-                snprintf(out, CBM_SZ_512, "%d", full.start_line);
-                res = out;
-            } else if (strcmp(prop, "end_line") == 0) {
-                snprintf(out, CBM_SZ_512, "%d", full.end_line);
-                res = out;
-            } else if (full.properties_json && full.properties_json[0] == '{') {
-                const char *jv = json_extract_prop(full.properties_json, prop, out, CBM_SZ_512);
-                if (jv && jv[0]) {
-                    res = out;
-                }
-            }
-            node_fields_free(&full);
-            if (res) {
-                return res;
-            }
-        }
+    const char *stub_value = node_stub_prop(n, prop, store, out);
+    if (stub_value) {
+        return stub_value;
     }
     return "";
 }
 
-/* Extract a string value from JSON properties_json by key.
- * Writes result to buf (up to buf_sz). Returns buf if found, "" otherwise.
- * Handles both string values ("key":"value") and numeric values ("key":1.5). */
+static const char *json_copy_string(const char *p, char *buf, size_t buf_sz) {
+    if (!buf || buf_sz == 0) {
+        return "";
+    }
+    size_t i = 0;
+    for (p++; *p && *p != '"' && i < buf_sz - SKIP_ONE; p++) {
+        if (*p == '\\' && p[SKIP_ONE] && i + SKIP_ONE < buf_sz - SKIP_ONE) {
+            buf[i++] = *p++;
+        }
+        buf[i++] = *p;
+    }
+    buf[i] = '\0';
+    return buf;
+}
+
+static const char *json_copy_balanced(const char *p, char *buf, size_t buf_sz) {
+    if (!buf || buf_sz == 0) {
+        return "";
+    }
+    char open = *p;
+    char close = open == '[' ? ']' : '}';
+    int depth = 0;
+    bool in_str = false;
+    size_t i = 0;
+    while (*p && i < buf_sz - SKIP_ONE) {
+        char c = *p;
+        if (in_str && c == '\\' && p[SKIP_ONE] && i + SKIP_ONE < buf_sz - SKIP_ONE) {
+            buf[i++] = *p++;
+        } else if (c == '"') {
+            in_str = !in_str;
+        } else if (!in_str && c == open) {
+            depth++;
+        } else if (!in_str && c == close) {
+            depth--;
+        }
+        buf[i++] = *p++;
+        if (!in_str && depth == 0) {
+            break;
+        }
+    }
+    buf[i] = '\0';
+    return buf;
+}
+
+static const char *json_copy_scalar(const char *p, char *buf, size_t buf_sz) {
+    if (!buf || buf_sz == 0) {
+        return "";
+    }
+    size_t i = 0;
+    while (*p && *p != ',' && *p != '}' && *p != ' ' && i < buf_sz - SKIP_ONE) {
+        buf[i++] = *p++;
+    }
+    buf[i] = '\0';
+    return buf;
+}
+
+/* Extract a JSON property while preserving string escapes and nested values. */
 static const char *json_extract_prop(const char *json, const char *key, char *buf, size_t buf_sz) {
+    if (!buf || buf_sz == 0) {
+        return "";
+    }
     if (!json || !key) {
         buf[0] = '\0';
         return buf;
     }
-    /* Build search pattern: "key": */
     char pattern[CBM_SZ_256];
     snprintf(pattern, sizeof(pattern), "\"%s\":", key);
     const char *p = strstr(json, pattern);
@@ -2413,61 +2509,16 @@ static const char *json_extract_prop(const char *json, const char *key, char *bu
         return buf;
     }
     p += strlen(pattern);
-    /* Skip whitespace */
     while (*p == ' ' || *p == '\t') {
         p++;
     }
     if (*p == '"') {
-        /* String value — honor backslash escapes: without this, an embedded \"
-         * cuts the value short at the first escaped quote. */
-        p++;
-        size_t i = 0;
-        while (*p && *p != '"' && i < buf_sz - SKIP_ONE) {
-            if (*p == '\\' && p[SKIP_ONE] && i + SKIP_ONE < buf_sz - SKIP_ONE) {
-                buf[i++] = *p++; /* keep the escape pair intact */
-            }
-            buf[i++] = *p++;
-        }
-        buf[i] = '\0';
-    } else if (*p == '[' || *p == '{') {
-        /* Array/object value — copy the whole balanced construct. A scan-to-comma
-         * truncates at the first comma INSIDE the value: e.g. a decorators array
-         * ["@Roles('OWNER', 'ADMIN')","@Get()"] came back as ["@Roles('OWNER'. */
-        char open = *p;
-        char close = (open == '[') ? ']' : '}';
-        int depth = 0;
-        int in_str = 0;
-        size_t i = 0;
-        while (*p && i < buf_sz - SKIP_ONE) {
-            char c = *p;
-            if (in_str) {
-                if (c == '\\' && p[SKIP_ONE] && i + SKIP_ONE < buf_sz - SKIP_ONE) {
-                    buf[i++] = *p++; /* escape pair stays intact */
-                } else if (c == '"') {
-                    in_str = 0;
-                }
-            } else if (c == '"') {
-                in_str = 1;
-            } else if (c == open) {
-                depth++;
-            } else if (c == close) {
-                depth--;
-            }
-            buf[i++] = *p++;
-            if (!in_str && depth == 0) {
-                break; /* outer bracket closed */
-            }
-        }
-        buf[i] = '\0';
-    } else {
-        /* Numeric or other scalar value */
-        size_t i = 0;
-        while (*p && *p != ',' && *p != '}' && *p != ' ' && i < buf_sz - SKIP_ONE) {
-            buf[i++] = *p++;
-        }
-        buf[i] = '\0';
+        return json_copy_string(p, buf, buf_sz);
     }
-    return buf;
+    if (*p == '[' || *p == '{') {
+        return json_copy_balanced(p, buf, buf_sz);
+    }
+    return json_copy_scalar(p, buf, buf_sz);
 }
 
 /* Get edge property by name. Uses rotating thread-local buffers to allow
@@ -2687,83 +2738,78 @@ static bool eval_comparison_op(const char *op, const char *actual, const char *e
     return false;
 }
 
-/* Evaluate a WHERE condition against a binding */
-static bool eval_condition(const cbm_condition_t *c, binding_t *b) {
-    /* Label test: WHERE n:Label (#241) — compare the bound node's label
-     * directly rather than a property value. */
-    if (strcmp(c->op, "HAS_LABEL") == 0) {
-        cbm_node_t *n = binding_get(b, c->variable);
-        bool result = n && n->label && c->value && strcmp(n->label, c->value) == 0;
-        return c->negated ? !result : result;
-    }
-
-    /* EXISTS { (var)-[:TYPE]->() }: does the bound node have any edge of the
-     * given type in the requested direction? (dir 0=out, 1=in, 2=any) */
-    if (strcmp(c->op, "EXISTS") == 0) {
-        cbm_node_t *n = binding_get(b, c->variable);
-        bool result = false;
-        if (n && b->store) {
-            cbm_edge_t *edges = NULL;
-            int cnt = 0;
-            if (c->exists_dir != 1) { /* outbound or any */
-                if (c->value) {
-                    cbm_store_find_edges_by_source_type(b->store, n->id, c->value, &edges, &cnt);
-                } else {
-                    cbm_store_find_edges_by_source(b->store, n->id, &edges, &cnt);
-                }
-                result = cnt > 0;
-                cbm_store_free_edges(edges, cnt);
-            }
-            if (!result && c->exists_dir != 0) { /* inbound or any */
-                edges = NULL;
-                cnt = 0;
-                if (c->value) {
-                    cbm_store_find_edges_by_target_type(b->store, n->id, c->value, &edges, &cnt);
-                } else {
-                    cbm_store_find_edges_by_target(b->store, n->id, &edges, &cnt);
-                }
-                result = cnt > 0;
-                cbm_store_free_edges(edges, cnt);
-            }
+static bool condition_has_edge(const cbm_condition_t *c, cbm_store_t *store, int64_t node_id,
+                               bool inbound) {
+    cbm_edge_t *edges = NULL;
+    int count = 0;
+    if (inbound) {
+        if (c->value) {
+            cbm_store_find_edges_by_target_type(store, node_id, c->value, &edges, &count);
+        } else {
+            cbm_store_find_edges_by_target(store, node_id, &edges, &count);
         }
-        return c->negated ? !result : result;
+    } else if (c->value) {
+        cbm_store_find_edges_by_source_type(store, node_id, c->value, &edges, &count);
+    } else {
+        cbm_store_find_edges_by_source(store, node_id, &edges, &count);
     }
+    bool found = count > 0;
+    cbm_store_free_edges(edges, count);
+    return found;
+}
 
-    const char *actual = resolve_condition_value(c, b);
-    /* coalesce(var.prop, literal) (#874): a missing/empty property value
-     * falls back to the literal default before the operator runs. */
-    if (c->coalesce_default && (!actual || actual[0] == '\0')) {
-        actual = c->coalesce_default;
+static bool condition_exists(const cbm_condition_t *c, binding_t *b) {
+    cbm_node_t *n = binding_get(b, c->variable);
+    if (!n || !b->store) {
+        return false;
     }
-    if (!actual) {
-        return true;
+    bool outbound = c->exists_dir != CYPHER_EXISTS_DIRECTION_INBOUND;
+    bool found = outbound && condition_has_edge(c, b->store, n->id, false);
+    return found || c->exists_dir == CYPHER_EXISTS_DIRECTION_OUTBOUND
+               ? found
+               : condition_has_edge(c, b->store, n->id, true);
+}
+
+static bool condition_value_in_list(const cbm_condition_t *c, const char *actual) {
+    for (int i = 0; i < c->in_value_count; i++) {
+        if (strcmp(actual, c->in_values[i]) == 0) {
+            return true;
+        }
     }
+    return false;
+}
 
-    bool result;
-
-    /* IS NULL / IS NOT NULL */
+static bool condition_value_matches(const cbm_condition_t *c, const char *actual) {
     if (strcmp(c->op, "IS NULL") == 0) {
-        result = (actual[0] == '\0');
-        return c->negated ? !result : result;
+        return actual[0] == '\0';
     }
     if (strcmp(c->op, "IS NOT NULL") == 0) {
-        result = (actual[0] != '\0');
-        return c->negated ? !result : result;
+        return actual[0] != '\0';
     }
-
-    /* IN [...] */
     if (strcmp(c->op, "IN") == 0) {
-        result = false;
-        for (int i = 0; i < c->in_value_count; i++) {
-            if (strcmp(actual, c->in_values[i]) == 0) {
-                result = true;
-                break;
-            }
-        }
-        return c->negated ? !result : result;
+        return condition_value_in_list(c, actual);
     }
+    return eval_comparison_op(c->op, actual, c->value);
+}
 
-    result = eval_comparison_op(c->op, actual, c->value);
+/* Evaluate a WHERE condition against a binding. */
+static bool eval_condition(const cbm_condition_t *c, binding_t *b) {
+    bool result;
+    if (strcmp(c->op, "HAS_LABEL") == 0) {
+        cbm_node_t *n = binding_get(b, c->variable);
+        result = n && n->label && c->value && strcmp(n->label, c->value) == 0;
+    } else if (strcmp(c->op, "EXISTS") == 0) {
+        result = condition_exists(c, b);
+    } else {
+        const char *actual = resolve_condition_value(c, b);
+        if (c->coalesce_default && (!actual || actual[0] == '\0')) {
+            actual = c->coalesce_default;
+        }
+        if (!actual) {
+            return true;
+        }
+        result = condition_value_matches(c, actual);
+    }
     return c->negated ? !result : result;
 }
 
@@ -2902,7 +2948,8 @@ static void rb_add_row(result_builder_t *rb, const char **values) {
 
 static _Thread_local uint64_t g_cypher_deadline_ms = 0; /* absolute; 0 = disarmed */
 static _Thread_local bool g_cypher_timed_out = false;
-static _Thread_local int64_t g_cypher_deadline_override_ms = -1; /* test hook; <0 = default */
+static _Thread_local int64_t g_cypher_deadline_override_ms =
+    CYPHER_DEADLINE_OVERRIDE_DEFAULT; /* test hook; <0 = default */
 
 static void cypher_deadline_arm(void) {
     g_cypher_timed_out = false;
@@ -2971,52 +3018,89 @@ static const char *binding_get_virtual(binding_t *b, const char *var, const char
 
 /* ── String function application ──────────────────────────────── */
 
+static const char *string_case_func(const char *func, const char *value, char *buf, size_t size) {
+    int (*transform)(int) = strcmp(func, "toLower") == 0 ? tolower : toupper;
+    size_t index = 0;
+    while (index < size - SKIP_ONE && value[index]) {
+        buf[index] = (char)transform((unsigned char)value[index]);
+        index++;
+    }
+    buf[index] = '\0';
+    return buf;
+}
+
+static const char *string_number_func(const char *func, const char *value, char *buf, size_t size) {
+    if (strcmp(func, "toFloat") == 0) {
+        char *end = NULL;
+        double number = strtod(value, &end);
+        if (end == value) {
+            return "";
+        }
+        snprintf(buf, size, "%g", number);
+        return buf;
+    }
+    char *end = NULL;
+    long long number = strtoll(value, &end, CBM_DECIMAL_BASE);
+    if (end == value) {
+        number = (long long)strtod(value, &end);
+        if (end == value) {
+            return "";
+        }
+    }
+    snprintf(buf, size, "%lld", number);
+    return buf;
+}
+
+static const char *string_trim_func(const char *func, const char *value, char *buf, size_t size) {
+    bool left = strcmp(func, "trim") == 0 || strcmp(func, "ltrim") == 0;
+    bool right = strcmp(func, "trim") == 0 || strcmp(func, "rtrim") == 0;
+    const char *start = value;
+    const char *end = value + strlen(value);
+    while (left && isspace((unsigned char)*start)) {
+        start++;
+    }
+    while (right && end > start && isspace((unsigned char)end[-SKIP_ONE])) {
+        end--;
+    }
+    size_t length = (size_t)(end - start);
+    if (length >= size) {
+        length = size - SKIP_ONE;
+    }
+    memcpy(buf, start, length);
+    buf[length] = '\0';
+    return buf;
+}
+
+static const char *string_reverse_func(const char *value, char *buf, size_t size) {
+    size_t length = strlen(value);
+    if (length >= size) {
+        length = size - SKIP_ONE;
+    }
+    for (size_t i = 0; i < length; i++) {
+        buf[i] = value[length - SKIP_ONE - i];
+    }
+    buf[length] = '\0';
+    return buf;
+}
+
 static const char *apply_string_func(const char *func, const char *val, char *buf, size_t buf_sz) {
     if (!func || !val) {
         return val ? val : "";
     }
     if (strcmp(func, "toLower") == 0) {
-        size_t i = 0;
-        for (; i < buf_sz - SKIP_ONE && val[i]; i++) {
-            buf[i] = (char)tolower((unsigned char)val[i]);
-        }
-        buf[i] = '\0';
-        return buf;
+        return string_case_func(func, val, buf, buf_sz);
     }
     if (strcmp(func, "toUpper") == 0) {
-        size_t i = 0;
-        for (; i < buf_sz - SKIP_ONE && val[i]; i++) {
-            buf[i] = (char)toupper((unsigned char)val[i]);
-        }
-        buf[i] = '\0';
-        return buf;
+        return string_case_func(func, val, buf, buf_sz);
     }
     if (strcmp(func, "toString") == 0) {
         return val; /* already strings */
     }
     if (strcmp(func, "toInteger") == 0) {
-        char *end = NULL;
-        long long v = strtoll(val, &end, CBM_DECIMAL_BASE);
-        if (end == val) {
-            /* Not an integer literal — accept a float string and truncate. */
-            char *fend = NULL;
-            double d = strtod(val, &fend);
-            if (fend == val) {
-                return ""; /* non-numeric → null */
-            }
-            v = (long long)d;
-        }
-        snprintf(buf, buf_sz, "%lld", v);
-        return buf;
+        return string_number_func(func, val, buf, buf_sz);
     }
     if (strcmp(func, "toFloat") == 0) {
-        char *end = NULL;
-        double d = strtod(val, &end);
-        if (end == val) {
-            return ""; /* non-numeric → null */
-        }
-        snprintf(buf, buf_sz, "%g", d);
-        return buf;
+        return string_number_func(func, val, buf, buf_sz);
     }
     if (strcmp(func, "toBoolean") == 0) {
         if (cyp_ci_eq(val, "true")) {
@@ -3032,35 +3116,10 @@ static const char *apply_string_func(const char *func, const char *val, char *bu
         return buf;
     }
     if (strcmp(func, "trim") == 0 || strcmp(func, "ltrim") == 0 || strcmp(func, "rtrim") == 0) {
-        bool do_left = (strcmp(func, "trim") == 0 || strcmp(func, "ltrim") == 0);
-        bool do_right = (strcmp(func, "trim") == 0 || strcmp(func, "rtrim") == 0);
-        const char *start = val;
-        const char *end = val + strlen(val);
-        while (do_left && (*start == ' ' || *start == '\t' || *start == '\n' || *start == '\r')) {
-            start++;
-        }
-        while (do_right && end > start &&
-               (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\n' || end[-1] == '\r')) {
-            end--;
-        }
-        size_t n = (size_t)(end - start);
-        if (n >= buf_sz) {
-            n = buf_sz - SKIP_ONE;
-        }
-        memcpy(buf, start, n);
-        buf[n] = '\0';
-        return buf;
+        return string_trim_func(func, val, buf, buf_sz);
     }
     if (strcmp(func, "reverse") == 0) {
-        size_t len = strlen(val);
-        if (len >= buf_sz) {
-            len = buf_sz - SKIP_ONE;
-        }
-        for (size_t i = 0; i < len; i++) {
-            buf[i] = val[len - SKIP_ONE - i];
-        }
-        buf[len] = '\0';
-        return buf;
+        return string_reverse_func(val, buf, buf_sz);
     }
     return val;
 }
@@ -3129,8 +3188,9 @@ static void scan_alternation_labels(cbm_store_t *store, const char *project, con
         if (pc > 0 && part) {
             /* *out_count/pc are per-label result counts (cbm_store_find_nodes_by_label),
              * never negative. */
-            if ((size_t)(*out_count + pc) > cap) {
-                cap = (size_t)(*out_count + pc) * PAIR_LEN;
+            size_t combined_count = (size_t)*out_count + (size_t)pc;
+            if (combined_count > cap) {
+                cap = combined_count * PAIR_LEN;
                 *out_nodes = cbm_realloc_or_abort(*out_nodes, cap * sizeof(cbm_node_t));
             }
             memcpy(*out_nodes + *out_count, part, (size_t)pc * sizeof(cbm_node_t));
@@ -3259,8 +3319,8 @@ static void expand_var_length(cbm_store_t *store, cbm_rel_pattern_t *rel,
     int depth_cap = cbm_cypher_max_depth();
     int max_depth = rel->max_hops > 0 ? rel->max_hops : depth_cap;
     if (max_depth > depth_cap) {
-        char req_buf[16];
-        char cap_buf[16];
+        char req_buf[CBM_SZ_16];
+        char cap_buf[CBM_SZ_16];
         snprintf(req_buf, sizeof(req_buf), "%d", max_depth);
         snprintf(cap_buf, sizeof(cap_buf), "%d", depth_cap);
         cbm_log_warn("cypher.depth_capped", "requested", req_buf, "cap", cap_buf);
@@ -3352,6 +3412,31 @@ static void expand_fixed_length(cbm_store_t *store, cbm_rel_pattern_t *rel,
     }
 }
 
+static void expand_pattern_rel_binding(cbm_store_t *store, cbm_rel_pattern_t *rel,
+                                       cbm_node_pattern_t *target_node, binding_t *binding,
+                                       const char *from_var, const char *to_var,
+                                       binding_t *new_bindings, int *new_count, int max_new,
+                                       bool is_optional) {
+    cbm_node_t *src = binding_get(binding, from_var);
+    if (!src) {
+        return;
+    }
+    int matches = 0;
+    bool variable_length = rel->min_hops != SKIP_ONE || rel->max_hops != SKIP_ONE;
+    if (variable_length) {
+        expand_var_length(store, rel, target_node, binding, src, to_var, new_bindings, new_count,
+                          max_new, &matches);
+    } else {
+        expand_fixed_length(store, rel, target_node, binding, src, to_var, new_bindings, new_count,
+                            max_new, &matches);
+    }
+    if (is_optional && matches == 0) {
+        binding_t fallback = {0};
+        binding_copy(&fallback, binding);
+        new_bindings[(*new_count)++] = fallback;
+    }
+}
+
 static void expand_pattern_rels(cbm_store_t *store, cbm_pattern_t *pat, binding_t **bindings,
                                 int *bind_count, const int *bind_cap, const char **var_name,
                                 bool is_optional) {
@@ -3364,8 +3449,6 @@ static void expand_pattern_rels(cbm_store_t *store, cbm_pattern_t *pat, binding_
         cbm_rel_pattern_t *rel = &pat->rels[ri];
         cbm_node_pattern_t *target_node = &pat->nodes[ri + SKIP_ONE];
         const char *to_var = target_node->variable ? target_node->variable : "_n_t";
-
-        bool is_variable_length = (rel->min_hops != SKIP_ONE || rel->max_hops != SKIP_ONE);
 
         /* Size this hop's output for BOTH writers without dropping any row: the
          * expansion helpers emit at most max_new = bind_cap*10 rows (they stop at
@@ -3386,33 +3469,9 @@ static void expand_pattern_rels(cbm_store_t *store, cbm_pattern_t *pat, binding_
             if ((bi & CYPHER_DEADLINE_CHECK_MASK) == 0 && cypher_deadline_exceeded()) {
                 break;
             }
-            binding_t *b = &(*bindings)[bi];
-            cbm_node_t *src = binding_get(b, *var_name);
-            if (!src) {
-                continue;
-            }
-
-            int match_count = 0;
-
-            int max_new = *bind_cap * CYP_GROWTH_10;
-            if (is_variable_length) {
-                expand_var_length(store, rel, target_node, b, src, to_var, new_bindings, &new_count,
-                                  max_new, &match_count);
-            } else {
-                expand_fixed_length(store, rel, target_node, b, src, to_var, new_bindings,
-                                    &new_count, max_new, &match_count);
-            }
-
-            /* OPTIONAL MATCH: no expansion for this source, so keep the binding
-             * with the target unbound (projection renders it ""). The buffer is
-             * sized max_new + *bind_count precisely so every such fallback row has
-             * a slot — no guard needed, and no OPTIONAL no-match row is dropped. */
-            if (is_optional && match_count == 0) {
-                binding_t nb = {0};
-                binding_copy(&nb, b);
-                /* Don't set to_var — it remains unbound; projection returns "" */
-                new_bindings[new_count++] = nb;
-            }
+            expand_pattern_rel_binding(store, rel, target_node, &(*bindings)[bi], *var_name, to_var,
+                                       new_bindings, &new_count, *bind_cap * CYP_GROWTH_10,
+                                       is_optional);
         }
 
         for (int bi = 0; bi < *bind_count; bi++) {
@@ -3638,90 +3697,171 @@ static const char *eval_func_arg(binding_t *b, const cbm_func_arg_t *a) {
     return binding_get_virtual(b, a->variable, a->property);
 }
 
+static const char *eval_coalesce_func(binding_t *b, const cbm_return_item_t *item) {
+    for (int i = 0; i < item->arg_count; i++) {
+        const char *v = eval_func_arg(b, &item->args[i]);
+        if (v && v[0]) {
+            return v;
+        }
+    }
+    return "";
+}
+
+static const char *eval_substring_func(binding_t *b, const cbm_return_item_t *item, char *buf,
+                                       size_t bufsz) {
+    const char *s = eval_func_arg(b, &item->args[CYPHER_FUNCTION_ARG_VALUE]);
+    long start =
+        strtol(eval_func_arg(b, &item->args[CYPHER_FUNCTION_ARG_OFFSET]), NULL, CBM_DECIMAL_BASE);
+    size_t slen = strlen(s);
+    if (start < 0 || (size_t)start >= slen) {
+        return "";
+    }
+    size_t take = slen - (size_t)start;
+    if (item->arg_count >= CYPHER_SUBSTRING_WITH_LENGTH_ARGS) {
+        long len = strtol(eval_func_arg(b, &item->args[CYPHER_FUNCTION_ARG_LENGTH]), NULL,
+                          CBM_DECIMAL_BASE);
+        if (len >= 0 && (size_t)len < take) {
+            take = (size_t)len;
+        }
+    }
+    if (take >= bufsz) {
+        take = bufsz - SKIP_ONE;
+    }
+    memcpy(buf, s + start, take);
+    buf[take] = '\0';
+    return buf;
+}
+
+static const char *eval_side_func(binding_t *b, const cbm_return_item_t *item, char *buf,
+                                  size_t bufsz) {
+    const char *s = eval_func_arg(b, &item->args[CYPHER_FUNCTION_ARG_VALUE]);
+    long k =
+        strtol(eval_func_arg(b, &item->args[CYPHER_FUNCTION_ARG_OFFSET]), NULL, CBM_DECIMAL_BASE);
+    size_t slen = strlen(s);
+    size_t take = 0;
+    if (k > 0) {
+        take = (size_t)k < slen ? (size_t)k : slen;
+    }
+    if (take >= bufsz) {
+        take = bufsz - SKIP_ONE;
+    }
+    const char *start = strcmp(item->func, "left") == 0 ? s : s + slen - take;
+    memcpy(buf, start, take);
+    buf[take] = '\0';
+    return buf;
+}
+
+static const char *eval_replace_func(binding_t *b, const cbm_return_item_t *item, char *buf,
+                                     size_t bufsz) {
+    const char *s = eval_func_arg(b, &item->args[CYPHER_FUNCTION_ARG_VALUE]);
+    const char *from = eval_func_arg(b, &item->args[CYPHER_FUNCTION_ARG_OFFSET]);
+    const char *to = eval_func_arg(b, &item->args[CYPHER_FUNCTION_ARG_LENGTH]);
+    size_t fromlen = strlen(from);
+    size_t tolen = strlen(to);
+    if (fromlen == 0) {
+        snprintf(buf, bufsz, "%s", s);
+        return buf;
+    }
+    size_t pos = 0;
+    for (const char *p = s; *p && pos < bufsz - SKIP_ONE;) {
+        if (strncmp(p, from, fromlen) == 0) {
+            size_t take = tolen;
+            if (pos + take >= bufsz) {
+                take = bufsz - SKIP_ONE - pos;
+            }
+            memcpy(buf + pos, to, take);
+            pos += take;
+            p += fromlen;
+        } else {
+            buf[pos++] = *p++;
+        }
+    }
+    buf[pos] = '\0';
+    return buf;
+}
+
 /* Evaluate a multi-argument scalar function into func_buf (or a direct value). */
 static const char *eval_multiarg_func(binding_t *b, const cbm_return_item_t *item, char *buf,
                                       size_t bufsz) {
     const char *f = item->func;
-    int n = item->arg_count;
     if (strcmp(f, "coalesce") == 0) {
-        for (int i = 0; i < n; i++) {
-            const char *v = eval_func_arg(b, &item->args[i]);
-            if (v && v[0]) {
-                return v;
-            }
-        }
-        return "";
+        return eval_coalesce_func(b, item);
     }
-    if (strcmp(f, "substring") == 0 && n >= 2) {
-        const char *s = eval_func_arg(b, &item->args[0]);
-        long start = strtol(eval_func_arg(b, &item->args[1]), NULL, CBM_DECIMAL_BASE);
-        size_t slen = strlen(s);
-        if (start < 0 || (size_t)start >= slen) {
-            return "";
-        }
-        size_t take = slen - (size_t)start;
-        if (n >= 3) {
-            long len = strtol(eval_func_arg(b, &item->args[2]), NULL, CBM_DECIMAL_BASE);
-            if (len < 0) {
-                len = 0;
-            }
-            if ((size_t)len < take) {
-                take = (size_t)len;
-            }
-        }
-        if (take >= bufsz) {
-            take = bufsz - SKIP_ONE;
-        }
-        memcpy(buf, s + start, take);
-        buf[take] = '\0';
-        return buf;
+    if (strcmp(f, "substring") == 0 && item->arg_count >= CYPHER_SUBSTRING_MIN_ARGS) {
+        return eval_substring_func(b, item, buf, bufsz);
     }
-    if ((strcmp(f, "left") == 0 || strcmp(f, "right") == 0) && n >= 2) {
-        const char *s = eval_func_arg(b, &item->args[0]);
-        long k = strtol(eval_func_arg(b, &item->args[1]), NULL, CBM_DECIMAL_BASE);
-        if (k < 0) {
-            k = 0;
-        }
-        size_t slen = strlen(s);
-        size_t take = (size_t)k < slen ? (size_t)k : slen;
-        if (take >= bufsz) {
-            take = bufsz - SKIP_ONE;
-        }
-        memcpy(buf, (strcmp(f, "left") == 0) ? s : s + (slen - take), take);
-        buf[take] = '\0';
-        return buf;
+    if ((strcmp(f, "left") == 0 || strcmp(f, "right") == 0) &&
+        item->arg_count >= CYPHER_SUBSTRING_MIN_ARGS) {
+        return eval_side_func(b, item, buf, bufsz);
     }
-    if (strcmp(f, "replace") == 0 && n >= 3) {
-        const char *s = eval_func_arg(b, &item->args[0]);
-        const char *from = eval_func_arg(b, &item->args[1]);
-        const char *to = eval_func_arg(b, &item->args[2]);
-        size_t fromlen = strlen(from);
-        size_t tolen = strlen(to);
-        size_t pos = 0;
-        const char *pp = s;
-        if (fromlen == 0) {
-            snprintf(buf, bufsz, "%s", s);
-            return buf;
-        }
-        while (*pp && pos < bufsz - SKIP_ONE) {
-            if (strncmp(pp, from, fromlen) == 0) {
-                size_t cpy = tolen;
-                if (pos + cpy >= bufsz) {
-                    cpy = bufsz - SKIP_ONE - pos;
-                }
-                memcpy(buf + pos, to, cpy);
-                pos += cpy;
-                pp += fromlen;
-            } else {
-                buf[pos++] = *pp++;
-            }
-        }
-        buf[pos] = '\0';
-        return buf;
+    if (strcmp(f, "replace") == 0 && item->arg_count >= CYPHER_REPLACE_ARGS) {
+        return eval_replace_func(b, item, buf, bufsz);
     }
-    return ""; /* wrong arity → null */
+    return "";
 }
 
+static const char *project_labels(binding_t *b, const char *variable, char *buf, size_t buf_sz) {
+    cbm_node_t *node = binding_get(b, variable);
+    if (!node || !node->label) {
+        return "[]";
+    }
+    snprintf(buf, buf_sz, "[\"%s\"]", node->label);
+    return buf;
+}
+
+static const char *project_type(binding_t *b, const char *variable) {
+    cbm_edge_t *edge = binding_get_edge(b, variable);
+    return edge && edge->type ? edge->type : "";
+}
+
+static const char *project_id(binding_t *b, const char *variable, char *buf, size_t buf_sz) {
+    cbm_node_t *node = binding_get(b, variable);
+    if (node) {
+        snprintf(buf, buf_sz, "%lld", (long long)node->id);
+        return buf;
+    }
+    cbm_edge_t *edge = binding_get_edge(b, variable);
+    if (!edge) {
+        return "";
+    }
+    snprintf(buf, buf_sz, "%lld", (long long)edge->id);
+    return buf;
+}
+
+static const char *project_properties(binding_t *b, const char *variable) {
+    cbm_node_t *node = binding_get(b, variable);
+    if (node) {
+        return node->properties_json;
+    }
+    cbm_edge_t *edge = binding_get_edge(b, variable);
+    return edge ? edge->properties_json : "{}";
+}
+
+static const char *project_entity_func(binding_t *b, const cbm_return_item_t *item, char *buf,
+                                       size_t buf_sz) {
+    if (strcmp(item->func, "labels") == 0) {
+        return project_labels(b, item->variable, buf, buf_sz);
+    }
+    if (strcmp(item->func, "type") == 0) {
+        return project_type(b, item->variable);
+    }
+    if (strcmp(item->func, "id") == 0) {
+        return project_id(b, item->variable, buf, buf_sz);
+    }
+    if (strcmp(item->func, "keys") == 0) {
+        cbm_node_t *node = binding_get(b, item->variable);
+        return node ? node_keys_list(node, buf, buf_sz) : "[]";
+    }
+    return project_properties(b, item->variable);
+}
+
+static bool is_entity_func(const char *func) {
+    return func &&
+           (strcmp(func, "labels") == 0 || strcmp(func, "type") == 0 || strcmp(func, "id") == 0 ||
+            strcmp(func, "keys") == 0 || strcmp(func, "properties") == 0);
+}
+
+/* Get the value for a projected binding and return item. */
 static const char *project_item(binding_t *b, cbm_return_item_t *item, char *func_buf,
                                 size_t buf_sz) {
     if (item->kase) {
@@ -3730,58 +3870,13 @@ static const char *project_item(binding_t *b, cbm_return_item_t *item, char *fun
     if (item->args) {
         return eval_multiarg_func(b, item, func_buf, buf_sz);
     }
-    /* Entity-introspection functions operate on the bound node/edge itself,
-     * not on a scalar property value. */
-    if (item->func) {
-        if (strcmp(item->func, "labels") == 0) {
-            cbm_node_t *n = binding_get(b, item->variable);
-            if (n && n->label) {
-                snprintf(func_buf, buf_sz, "[\"%s\"]", n->label);
-                return func_buf;
-            }
-            return "[]";
-        }
-        if (strcmp(item->func, "type") == 0) {
-            cbm_edge_t *e = binding_get_edge(b, item->variable);
-            return (e && e->type) ? e->type : "";
-        }
-        if (strcmp(item->func, "id") == 0) {
-            cbm_node_t *n = binding_get(b, item->variable);
-            if (n) {
-                snprintf(func_buf, buf_sz, "%lld", (long long)n->id);
-                return func_buf;
-            }
-            cbm_edge_t *e = binding_get_edge(b, item->variable);
-            if (e) {
-                snprintf(func_buf, buf_sz, "%lld", (long long)e->id);
-                return func_buf;
-            }
-            return "";
-        }
-        if (strcmp(item->func, "keys") == 0) {
-            cbm_node_t *n = binding_get(b, item->variable);
-            return n ? node_keys_list(n, func_buf, buf_sz) : "[]";
-        }
-        if (strcmp(item->func, "properties") == 0) {
-            cbm_node_t *n = binding_get(b, item->variable);
-            if (n) {
-                return n->properties_json;
-            }
-            cbm_edge_t *e = binding_get_edge(b, item->variable);
-            if (e) {
-                return e->properties_json;
-            }
-            return "{}";
-        }
+    if (is_entity_func(item->func)) {
+        return project_entity_func(b, item, func_buf, buf_sz);
     }
     const char *raw = binding_get_virtual(b, item->variable, item->property);
     if (is_scalar_value_func(item->func)) {
         return apply_string_func(item->func, raw, func_buf, buf_sz);
     }
-    /* Copy into the caller's per-column buffer. `raw` may point to node_prop's
-     * rotating scratch buffer, which the next column's projection would overwrite
-     * before rb_add_row copies the assembled row — aliasing every such column to
-     * the last value read. The per-column func_buf gives each column stable storage. */
     if (raw && raw != func_buf && raw[0]) {
         size_t len = strlen(raw);
         if (len >= buf_sz) {
@@ -4022,6 +4117,38 @@ static void with_add_vbinding_var(binding_t *vb, const char *alias, const char *
     }
 }
 
+static void with_add_aggregate_item(binding_t *vb, const cbm_return_item_t *item, with_agg_t *agg,
+                                    int column, const char *alias) {
+    char value[CBM_SZ_64];
+    if (item->distinct && strcmp(item->func, "COUNT") == 0) {
+        snprintf(value, sizeof(value), "%d", agg->distinct_n[column]);
+    } else {
+        with_agg_format(item->func, agg, column, value, sizeof(value));
+    }
+    with_add_vbinding_var(vb, alias, value);
+}
+
+static void with_add_group_item(binding_t *vb, with_agg_t *agg, int column, const char *alias) {
+    with_add_vbinding_var(vb, alias, agg->group_vals[column]);
+    if (agg->group_node_ids[column] > 0 && vb->var_count > 0) {
+        vb->var_nodes[vb->var_count - SKIP_ONE].id = agg->group_node_ids[column];
+    }
+}
+
+static void with_aggregate_project_row(const cbm_return_clause_t *wc, with_agg_t *agg,
+                                       cbm_store_t *store, binding_t *vb) {
+    *vb = (binding_t){.store = store};
+    for (int ci = 0; ci < wc->count; ci++) {
+        char name_buf[CBM_SZ_256];
+        const char *alias = resolve_item_alias(&wc->items[ci], name_buf, sizeof(name_buf));
+        if (is_aggregate_func(wc->items[ci].func)) {
+            with_add_aggregate_item(vb, &wc->items[ci], agg, ci, alias);
+        } else {
+            with_add_group_item(vb, agg, ci, alias);
+        }
+    }
+}
+
 /* Free with_agg_t array */
 static void with_agg_free(with_agg_t *aggs, size_t agg_cnt, int item_count) {
     for (size_t a = 0; a < agg_cnt; a++) {
@@ -4066,30 +4193,9 @@ static void execute_with_aggregate(cbm_return_clause_t *wc, binding_t *bindings,
         return;
     }
     for (size_t a = 0; a < agg_cnt; a++) {
-        binding_t vb = {0};
-        /* Carry the store so node_prop can re-fetch a carried node's properties
-         * (and compute in_degree/out_degree) on the projected virtual binding. */
-        vb.store = (bind_count > 0) ? bindings[0].store : NULL;
-        for (int ci = 0; ci < wc->count; ci++) {
-            char name_buf[CBM_SZ_256];
-            const char *alias = resolve_item_alias(&wc->items[ci], name_buf, sizeof(name_buf));
-            if (is_aggregate_func(wc->items[ci].func)) {
-                char vbuf[CBM_SZ_64];
-                if (wc->items[ci].distinct && strcmp(wc->items[ci].func, "COUNT") == 0) {
-                    snprintf(vbuf, sizeof(vbuf), "%d", aggs[a].distinct_n[ci]); /* #239 */
-                } else {
-                    with_agg_format(wc->items[ci].func, &aggs[a], ci, vbuf, sizeof(vbuf));
-                }
-                with_add_vbinding_var(&vb, alias, vbuf);
-            } else {
-                with_add_vbinding_var(&vb, alias, aggs[a].group_vals[ci]);
-                /* Tag the carried virtual var with the node id (when the group
-                 * var is a node) so node_prop can re-fetch its full properties. */
-                if (aggs[a].group_node_ids[ci] > 0 && vb.var_count > 0) {
-                    vb.var_nodes[vb.var_count - 1].id = aggs[a].group_node_ids[ci];
-                }
-            }
-        }
+        binding_t vb;
+        cbm_store_t *store = bind_count > 0 ? bindings[0].store : NULL;
+        with_aggregate_project_row(wc, &aggs[a], store, &vb);
         (*vbindings)[(*vcount)++] = vb;
     }
     with_agg_free(aggs, agg_cnt, wc->count);
@@ -4727,16 +4833,78 @@ static void cross_join_with_rels(cbm_store_t *store, cbm_pattern_t *patn, bindin
  * Instead we scan only the bound terminal's edges and bind `c` to real
  * neighbours; with OPTIONAL we keep the row with `c` unbound when there are
  * none — the correct dead-code semantics. */
+static void find_terminal_edges(cbm_store_t *store, const cbm_rel_pattern_t *rel, int64_t terminal,
+                                bool scan_targets, int type_index, cbm_edge_t **edges, int *count) {
+    const char *type = rel->type_count > 0 ? rel->types[type_index] : NULL;
+    if (scan_targets) {
+        if (type) {
+            cbm_store_find_edges_by_target_type(store, terminal, type, edges, count);
+        } else {
+            cbm_store_find_edges_by_target(store, terminal, edges, count);
+        }
+    } else if (type) {
+        cbm_store_find_edges_by_source_type(store, terminal, type, edges, count);
+    } else {
+        cbm_store_find_edges_by_source(store, terminal, edges, count);
+    }
+}
+
+static void append_terminal_edge_matches(cbm_store_t *store, const cbm_rel_pattern_t *rel,
+                                         const cbm_node_pattern_t *start_node, binding_t *binding,
+                                         const char *start_var, bool scan_targets,
+                                         cbm_edge_t *edges, int edge_count, binding_t *new_bindings,
+                                         int *new_count, int max_new, int *match_count) {
+    for (int ei = 0; ei < edge_count && *new_count < max_new; ei++) {
+        int64_t node_id = scan_targets ? edges[ei].source_id : edges[ei].target_id;
+        cbm_node_t node = {0};
+        if (cbm_store_find_node_by_id(store, node_id, &node) != CBM_STORE_OK) {
+            continue;
+        }
+        if (start_node->label && !label_alt_matches(node.label, start_node->label)) {
+            node_fields_free(&node);
+            continue;
+        }
+        binding_t next = {0};
+        binding_copy(&next, binding);
+        binding_set(&next, start_var, &node);
+        if (rel->variable) {
+            binding_set_edge(&next, rel->variable, &edges[ei]);
+        }
+        node_fields_free(&node);
+        new_bindings[(*new_count)++] = next;
+        (*match_count)++;
+    }
+}
+
+static void expand_bound_terminal_binding(cbm_store_t *store, const cbm_rel_pattern_t *rel,
+                                          const cbm_node_pattern_t *start_node, binding_t *binding,
+                                          const char *terminal_var, const char *start_var,
+                                          bool scan_targets, binding_t *new_bindings,
+                                          int *new_count, int max_new, bool opt) {
+    cbm_node_t *terminal = binding_get(binding, terminal_var);
+    int matches = 0;
+    int type_count = rel->type_count > 0 ? rel->type_count : CYPHER_UNTYPED_RELATION_ITERATIONS;
+    for (int ti = 0; terminal && ti < type_count && *new_count < max_new; ti++) {
+        cbm_edge_t *edges = NULL;
+        int edge_count = 0;
+        find_terminal_edges(store, rel, terminal->id, scan_targets, ti, &edges, &edge_count);
+        append_terminal_edge_matches(store, rel, start_node, binding, start_var, scan_targets,
+                                     edges, edge_count, new_bindings, new_count, max_new, &matches);
+        cbm_store_free_edges(edges, edge_count);
+    }
+    if (opt && matches == 0 && *new_count < max_new) {
+        binding_t fallback = {0};
+        binding_copy(&fallback, binding);
+        new_bindings[(*new_count)++] = fallback;
+    }
+}
+
 static void expand_from_bound_terminal(cbm_store_t *store, cbm_pattern_t *patn,
                                        binding_t **bindings, int *bind_count, const char *start_var,
                                        bool opt) {
     cbm_rel_pattern_t *rel = &patn->rels[0];
     const cbm_node_pattern_t *start_node = &patn->nodes[0];
-    /* The relationship is written start-[r]->terminal. To enumerate the start
-     * nodes reachable from the bound terminal we invert the stored direction. */
-    bool rel_inbound = rel->direction && strcmp(rel->direction, "inbound") == 0;
-    bool scan_targets =
-        !rel_inbound; /* (start)->(term): start = edge source = scan term's inbound */
+    bool scan_targets = !rel->direction || strcmp(rel->direction, "inbound") != 0;
 
     size_t alloc_n = ((size_t)*bind_count * (size_t)CYP_GROWTH_10) + SKIP_ONE;
     binding_t *new_bindings = malloc(alloc_n * sizeof(binding_t));
@@ -4746,58 +4914,14 @@ static void expand_from_bound_terminal(cbm_store_t *store, cbm_pattern_t *patn,
     int new_count = 0;
     int max_new = (int)alloc_n;
 
+    const char *terminal_var = patn->nodes[CYPHER_PATTERN_TERMINAL_NODE_INDEX].variable;
+    if (!terminal_var) {
+        terminal_var = "";
+    }
     for (int bi = 0; bi < *bind_count && new_count < max_new; bi++) {
-        binding_t *b = &(*bindings)[bi];
-        cbm_node_t *term = binding_get(b, patn->nodes[1].variable ? patn->nodes[1].variable : "");
-        int match_count = 0;
-        if (term) {
-            for (int ti = 0;
-                 ti < (rel->type_count > 0 ? rel->type_count : 1) && new_count < max_new; ti++) {
-                cbm_edge_t *edges = NULL;
-                int edge_count = 0;
-                if (rel->type_count > 0) {
-                    if (scan_targets) {
-                        cbm_store_find_edges_by_target_type(store, term->id, rel->types[ti], &edges,
-                                                            &edge_count);
-                    } else {
-                        cbm_store_find_edges_by_source_type(store, term->id, rel->types[ti], &edges,
-                                                            &edge_count);
-                    }
-                } else if (scan_targets) {
-                    cbm_store_find_edges_by_target(store, term->id, &edges, &edge_count);
-                } else {
-                    cbm_store_find_edges_by_source(store, term->id, &edges, &edge_count);
-                }
-                for (int ei = 0; ei < edge_count && new_count < max_new; ei++) {
-                    int64_t sid = scan_targets ? edges[ei].source_id : edges[ei].target_id;
-                    cbm_node_t found = {0};
-                    if (cbm_store_find_node_by_id(store, sid, &found) != CBM_STORE_OK) {
-                        continue;
-                    }
-                    if (start_node->label && !label_alt_matches(found.label, start_node->label)) {
-                        node_fields_free(&found);
-                        continue;
-                    }
-                    binding_t nb = {0};
-                    binding_copy(&nb, b);
-                    binding_set(&nb, start_var, &found);
-                    if (rel->variable) {
-                        binding_set_edge(&nb, rel->variable, &edges[ei]);
-                    }
-                    node_fields_free(&found);
-                    new_bindings[new_count++] = nb;
-                    match_count++;
-                }
-                cbm_store_free_edges(edges, edge_count);
-            }
-        }
-        if (opt && match_count == 0 && new_count < max_new) {
-            /* No matching neighbour: keep the row with start_var left UNBOUND so
-             * `WHERE <start> IS NULL` correctly identifies the no-edge case. */
-            binding_t nb = {0};
-            binding_copy(&nb, b);
-            new_bindings[new_count++] = nb;
-        }
+        expand_bound_terminal_binding(store, rel, start_node, &(*bindings)[bi], terminal_var,
+                                      start_var, scan_targets, new_bindings, &new_count, max_new,
+                                      opt);
     }
 
     for (int bi = 0; bi < *bind_count; bi++) {
@@ -4828,8 +4952,9 @@ static int expand_additional_patterns(cbm_store_t *store, cbm_query_t *q, const 
          * bound: drive from the bound terminal instead of scanning all nodes for
          * the start var (avoids the int-overflow OOB write and the c-IS-NULL
          * corruption of #627). */
-        if (!start_bound && patn->rel_count == 1 && *bind_count > 0) {
-            const char *term_var = patn->nodes[1].variable;
+        if (!start_bound && patn->rel_count == CYPHER_SINGLE_RELATIONSHIP_COUNT &&
+            *bind_count > 0) {
+            const char *term_var = patn->nodes[CYPHER_PATTERN_TERMINAL_NODE_INDEX].variable;
             bool term_bound = term_var && binding_get(&(*bindings)[0], term_var) != NULL;
             if (term_bound) {
                 expand_from_bound_terminal(store, patn, bindings, bind_count, nvar, opt);

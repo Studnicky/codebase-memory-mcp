@@ -14,10 +14,22 @@
 
 static float g_rsq_diag[CBM_RSQ_DIM];
 enum {
+    RSQ_DIAG_HASH_SEED = UINT64_C(0x5bd1e995),
+    RSQ_DIAG_PARITY_MASK = 1,
+    RSQ_FWHT_INITIAL_BLOCK_LENGTH = 1,
+    RSQ_FWHT_BLOCK_LENGTH_SHIFT = 1,
+    RSQ_CODES_PER_BYTE = 2,
+    RSQ_CODE_BYTE_INDEX_SHIFT = 1,
+    RSQ_CODE_SECOND_POSITION = 1,
+    RSQ_LOW_NIBBLE_MASK = CBM_RSQ_LEVELS,
     RSQ_DIAG_UNINITIALIZED = 0,
-    RSQ_DIAG_INITIALIZING,
-    RSQ_DIAG_READY,
+    RSQ_DIAG_INITIALIZING = 1,
+    RSQ_DIAG_READY = 2,
 };
+static const float RSQ_DIAG_POSITIVE = 1.0F;
+static const float RSQ_DIAG_NEGATIVE = -1.0F;
+static const float RSQ_QUANTIZATION_FALLBACK_STEP = 1.0F;
+static const float RSQ_QUANTIZATION_ROUNDING_BIAS = 0.5F;
 static atomic_int g_rsq_diag_state = ATOMIC_VAR_INIT(RSQ_DIAG_UNINITIALIZED);
 
 static void rsq_init_diag(void) {
@@ -29,8 +41,8 @@ static void rsq_init_diag(void) {
     if (atomic_compare_exchange_strong_explicit(&g_rsq_diag_state, &expected, RSQ_DIAG_INITIALIZING,
                                                 memory_order_acq_rel, memory_order_acquire)) {
         for (int d = 0; d < CBM_RSQ_DIM; d++) {
-            uint64_t h = XXH3_64bits_withSeed(&d, sizeof(d), 0x5bd1e995U);
-            g_rsq_diag[d] = (h & 1U) ? 1.0F : -1.0F;
+            uint64_t h = XXH3_64bits_withSeed(&d, sizeof(d), RSQ_DIAG_HASH_SEED);
+            g_rsq_diag[d] = (h & RSQ_DIAG_PARITY_MASK) ? RSQ_DIAG_POSITIVE : RSQ_DIAG_NEGATIVE;
         }
         atomic_store_explicit(&g_rsq_diag_state, RSQ_DIAG_READY, memory_order_release);
         return;
@@ -44,8 +56,9 @@ static void rsq_init_diag(void) {
 /* ── Fast Walsh–Hadamard Transform (in place, unnormalized) ─────────── */
 
 static void rsq_fwht(float *v) {
-    for (int len = 1; len < CBM_RSQ_DIM; len <<= 1) {
-        for (int i = 0; i < CBM_RSQ_DIM; i += len << 1) {
+    for (int len = RSQ_FWHT_INITIAL_BLOCK_LENGTH; len < CBM_RSQ_DIM;
+         len <<= RSQ_FWHT_BLOCK_LENGTH_SHIFT) {
+        for (int i = 0; i < CBM_RSQ_DIM; i += len << RSQ_FWHT_BLOCK_LENGTH_SHIFT) {
             for (int j = i; j < i + len; j++) {
                 float a = v[j];
                 float b = v[j + len];
@@ -87,7 +100,7 @@ void cbm_rsq_encode(const float *v, cbm_rsq_code_t *out) {
 
     /* Per-vector scalar quantization over [lo, hi] at CBM_RSQ_BITS. */
     float range = hi - lo;
-    float step = range > 0.0F ? range / (float)CBM_RSQ_LEVELS : 1.0F;
+    float step = range > 0.0F ? range / (float)CBM_RSQ_LEVELS : RSQ_QUANTIZATION_FALLBACK_STEP;
     out->offset = lo;
     out->scale = step;
 
@@ -95,7 +108,7 @@ void cbm_rsq_encode(const float *v, cbm_rsq_code_t *out) {
     memset(out->codes, 0, sizeof(out->codes));
     for (int d = 0; d < CBM_RSQ_DIM; d++) {
         float q = (rot[d] - lo) / step;
-        int32_t c = (int32_t)(q + 0.5F);
+        int32_t c = (int32_t)(q + RSQ_QUANTIZATION_ROUNDING_BIAS);
         if (c < 0) {
             c = 0;
         }
@@ -103,10 +116,10 @@ void cbm_rsq_encode(const float *v, cbm_rsq_code_t *out) {
             c = CBM_RSQ_LEVELS;
         }
         sum += c;
-        if (d & 1) {
-            out->codes[d >> 1] |= (uint8_t)(c << 4);
+        if (d & RSQ_CODE_SECOND_POSITION) {
+            out->codes[d >> RSQ_CODE_BYTE_INDEX_SHIFT] |= (uint8_t)(c << CBM_RSQ_BITS);
         } else {
-            out->codes[d >> 1] |= (uint8_t)c;
+            out->codes[d >> RSQ_CODE_BYTE_INDEX_SHIFT] |= (uint8_t)c;
         }
     }
     out->code_sum = sum;
@@ -120,8 +133,8 @@ float cbm_rsq_ip(const cbm_rsq_code_t *a, const cbm_rsq_code_t *b) {
     for (size_t i = 0; i < CBM_RSQ_CODE_BYTES; i++) {
         uint8_t ba = a->codes[i];
         uint8_t bb = b->codes[i];
-        dot += (int64_t)(ba & 0x0F) * (bb & 0x0F);
-        dot += (int64_t)(ba >> 4) * (bb >> 4);
+        dot += (int64_t)(ba & RSQ_LOW_NIBBLE_MASK) * (bb & RSQ_LOW_NIBBLE_MASK);
+        dot += (int64_t)(ba >> CBM_RSQ_BITS) * (bb >> CBM_RSQ_BITS);
     }
     /* x_i ≈ oa + sa·ca_i, y_i ≈ ob + sb·cb_i (in the rotated space, where the
      * IP equals the original IP because the rotation is orthonormal). */
@@ -138,7 +151,8 @@ float cbm_rsq_ip(const cbm_rsq_code_t *a, const cbm_rsq_code_t *b) {
 void cbm_rsq_decode(const cbm_rsq_code_t *c, float *out) {
     for (size_t i = 0; i < CBM_RSQ_CODE_BYTES; i++) {
         uint8_t b = c->codes[i];
-        out[i * 2] = c->offset + (c->scale * (float)(b & 0x0F));
-        out[(i * 2) + 1] = c->offset + (c->scale * (float)(b >> 4));
+        out[i * RSQ_CODES_PER_BYTE] = c->offset + (c->scale * (float)(b & RSQ_LOW_NIBBLE_MASK));
+        out[(i * RSQ_CODES_PER_BYTE) + RSQ_CODE_SECOND_POSITION] =
+            c->offset + (c->scale * (float)(b >> CBM_RSQ_BITS));
     }
 }

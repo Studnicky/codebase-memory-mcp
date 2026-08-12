@@ -44,6 +44,47 @@
 #define TEXT_TEMP_SUFFIX_BYTES 80U
 #define TEXT_TEMP_ATTEMPTS 64U
 #define TEXT_OWNER_READ 0400U
+#define TEXT_BUFFER_INITIAL_CAPACITY 256U
+#define TEXT_BUFFER_GROWTH_FACTOR 2U
+#define TEXT_INDEX_STEP 1U
+#define TEXT_IO_ELEMENT_BYTES 1U
+#define TEXT_MODE_PERMISSION_MASK 0777U
+#define TEXT_TEMP_FILE_MODE 0600U
+#define TEXT_BOM_PERMITTED 1
+#define TEXT_MODE_OVERRIDE_ENABLED 1
+#define TEXT_FILE_EXISTS 1
+#define TEXT_OPERATION_FAILED 1
+#define TEXT_CONDITION_TRUE 1
+#define TEXT_CRLF_BYTES 2U
+
+#define TEXT_UTF8_ASCII_MAX_CODEPOINT 0x7fU
+#define TEXT_UTF8_TWO_BYTE_LEAD_MIN 0xc2U
+#define TEXT_UTF8_TWO_BYTE_LEAD_MAX 0xdfU
+#define TEXT_UTF8_TWO_BYTE_LENGTH 2U
+#define TEXT_UTF8_TWO_BYTE_PAYLOAD_MASK 0x1fU
+#define TEXT_UTF8_TWO_BYTE_MIN_CODEPOINT 0x80U
+#define TEXT_UTF8_THREE_BYTE_LEAD_MIN 0xe0U
+#define TEXT_UTF8_THREE_BYTE_LEAD_MAX 0xefU
+#define TEXT_UTF8_THREE_BYTE_LENGTH 3U
+#define TEXT_UTF8_THREE_BYTE_PAYLOAD_MASK 0x0fU
+#define TEXT_UTF8_THREE_BYTE_MIN_CODEPOINT 0x800U
+#define TEXT_UTF8_FOUR_BYTE_LEAD_MIN 0xf0U
+#define TEXT_UTF8_FOUR_BYTE_LEAD_MAX 0xf4U
+#define TEXT_UTF8_FOUR_BYTE_LENGTH 4U
+#define TEXT_UTF8_FOUR_BYTE_PAYLOAD_MASK 0x07U
+#define TEXT_UTF8_FOUR_BYTE_MIN_CODEPOINT 0x10000U
+#define TEXT_UTF8_CONTINUATION_PREFIX_MASK 0xc0U
+#define TEXT_UTF8_CONTINUATION_PREFIX 0x80U
+#define TEXT_UTF8_CONTINUATION_PAYLOAD_MASK 0x3fU
+#define TEXT_UTF8_CONTINUATION_PAYLOAD_BITS 6U
+#define TEXT_UTF8_MAX_CODEPOINT 0x10ffffU
+#define TEXT_UTF8_SURROGATE_MIN 0xd800U
+#define TEXT_UTF8_SURROGATE_MAX 0xdfffU
+#define TEXT_UTF8_BOM_CODEPOINT 0xfeffU
+#define TEXT_ASCII_CONTROL_LIMIT 0x20U
+#define TEXT_ASCII_DELETE_CODEPOINT 0x7fU
+#define TEXT_C1_CONTROL_MIN 0x80U
+#define TEXT_C1_CONTROL_MAX 0x9fU
 
 #ifdef CBM_TEXT_EDIT_ENABLE_TEST_API
 static CBM_TLS cbm_text_precommit_test_hook_t text_precommit_test_hook = NULL;
@@ -54,7 +95,7 @@ static CBM_TLS cbm_text_precommit_test_hook_t text_temp_closed_test_hook = NULL;
 static CBM_TLS void *text_temp_closed_test_context = NULL;
 #endif
 
-static atomic_uint text_temp_sequence = 1U;
+static atomic_uint text_temp_sequence = TEXT_INDEX_STEP;
 
 typedef struct {
     int exists;
@@ -109,23 +150,23 @@ static void text_buffer_dispose(text_buffer_t *buffer) {
 }
 
 static int text_buffer_reserve(text_buffer_t *buffer, size_t additional) {
-    if (!buffer || additional > SIZE_MAX - buffer->len - 1U) {
+    if (!buffer || additional > SIZE_MAX - buffer->len - TEXT_INDEX_STEP) {
         return TEXT_ERROR;
     }
-    size_t required = buffer->len + additional + 1U;
-    if (required > (size_t)TEXT_MAX_BYTES + 1U) {
+    size_t required = buffer->len + additional + TEXT_INDEX_STEP;
+    if (required > (size_t)TEXT_MAX_BYTES + TEXT_INDEX_STEP) {
         return TEXT_ERROR;
     }
     if (required <= buffer->capacity) {
         return TEXT_OK;
     }
-    size_t capacity = buffer->capacity ? buffer->capacity : 256U;
+    size_t capacity = buffer->capacity ? buffer->capacity : TEXT_BUFFER_INITIAL_CAPACITY;
     while (capacity < required) {
-        if (capacity > SIZE_MAX / 2U) {
+        if (capacity > SIZE_MAX / TEXT_BUFFER_GROWTH_FACTOR) {
             capacity = required;
             break;
         }
-        capacity *= 2U;
+        capacity *= TEXT_BUFFER_GROWTH_FACTOR;
     }
     char *grown = (char *)realloc(buffer->data, capacity);
     if (!grown) {
@@ -169,41 +210,43 @@ static int text_decode_utf8(const unsigned char *text, size_t remaining, uint32_
         return TEXT_ERROR;
     }
     unsigned char first = text[0];
-    if (first <= 0x7fU) {
+    if (first <= TEXT_UTF8_ASCII_MAX_CODEPOINT) {
         *codepoint = first;
-        *byte_count = 1U;
+        *byte_count = TEXT_INDEX_STEP;
         return TEXT_OK;
     }
 
     size_t count;
     uint32_t value;
     uint32_t minimum;
-    if (first >= 0xc2U && first <= 0xdfU) {
-        count = 2U;
-        value = first & 0x1fU;
-        minimum = 0x80U;
-    } else if (first >= 0xe0U && first <= 0xefU) {
-        count = 3U;
-        value = first & 0x0fU;
-        minimum = 0x800U;
-    } else if (first >= 0xf0U && first <= 0xf4U) {
-        count = 4U;
-        value = first & 0x07U;
-        minimum = 0x10000U;
+    if (first >= TEXT_UTF8_TWO_BYTE_LEAD_MIN && first <= TEXT_UTF8_TWO_BYTE_LEAD_MAX) {
+        count = TEXT_UTF8_TWO_BYTE_LENGTH;
+        value = first & TEXT_UTF8_TWO_BYTE_PAYLOAD_MASK;
+        minimum = TEXT_UTF8_TWO_BYTE_MIN_CODEPOINT;
+    } else if (first >= TEXT_UTF8_THREE_BYTE_LEAD_MIN && first <= TEXT_UTF8_THREE_BYTE_LEAD_MAX) {
+        count = TEXT_UTF8_THREE_BYTE_LENGTH;
+        value = first & TEXT_UTF8_THREE_BYTE_PAYLOAD_MASK;
+        minimum = TEXT_UTF8_THREE_BYTE_MIN_CODEPOINT;
+    } else if (first >= TEXT_UTF8_FOUR_BYTE_LEAD_MIN && first <= TEXT_UTF8_FOUR_BYTE_LEAD_MAX) {
+        count = TEXT_UTF8_FOUR_BYTE_LENGTH;
+        value = first & TEXT_UTF8_FOUR_BYTE_PAYLOAD_MASK;
+        minimum = TEXT_UTF8_FOUR_BYTE_MIN_CODEPOINT;
     } else {
         return TEXT_ERROR;
     }
     if (count > remaining) {
         return TEXT_ERROR;
     }
-    for (size_t i = 1U; i < count; i++) {
+    for (size_t i = TEXT_INDEX_STEP; i < count; i++) {
         unsigned char next = text[i];
-        if ((next & 0xc0U) != 0x80U) {
+        if ((next & TEXT_UTF8_CONTINUATION_PREFIX_MASK) != TEXT_UTF8_CONTINUATION_PREFIX) {
             return TEXT_ERROR;
         }
-        value = (value << 6U) | (uint32_t)(next & 0x3fU);
+        value = (value << TEXT_UTF8_CONTINUATION_PAYLOAD_BITS) |
+                (uint32_t)(next & TEXT_UTF8_CONTINUATION_PAYLOAD_MASK);
     }
-    if (value < minimum || value > 0x10ffffU || (value >= 0xd800U && value <= 0xdfffU)) {
+    if (value < minimum || value > TEXT_UTF8_MAX_CODEPOINT ||
+        (value >= TEXT_UTF8_SURROGATE_MIN && value <= TEXT_UTF8_SURROGATE_MAX)) {
         return TEXT_ERROR;
     }
     *codepoint = value;
@@ -223,18 +266,20 @@ static int text_validate_bytes(const char *data, size_t len, int allow_initial_b
                              &byte_count) != TEXT_OK) {
             return TEXT_ERROR;
         }
-        if (codepoint == 0xfeffU) {
-            if (!(allow_initial_bom && pos == 0U && byte_count == 3U)) {
+        if (codepoint == TEXT_UTF8_BOM_CODEPOINT) {
+            if (!(allow_initial_bom && pos == 0U && byte_count == TEXT_UTF8_THREE_BYTE_LENGTH)) {
                 return TEXT_ERROR;
             }
-        } else if (codepoint < 0x20U) {
+        } else if (codepoint < TEXT_ASCII_CONTROL_LIMIT) {
             if (codepoint != '\t' && codepoint != '\n' && codepoint != '\r') {
                 return TEXT_ERROR;
             }
-            if (codepoint == '\r' && (pos + 1U >= len || data[pos + 1U] != '\n')) {
+            if (codepoint == '\r' &&
+                (pos + TEXT_INDEX_STEP >= len || data[pos + TEXT_INDEX_STEP] != '\n')) {
                 return TEXT_ERROR;
             }
-        } else if (codepoint == 0x7fU || (codepoint >= 0x80U && codepoint <= 0x9fU)) {
+        } else if (codepoint == TEXT_ASCII_DELETE_CODEPOINT ||
+                   (codepoint >= TEXT_C1_CONTROL_MIN && codepoint <= TEXT_C1_CONTROL_MAX)) {
             return TEXT_ERROR;
         }
         pos += byte_count;
@@ -268,7 +313,7 @@ static int text_snapshot_equal(const text_file_snapshot_t *left,
         return 0;
     }
     if (!left->exists) {
-        return 1;
+        return TEXT_CONDITION_TRUE;
     }
 #ifdef _WIN32
     return left->volume_serial == right->volume_serial &&
@@ -331,13 +376,13 @@ static int text_snapshot_from_handle(HANDLE handle, text_file_snapshot_t *snapsh
 }
 #else
 static int text_snapshot_from_stat(const struct stat *state, text_file_snapshot_t *snapshot) {
-    if (!S_ISREG(state->st_mode) || state->st_ino == 0 || state->st_nlink != 1U ||
+    if (!S_ISREG(state->st_mode) || state->st_ino == 0 || state->st_nlink != TEXT_INDEX_STEP ||
         state->st_size < 0 || (uint64_t)state->st_size > TEXT_MAX_BYTES ||
         (state->st_mode & (S_ISUID | S_ISGID | S_ISVTX)) != 0) {
         return TEXT_ERROR;
     }
     *snapshot = (text_file_snapshot_t){
-        .exists = 1,
+        .exists = TEXT_FILE_EXISTS,
         .device = state->st_dev,
         .inode = state->st_ino,
         .mode = state->st_mode,
@@ -378,8 +423,8 @@ static int text_snapshot_from_file(FILE *file, text_file_snapshot_t *snapshot) {
 }
 
 static int text_requested_mode_valid(int override_mode, unsigned int requested_mode) {
-    return !override_mode ||
-           ((requested_mode & ~0777U) == 0U && (requested_mode & TEXT_OWNER_READ) != 0U);
+    return !override_mode || ((requested_mode & ~TEXT_MODE_PERMISSION_MASK) == 0U &&
+                              (requested_mode & TEXT_OWNER_READ) != 0U);
 }
 
 static int text_read_file(const char *path, char **data_out, size_t *len_out,
@@ -405,7 +450,7 @@ static int text_read_file(const char *path, char **data_out, size_t *len_out,
         if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) {
             return TEXT_ERROR;
         }
-        char *empty = (char *)calloc(1U, 1U);
+        char *empty = (char *)calloc(TEXT_IO_ELEMENT_BYTES, TEXT_IO_ELEMENT_BYTES);
         if (!empty) {
             return TEXT_ERROR;
         }
@@ -418,7 +463,7 @@ static int text_read_file(const char *path, char **data_out, size_t *len_out,
         return TEXT_ERROR;
     }
     size_t len = (size_t)before.size;
-    char *data = (char *)malloc(len + 1U);
+    char *data = (char *)malloc(len + TEXT_INDEX_STEP);
     if (!data) {
         CloseHandle(handle);
         return TEXT_ERROR;
@@ -451,7 +496,7 @@ static int text_read_file(const char *path, char **data_out, size_t *len_out,
         if (lstat(path, &path_state) == 0 || errno != ENOENT) {
             return TEXT_ERROR;
         }
-        char *empty = (char *)calloc(1U, 1U);
+        char *empty = (char *)calloc(TEXT_IO_ELEMENT_BYTES, TEXT_IO_ELEMENT_BYTES);
         if (!empty) {
             return TEXT_ERROR;
         }
@@ -471,12 +516,14 @@ static int text_read_file(const char *path, char **data_out, size_t *len_out,
         return TEXT_ERROR;
     }
     size_t len = (size_t)before.size;
-    char *data = (char *)malloc(len + 1U);
+    char *data = (char *)malloc(len + TEXT_INDEX_STEP);
     if (!data) {
-        fclose(file);
+        if (fclose(file) != 0) {
+            return TEXT_ERROR;
+        }
         return TEXT_ERROR;
     }
-    size_t read_count = len == 0U ? 0U : fread(data, 1U, len, file);
+    size_t read_count = len == 0U ? 0U : fread(data, TEXT_IO_ELEMENT_BYTES, len, file);
     int read_failed = ferror(file);
     struct stat after_state;
     text_file_snapshot_t after;
@@ -589,6 +636,144 @@ static int text_replace_file(const char *temp_path, const char *path, int destin
 #endif
 }
 
+static int text_close_descriptor(int descriptor) {
+    return text_close(descriptor) == 0 ? TEXT_OK : TEXT_ERROR;
+}
+
+static int text_create_temp_file(const char *path, char *temp_path, size_t capacity,
+                                 FILE **file_out) {
+    for (unsigned attempt = 0U; attempt < TEXT_TEMP_ATTEMPTS; attempt++) {
+        unsigned sequence =
+            atomic_fetch_add_explicit(&text_temp_sequence, TEXT_INDEX_STEP, memory_order_relaxed);
+        int written = snprintf(temp_path, capacity, "%s.cbm-text-%ld-%u.tmp", path,
+                               (long)TEXT_PROCESS_ID(), sequence);
+        if (written < 0 || (size_t)written >= capacity) {
+            return TEXT_ERROR;
+        }
+        errno = 0;
+#ifdef _WIN32
+        /* The descriptor-bound identity snapshot uses GetFileInformationByHandle,
+         * so request read access as well as exclusive binary creation. */
+        *file_out = cbm_fopen(temp_path, "w+bx");
+#else
+#ifndef O_NOFOLLOW
+        return TEXT_ERROR;
+#else
+        int flags = O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW;
+#ifdef O_CLOEXEC
+        flags |= O_CLOEXEC;
+#endif
+        int descriptor = open(temp_path, flags, TEXT_TEMP_FILE_MODE);
+        if (descriptor >= 0) {
+            *file_out = text_fdopen(descriptor, "wb");
+            if (!*file_out) {
+                int saved_error = errno;
+                int close_result = text_close_descriptor(descriptor);
+                int unlink_result = cbm_unlink(temp_path);
+                errno = saved_error;
+                if (close_result != TEXT_OK || unlink_result != 0) {
+                    return TEXT_ERROR;
+                }
+            }
+        }
+#endif
+#endif
+        if (*file_out) {
+            return TEXT_OK;
+        }
+        if (errno != EEXIST) {
+            return TEXT_ERROR;
+        }
+    }
+    return TEXT_ERROR;
+}
+
+static int text_apply_temp_file_metadata(FILE *file, const text_file_snapshot_t *snapshot,
+                                         int override_mode, unsigned int requested_mode) {
+#ifndef _WIN32
+    if (snapshot->exists && fchown(cbm_fileno(file), snapshot->owner, snapshot->group) != 0) {
+        return TEXT_ERROR;
+    }
+    mode_t mode = TEXT_TEMP_FILE_MODE;
+    if (override_mode) {
+        mode = (mode_t)(requested_mode & TEXT_MODE_PERMISSION_MASK);
+    } else if (snapshot->exists) {
+        mode = snapshot->mode & TEXT_MODE_PERMISSION_MASK;
+    }
+    if (fchmod(cbm_fileno(file), mode) != 0) {
+        return TEXT_ERROR;
+    }
+#else
+    (void)file;
+    (void)snapshot;
+    (void)override_mode;
+    (void)requested_mode;
+#endif
+    return TEXT_OK;
+}
+
+static int text_temp_file_metadata_matches(const text_file_snapshot_t *snapshot, int override_mode,
+                                           unsigned int requested_mode) {
+#ifndef _WIN32
+    if (override_mode && (snapshot->owner != geteuid() ||
+                          (snapshot->mode & TEXT_MODE_PERMISSION_MASK) !=
+                              (mode_t)(requested_mode & TEXT_MODE_PERMISSION_MASK))) {
+        return TEXT_ERROR;
+    }
+#else
+    (void)snapshot;
+    (void)override_mode;
+    (void)requested_mode;
+#endif
+    return TEXT_OK;
+}
+
+static int text_finalize_temp_file(FILE *file, const char *new_data, size_t new_len,
+                                   const text_file_snapshot_t *snapshot, int override_mode,
+                                   unsigned int requested_mode,
+                                   text_file_snapshot_t *trusted_snapshot) {
+    int result = TEXT_OK;
+    if (new_len != 0U && fwrite(new_data, TEXT_IO_ELEMENT_BYTES, new_len, file) != new_len) {
+        result = TEXT_ERROR;
+    }
+    if (result == TEXT_OK && fflush(file) != 0) {
+        result = TEXT_ERROR;
+    }
+    if (result == TEXT_OK &&
+        text_apply_temp_file_metadata(file, snapshot, override_mode, requested_mode) != TEXT_OK) {
+        result = TEXT_ERROR;
+    }
+    if (result == TEXT_OK && TEXT_SYNC(cbm_fileno(file)) != 0) {
+        result = TEXT_ERROR;
+    }
+    if (result == TEXT_OK && text_snapshot_from_file(file, trusted_snapshot) != TEXT_OK) {
+        result = TEXT_ERROR;
+    }
+    if (result == TEXT_OK && text_temp_file_metadata_matches(trusted_snapshot, override_mode,
+                                                             requested_mode) != TEXT_OK) {
+        result = TEXT_ERROR;
+    }
+    if (fclose(file) != 0) {
+        result = TEXT_ERROR;
+    }
+    return result;
+}
+
+static int text_temp_file_matches(const char *temp_path,
+                                  const text_file_snapshot_t *trusted_snapshot,
+                                  const char *new_data, size_t new_len,
+                                  text_file_snapshot_t *temp_snapshot) {
+    char *temp_data = NULL;
+    size_t temp_len = 0U;
+    int read_result = text_read_file(temp_path, &temp_data, &temp_len, temp_snapshot);
+    int matches = read_result == TEXT_OK &&
+                  text_snapshot_publication_equal(trusted_snapshot, temp_snapshot) &&
+                  temp_len == new_len &&
+                  (new_len == 0U || memcmp(temp_data, new_data, new_len) == 0);
+    free(temp_data);
+    return matches ? TEXT_OK : TEXT_ERROR;
+}
+
 static int text_write_atomic_mode(const char *path, const char *new_data, size_t new_len,
                                   const char *old_data, size_t old_len,
                                   const text_file_snapshot_t *snapshot, int override_mode,
@@ -600,8 +785,8 @@ static int text_write_atomic_mode(const char *path, const char *new_data, size_t
     int content_same =
         new_len == old_len && (new_len == 0U || memcmp(new_data, old_data, new_len) == 0);
 #ifndef _WIN32
-    int mode_same =
-        snapshot->exists && (snapshot->mode & 0777U) == (mode_t)(requested_mode & 0777U);
+    int mode_same = snapshot->exists && (snapshot->mode & TEXT_MODE_PERMISSION_MASK) ==
+                                            (mode_t)(requested_mode & TEXT_MODE_PERMISSION_MASK);
 #else
     int mode_same = snapshot->exists;
 #endif
@@ -610,101 +795,24 @@ static int text_write_atomic_mode(const char *path, const char *new_data, size_t
     }
     size_t path_len = 0U;
     if (text_bounded_strlen(path, TEXT_MAX_PATH_BYTES, &path_len) != TEXT_OK ||
-        path_len > SIZE_MAX - TEXT_TEMP_SUFFIX_BYTES - 1U) {
+        path_len > SIZE_MAX - TEXT_TEMP_SUFFIX_BYTES - TEXT_INDEX_STEP) {
         return TEXT_ERROR;
     }
-    size_t capacity = path_len + TEXT_TEMP_SUFFIX_BYTES + 1U;
+    size_t capacity = path_len + TEXT_TEMP_SUFFIX_BYTES + TEXT_INDEX_STEP;
     char *temp_path = (char *)malloc(capacity);
     if (!temp_path) {
         return TEXT_ERROR;
     }
 
     FILE *file = NULL;
-    for (unsigned attempt = 0U; attempt < TEXT_TEMP_ATTEMPTS; attempt++) {
-        unsigned sequence =
-            atomic_fetch_add_explicit(&text_temp_sequence, 1U, memory_order_relaxed);
-        int written = snprintf(temp_path, capacity, "%s.cbm-text-%ld-%u.tmp", path,
-                               (long)TEXT_PROCESS_ID(), sequence);
-        if (written < 0 || (size_t)written >= capacity) {
-            free(temp_path);
-            return TEXT_ERROR;
-        }
-        errno = 0;
-#ifdef _WIN32
-        /* The descriptor-bound identity snapshot uses GetFileInformationByHandle,
-         * so request read access as well as exclusive binary creation. */
-        file = cbm_fopen(temp_path, "w+bx");
-#else
-#ifndef O_NOFOLLOW
-        free(temp_path);
-        return TEXT_ERROR;
-#else
-        int flags = O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW;
-#ifdef O_CLOEXEC
-        flags |= O_CLOEXEC;
-#endif
-        int descriptor = open(temp_path, flags, 0600);
-        if (descriptor >= 0) {
-            file = text_fdopen(descriptor, "wb");
-            if (!file) {
-                int saved_error = errno;
-                text_close(descriptor);
-                (void)cbm_unlink(temp_path);
-                errno = saved_error;
-            }
-        }
-#endif
-#endif
-        if (file) {
-            break;
-        }
-        if (errno != EEXIST) {
-            free(temp_path);
-            return TEXT_ERROR;
-        }
-    }
-    if (!file) {
+    if (text_create_temp_file(path, temp_path, capacity, &file) != TEXT_OK) {
         free(temp_path);
         return TEXT_ERROR;
     }
 
-    int failed = new_len != 0U && fwrite(new_data, 1U, new_len, file) != new_len;
-    if (!failed && fflush(file) != 0) {
-        failed = 1;
-    }
-#ifndef _WIN32
-    if (!failed && snapshot->exists &&
-        fchown(cbm_fileno(file), snapshot->owner, snapshot->group) != 0) {
-        failed = 1;
-    }
-    mode_t mode = 0600U;
-    if (override_mode) {
-        mode = (mode_t)(requested_mode & 0777U);
-    } else if (snapshot->exists) {
-        mode = snapshot->mode & 0777U;
-    }
-    if (!failed && fchmod(cbm_fileno(file), mode) != 0) {
-        failed = 1;
-    }
-#endif
-    if (!failed && TEXT_SYNC(cbm_fileno(file)) != 0) {
-        failed = 1;
-    }
     text_file_snapshot_t trusted_temp_snapshot = {0};
-    if (!failed && text_snapshot_from_file(file, &trusted_temp_snapshot) != TEXT_OK) {
-        failed = 1;
-    }
-#ifndef _WIN32
-    if (!failed && override_mode &&
-        (trusted_temp_snapshot.owner != geteuid() ||
-         (trusted_temp_snapshot.mode & 0777U) != (mode_t)(requested_mode & 0777U))) {
-        failed = 1;
-    }
-#endif
-    if (fclose(file) != 0) {
-        failed = 1;
-    }
-    if (failed) {
+    if (text_finalize_temp_file(file, new_data, new_len, snapshot, override_mode, requested_mode,
+                                &trusted_temp_snapshot) != TEXT_OK) {
         (void)cbm_unlink(temp_path);
         free(temp_path);
         return TEXT_ERROR;
@@ -714,18 +822,13 @@ static int text_write_atomic_mode(const char *path, const char *new_data, size_t
         text_temp_closed_test_hook(temp_path, text_temp_closed_test_context);
     }
 #endif
-    char *temp_data = NULL;
-    size_t temp_len = 0U;
     text_file_snapshot_t temp_snapshot;
-    if (text_read_file(temp_path, &temp_data, &temp_len, &temp_snapshot) != TEXT_OK ||
-        !text_snapshot_publication_equal(&trusted_temp_snapshot, &temp_snapshot) ||
-        temp_len != new_len || (new_len != 0U && memcmp(temp_data, new_data, new_len) != 0)) {
-        free(temp_data);
+    if (text_temp_file_matches(temp_path, &trusted_temp_snapshot, new_data, new_len,
+                               &temp_snapshot) != TEXT_OK) {
         (void)cbm_unlink(temp_path);
         free(temp_path);
         return TEXT_ERROR;
     }
-    free(temp_data);
 
 #ifdef CBM_TEXT_EDIT_ENABLE_TEST_API
     if (text_precommit_test_hook) {
@@ -810,10 +913,10 @@ void cbm_text_set_temp_closed_hook_for_testing(cbm_text_precommit_test_hook_t ho
 }
 #endif
 
-static int text_bytes_equal(const char *data, size_t start, size_t end, const char *value,
-                            size_t value_len) {
-    return end >= start && end - start == value_len &&
-           (value_len == 0U || memcmp(data + start, value, value_len) == 0);
+static int text_line_matches_marker(const char *data, const char *marker, size_t marker_len,
+                                    size_t line_start, size_t line_end) {
+    return line_end >= line_start && line_end - line_start == marker_len &&
+           (marker_len == 0U || memcmp(data + line_start, marker, marker_len) == 0);
 }
 
 static size_t text_count_occurrences(const char *data, size_t len, const char *needle,
@@ -847,21 +950,21 @@ static int text_scan_managed_region(const char *data, size_t len, size_t bom_len
             cursor++;
         }
         size_t text_end = cursor;
-        if (text_end > line_start && data[text_end - 1U] == '\r') {
+        if (text_end > line_start && data[text_end - TEXT_INDEX_STEP] == '\r') {
             text_end--;
         }
-        size_t full_end = cursor < len ? cursor + 1U : cursor;
-        if (text_bytes_equal(data, line_start, text_end, begin_marker, begin_len)) {
+        size_t full_end = cursor < len ? cursor + TEXT_INDEX_STEP : cursor;
+        if (text_line_matches_marker(data, begin_marker, begin_len, line_start, text_end)) {
             begin_count++;
-            if (begin_count == 1U) {
+            if (begin_count == TEXT_INDEX_STEP) {
                 region->begin_start = line_start;
                 region->begin_text_end = text_end;
                 region->begin_full_end = full_end;
             }
         }
-        if (text_bytes_equal(data, line_start, text_end, end_marker, end_len)) {
+        if (text_line_matches_marker(data, end_marker, end_len, line_start, text_end)) {
             end_count++;
-            if (end_count == 1U) {
+            if (end_count == TEXT_INDEX_STEP) {
                 region->end_start = line_start;
                 region->end_text_end = text_end;
                 region->end_full_end = full_end;
@@ -873,8 +976,8 @@ static int text_scan_managed_region(const char *data, size_t len, size_t bom_len
         text_count_occurrences(data + bom_len, len - bom_len, begin_marker, begin_len);
     size_t raw_end_count =
         text_count_occurrences(data + bom_len, len - bom_len, end_marker, end_len);
-    if (raw_begin_count != begin_count || raw_end_count != end_count || begin_count > 1U ||
-        end_count > 1U || begin_count != end_count) {
+    if (raw_begin_count != begin_count || raw_end_count != end_count ||
+        begin_count > TEXT_INDEX_STEP || end_count > TEXT_INDEX_STEP || begin_count != end_count) {
         return TEXT_ERROR;
     }
     if (begin_count == 0U) {
@@ -885,7 +988,7 @@ static int text_scan_managed_region(const char *data, size_t len, size_t bom_len
         region->begin_full_end > region->end_start) {
         return TEXT_ERROR;
     }
-    region->present = 1;
+    region->present = TEXT_CONDITION_TRUE;
     return TEXT_OK;
 }
 
@@ -893,18 +996,18 @@ static void text_detect_eol(const char *data, size_t len, const char **eol_out,
                             size_t *eol_len_out) {
     for (size_t pos = 0U; pos < len; pos++) {
         if (data[pos] == '\n') {
-            if (pos > 0U && data[pos - 1U] == '\r') {
+            if (pos > 0U && data[pos - TEXT_INDEX_STEP] == '\r') {
                 *eol_out = "\r\n";
-                *eol_len_out = 2U;
+                *eol_len_out = TEXT_CRLF_BYTES;
             } else {
                 *eol_out = "\n";
-                *eol_len_out = 1U;
+                *eol_len_out = TEXT_INDEX_STEP;
             }
             return;
         }
     }
     *eol_out = "\n";
-    *eol_len_out = 1U;
+    *eol_len_out = TEXT_INDEX_STEP;
 }
 
 static int text_append_normalized(text_buffer_t *buffer, const char *content, size_t content_len,
@@ -914,7 +1017,7 @@ static int text_append_normalized(text_buffer_t *buffer, const char *content, si
     while (pos < content_len) {
         if (content[pos] == '\n') {
             size_t segment_end = pos;
-            if (segment_end > segment_start && content[segment_end - 1U] == '\r') {
+            if (segment_end > segment_start && content[segment_end - TEXT_INDEX_STEP] == '\r') {
                 segment_end--;
             }
             if (text_buffer_append(buffer, content + segment_start, segment_end - segment_start) !=
@@ -932,7 +1035,7 @@ static int text_append_normalized(text_buffer_t *buffer, const char *content, si
 }
 
 static int text_content_ends_eol(const char *content, size_t len) {
-    return len != 0U && content[len - 1U] == '\n';
+    return len != 0U && content[len - TEXT_INDEX_STEP] == '\n';
 }
 
 static int text_append_managed_block(text_buffer_t *buffer, const char *begin_marker,
@@ -991,7 +1094,7 @@ static int text_upsert_managed_block(const char *file_path, const char *begin_ma
     size_t old_len = 0U;
     text_file_snapshot_t snapshot;
     if (text_read_file(file_path, &old_data, &old_len, &snapshot) != TEXT_OK ||
-        text_validate_bytes(old_data, old_len, 1) != TEXT_OK) {
+        text_validate_bytes(old_data, old_len, TEXT_BOM_PERMITTED) != TEXT_OK) {
         free(old_data);
         return TEXT_ERROR;
     }
@@ -1025,7 +1128,7 @@ static int text_upsert_managed_block(const char *file_path, const char *begin_ma
         size_t eol_len = 0U;
         text_detect_eol(old_data + bom_len, old_len - bom_len, &eol, &eol_len);
         int meaningful_empty = old_len == bom_len;
-        int had_final_eol = old_len > bom_len && old_data[old_len - 1U] == '\n';
+        int had_final_eol = old_len > bom_len && old_data[old_len - TEXT_INDEX_STEP] == '\n';
         if (text_buffer_append(&updated, old_data, old_len) == TEXT_OK &&
             (!meaningful_empty && !had_final_eol ? text_buffer_append(&updated, eol, eol_len)
                                                  : TEXT_OK) == TEXT_OK &&
@@ -1068,7 +1171,7 @@ int cbm_text_remove_managed_block(const char *file_path, const char *begin_marke
     size_t old_len = 0U;
     text_file_snapshot_t snapshot;
     if (text_read_file(file_path, &old_data, &old_len, &snapshot) != TEXT_OK ||
-        text_validate_bytes(old_data, old_len, 1) != TEXT_OK) {
+        text_validate_bytes(old_data, old_len, TEXT_BOM_PERMITTED) != TEXT_OK) {
         free(old_data);
         return TEXT_ERROR;
     }
@@ -1086,9 +1189,9 @@ int cbm_text_remove_managed_block(const char *file_path, const char *begin_marke
 
     size_t remove_start = region.begin_start;
     if (region.end_full_end == old_len && region.end_full_end == region.end_text_end &&
-        remove_start > bom_len && old_data[remove_start - 1U] == '\n') {
+        remove_start > bom_len && old_data[remove_start - TEXT_INDEX_STEP] == '\n') {
         remove_start--;
-        if (remove_start > bom_len && old_data[remove_start - 1U] == '\r') {
+        if (remove_start > bom_len && old_data[remove_start - TEXT_INDEX_STEP] == '\r') {
             remove_start--;
         }
     }
@@ -1109,14 +1212,14 @@ int cbm_text_write_owned_document(const char *file_path, const char *owned_conte
     size_t content_len = 0U;
     if (!text_valid_path(file_path) ||
         text_bounded_strlen(owned_content, TEXT_MAX_BYTES, &content_len) != TEXT_OK ||
-        text_validate_bytes(owned_content, content_len, 1) != TEXT_OK) {
+        text_validate_bytes(owned_content, content_len, TEXT_BOM_PERMITTED) != TEXT_OK) {
         return TEXT_ERROR;
     }
     char *old_data = NULL;
     size_t old_len = 0U;
     text_file_snapshot_t snapshot;
     if (text_read_file(file_path, &old_data, &old_len, &snapshot) != TEXT_OK ||
-        text_validate_bytes(old_data, old_len, 1) != TEXT_OK) {
+        text_validate_bytes(old_data, old_len, TEXT_BOM_PERMITTED) != TEXT_OK) {
         free(old_data);
         return TEXT_ERROR;
     }
@@ -1132,17 +1235,17 @@ int cbm_text_write_owned_document_if_unchanged(const char *file_path, const char
     size_t content_len = 0U;
     if (!text_valid_path(file_path) ||
         text_bounded_strlen(owned_content, TEXT_MAX_BYTES, &content_len) != TEXT_OK ||
-        text_validate_bytes(owned_content, content_len, 1) != TEXT_OK ||
+        text_validate_bytes(owned_content, content_len, TEXT_BOM_PERMITTED) != TEXT_OK ||
         (!expected_content && expected_length != 0U) || expected_length > TEXT_MAX_BYTES ||
         (expected_content &&
-         text_validate_bytes(expected_content, expected_length, 1) != TEXT_OK)) {
+         text_validate_bytes(expected_content, expected_length, TEXT_BOM_PERMITTED) != TEXT_OK)) {
         return TEXT_ERROR;
     }
     char *old_data = NULL;
     size_t old_len = 0U;
     text_file_snapshot_t snapshot;
     if (text_read_file(file_path, &old_data, &old_len, &snapshot) != TEXT_OK ||
-        text_validate_bytes(old_data, old_len, 1) != TEXT_OK) {
+        text_validate_bytes(old_data, old_len, TEXT_BOM_PERMITTED) != TEXT_OK) {
         free(old_data);
         return TEXT_ERROR;
     }
@@ -1165,7 +1268,7 @@ int cbm_text_create_owned_document(const char *file_path, const char *owned_cont
     size_t content_len = 0U;
     if (!text_valid_path(file_path) ||
         text_bounded_strlen(owned_content, TEXT_MAX_BYTES, &content_len) != TEXT_OK ||
-        text_validate_bytes(owned_content, content_len, 1) != TEXT_OK) {
+        text_validate_bytes(owned_content, content_len, TEXT_BOM_PERMITTED) != TEXT_OK) {
         return TEXT_ERROR;
     }
     char *old_data = NULL;
@@ -1189,7 +1292,7 @@ int cbm_text_ensure_owned_document(const char *file_path, const char *owned_cont
     size_t content_len = 0U;
     if (!text_valid_path(file_path) ||
         text_bounded_strlen(owned_content, TEXT_MAX_BYTES, &content_len) != TEXT_OK ||
-        text_validate_bytes(owned_content, content_len, 1) != TEXT_OK) {
+        text_validate_bytes(owned_content, content_len, TEXT_BOM_PERMITTED) != TEXT_OK) {
         return TEXT_ERROR;
     }
     char *old_data = NULL;
@@ -1217,7 +1320,7 @@ static int text_matches_candidate(const char *data, size_t data_len, const char 
                                   bool *matches) {
     size_t candidate_len = 0U;
     if (!matches || text_bounded_strlen(candidate, TEXT_MAX_BYTES, &candidate_len) != TEXT_OK ||
-        text_validate_bytes(candidate, candidate_len, 1) != TEXT_OK) {
+        text_validate_bytes(candidate, candidate_len, TEXT_BOM_PERMITTED) != TEXT_OK) {
         return TEXT_ERROR;
     }
     *matches =
@@ -1237,7 +1340,7 @@ int cbm_text_owned_document_status(const char *file_path, const char *current_co
     size_t current_len = 0U;
     if (!text_valid_path(file_path) ||
         text_bounded_strlen(current_content, TEXT_MAX_BYTES, &current_len) != TEXT_OK ||
-        text_validate_bytes(current_content, current_len, 1) != TEXT_OK ||
+        text_validate_bytes(current_content, current_len, TEXT_BOM_PERMITTED) != TEXT_OK ||
         (released_count > 0U && !released_contents)) {
         return TEXT_ERROR;
     }
@@ -1246,7 +1349,7 @@ int cbm_text_owned_document_status(const char *file_path, const char *current_co
     size_t old_len = 0U;
     text_file_snapshot_t snapshot;
     if (text_read_file(file_path, &old_data, &old_len, &snapshot) != TEXT_OK ||
-        text_validate_bytes(old_data, old_len, 1) != TEXT_OK) {
+        text_validate_bytes(old_data, old_len, TEXT_BOM_PERMITTED) != TEXT_OK) {
         free(old_data);
         return TEXT_ERROR;
     }
@@ -1283,7 +1386,7 @@ static int text_migrate_owned_document(const char *file_path, const char *curren
     size_t current_len = 0U;
     if (!text_valid_path(file_path) ||
         text_bounded_strlen(current_content, TEXT_MAX_BYTES, &current_len) != TEXT_OK ||
-        text_validate_bytes(current_content, current_len, 1) != TEXT_OK ||
+        text_validate_bytes(current_content, current_len, TEXT_BOM_PERMITTED) != TEXT_OK ||
         (released_count > 0U && !released_contents) ||
         !text_requested_mode_valid(override_mode, requested_mode)) {
         return TEXT_ERROR;
@@ -1299,7 +1402,7 @@ static int text_migrate_owned_document(const char *file_path, const char *curren
     size_t old_len = 0U;
     text_file_snapshot_t snapshot;
     if (text_read_file(file_path, &old_data, &old_len, &snapshot) != TEXT_OK ||
-        text_validate_bytes(old_data, old_len, 1) != TEXT_OK) {
+        text_validate_bytes(old_data, old_len, TEXT_BOM_PERMITTED) != TEXT_OK) {
         free(old_data);
         return TEXT_ERROR;
     }
@@ -1323,7 +1426,8 @@ static int text_migrate_owned_document(const char *file_path, const char *curren
     }
     if (matches) {
 #ifndef _WIN32
-        if (override_mode && (snapshot.mode & 0777U) != (mode_t)(requested_mode & 0777U)) {
+        if (override_mode && (snapshot.mode & TEXT_MODE_PERMISSION_MASK) !=
+                                 (mode_t)(requested_mode & TEXT_MODE_PERMISSION_MASK)) {
             int result = text_write_atomic_mode(file_path, current_content, current_len, old_data,
                                                 old_len, &snapshot, override_mode, requested_mode);
             free(old_data);
@@ -1359,21 +1463,21 @@ int cbm_text_migrate_owned_document_mode(const char *file_path, const char *curr
                                          const char *const *released_contents,
                                          size_t released_count, unsigned int mode) {
     return text_migrate_owned_document(file_path, current_content, released_contents,
-                                       released_count, 1, mode);
+                                       released_count, TEXT_MODE_OVERRIDE_ENABLED, mode);
 }
 
 int cbm_text_remove_owned_document(const char *file_path, const char *expected_owned_content) {
     size_t expected_len = 0U;
     if (!text_valid_path(file_path) ||
         text_bounded_strlen(expected_owned_content, TEXT_MAX_BYTES, &expected_len) != TEXT_OK ||
-        text_validate_bytes(expected_owned_content, expected_len, 1) != TEXT_OK) {
+        text_validate_bytes(expected_owned_content, expected_len, TEXT_BOM_PERMITTED) != TEXT_OK) {
         return TEXT_ERROR;
     }
     char *old_data = NULL;
     size_t old_len = 0U;
     text_file_snapshot_t snapshot;
     if (text_read_file(file_path, &old_data, &old_len, &snapshot) != TEXT_OK ||
-        text_validate_bytes(old_data, old_len, 1) != TEXT_OK) {
+        text_validate_bytes(old_data, old_len, TEXT_BOM_PERMITTED) != TEXT_OK) {
         free(old_data);
         return TEXT_ERROR;
     }
@@ -1411,7 +1515,7 @@ int cbm_text_remove_owned_document_any(const char *file_path, const char *curren
     size_t old_len = 0U;
     text_file_snapshot_t snapshot;
     if (text_read_file(file_path, &old_data, &old_len, &snapshot) != TEXT_OK ||
-        text_validate_bytes(old_data, old_len, 1) != TEXT_OK) {
+        text_validate_bytes(old_data, old_len, TEXT_BOM_PERMITTED) != TEXT_OK) {
         free(old_data);
         return TEXT_ERROR;
     }

@@ -33,6 +33,16 @@
 #include <unistd.h>
 
 enum {
+    HOST_STATUS_FAILURE = -1,
+    HOST_STATUS_SUCCESS = 0,
+    HOST_IPC_RESERVATION_ACQUIRED = 1,
+    HOST_RETRY_BACKOFF_FACTOR = 2,
+    HOST_NUMERIC_TEXT_CAP = 32,
+    HOST_TEST_PORT_OFFSET = 1,
+    HOST_TEST_FIRST_COMPARABLE_INDEX = 1,
+    HOST_TEST_EXPECTED_FREE_REFUSALS = 1,
+    HOST_TEST_CONFIG_CHANGE_LOAD = 2,
+    HOST_TEST_EXPECTED_CREATE_ATTEMPTS = 1,
     HOST_MAX_CLIENTS = 64,
     HOST_LEASE_TIMEOUT_MS = 30000,
     HOST_REQUEST_TIMEOUT_MS = 5000,
@@ -295,7 +305,7 @@ static int host_watcher_index(const char *project_name, const char *root_path, v
     host_state_t *host = opaque;
     return host && host->application
                ? cbm_daemon_application_watcher_index(project_name, root_path, host->application)
-               : -1;
+               : HOST_STATUS_FAILURE;
 }
 
 static int host_ui_index(void *opaque, const char *root_path, const char *project_name) {
@@ -303,7 +313,7 @@ static int host_ui_index(void *opaque, const char *root_path, const char *projec
     return host && host->application
                ? cbm_daemon_application_index(host->application, project_name ? project_name : "",
                                               root_path)
-               : -1;
+               : HOST_STATUS_FAILURE;
 }
 
 static bool host_ui_mutation_begin(void *opaque, const char *project) {
@@ -362,11 +372,11 @@ static int host_http_thread_schedule_create(cbm_thread_t *thread, void *(*entry)
                                             host_http_thread_create_fn create,
                                             void *create_context) {
     if (!server || !create || !cbm_http_server_schedule_run(server)) {
-        return -1;
+        return HOST_STATUS_FAILURE;
     }
     int rc = create(create_context, thread, entry, server);
     if (rc != 0 && !cbm_http_server_cancel_scheduled_run(server)) {
-        return -1;
+        return HOST_STATUS_FAILURE;
     }
     return rc;
 }
@@ -423,9 +433,10 @@ static void host_http_schedule_retry(host_state_t *host, uint64_t now_ms, const 
     if (delay > host->http_largest_scheduled_retry_ms) {
         host->http_largest_scheduled_retry_ms = delay;
     }
-    host->http_retry_delay_ms =
-        delay >= HOST_HTTP_RETRY_MAX_MS / 2U ? HOST_HTTP_RETRY_MAX_MS : delay * 2U;
-    char delay_text[32];
+    host->http_retry_delay_ms = delay >= HOST_HTTP_RETRY_MAX_MS / HOST_RETRY_BACKOFF_FACTOR
+                                    ? HOST_HTTP_RETRY_MAX_MS
+                                    : delay * HOST_RETRY_BACKOFF_FACTOR;
+    char delay_text[HOST_NUMERIC_TEXT_CAP];
     (void)snprintf(delay_text, sizeof(delay_text), "%u", delay);
     cbm_log_warn("ui.retry_scheduled", "reason", reason, "delay_ms", delay_text);
 }
@@ -626,7 +637,8 @@ static void host_http_test_config_load(void *opaque, cbm_ui_config_t *config_out
     config_out->ui_enabled = true;
     bool change_port = context->config_change_after_load > 0 &&
                        context->config_loads == context->config_change_after_load;
-    config_out->ui_port = change_port ? CBM_UI_DEFAULT_PORT + 1 : CBM_UI_DEFAULT_PORT;
+    config_out->ui_port =
+        change_port ? CBM_UI_DEFAULT_PORT + HOST_TEST_PORT_OFFSET : CBM_UI_DEFAULT_PORT;
 }
 
 static cbm_http_server_t *host_http_test_server_new(void *opaque, int port) {
@@ -673,7 +685,8 @@ static int host_http_test_thread_start(void *opaque, cbm_thread_t *thread, void 
     (void)entry_context;
     host_http_reconcile_test_context_t *context = opaque;
     context->thread_start_attempts++;
-    return context->thread_start_attempts <= context->thread_start_failures ? -1 : 0;
+    return context->thread_start_attempts <= context->thread_start_failures ? HOST_STATUS_FAILURE
+                                                                            : HOST_STATUS_SUCCESS;
 }
 
 static int host_http_test_thread_join(void *opaque, cbm_thread_t *thread) {
@@ -689,8 +702,8 @@ bool cbm_daemon_host_http_reconcile_sequence_for_test(
     if (!timestamps_ms || timestamp_count == 0 || !result_out) {
         return false;
     }
-    for (size_t i = 1; i < timestamp_count; i++) {
-        if (timestamps_ms[i] < timestamps_ms[i - 1]) {
+    for (size_t i = HOST_TEST_FIRST_COMPARABLE_INDEX; i < timestamp_count; i++) {
+        if (timestamps_ms[i] < timestamps_ms[i - HOST_TEST_FIRST_COMPARABLE_INDEX]) {
             return false;
         }
     }
@@ -743,8 +756,8 @@ bool cbm_daemon_host_http_reconcile_free_refusal_for_test(
         return false;
     }
     host_http_reconcile_test_context_t context = {
-        .server_free_failures = 1,
-        .config_change_after_load = 2,
+        .server_free_failures = HOST_TEST_EXPECTED_FREE_REFUSALS,
+        .config_change_after_load = HOST_TEST_CONFIG_CHANGE_LOAD,
     };
     const host_http_ops_t ops = {
         .context = &context,
@@ -764,9 +777,11 @@ bool cbm_daemon_host_http_reconcile_free_refusal_for_test(
     host_http_reconcile_at(&host, 0, true);
     host_http_reconcile_at(&host, HOST_HTTP_CONFIG_POLL_MS, false);
     bool retained_after_refusal =
-        host.http != NULL && !host.http_started && context.server_create_attempts == 1;
+        host.http != NULL && !host.http_started &&
+        context.server_create_attempts == HOST_TEST_EXPECTED_CREATE_ATTEMPTS;
     size_t creates_after_refusal = context.server_create_attempts;
-    host_http_reconcile_at(&host, (uint64_t)HOST_HTTP_CONFIG_POLL_MS * 2U, false);
+    host_http_reconcile_at(&host, (uint64_t)HOST_HTTP_CONFIG_POLL_MS * HOST_RETRY_BACKOFF_FACTOR,
+                           false);
     bool replacement_active = host.http != NULL && host.http_started;
 
     *result_out = (cbm_daemon_host_http_free_refusal_test_result_t){
@@ -796,10 +811,10 @@ static int host_http_thread_create_failure_for_test(
     (void)entry;
     host_http_thread_create_failure_test_t *test = opaque;
     if (!test || entry_context != test->server) {
-        return -1;
+        return HOST_STATUS_FAILURE;
     }
     test->free_refused_while_scheduled = !cbm_http_server_free(test->server);
-    return -1;
+    return HOST_STATUS_FAILURE;
 }
 
 bool cbm_daemon_host_http_thread_create_failure_lifecycle_for_test(void) {
@@ -904,6 +919,39 @@ static _Noreturn void host_force_terminate(const char *component) {
 #endif
 }
 
+static void host_shutdown_components(host_state_t *host, cbm_daemon_runtime_service_t *service) {
+    if (!host_application_shutdown(host)) {
+        host_force_terminate("operations");
+    }
+    host_background_stop(host);
+    if (!host_background_join(host)) {
+        host_force_terminate("background");
+    }
+    if (!host_runtime_stop_free(service)) {
+        host_force_terminate("runtime");
+    }
+}
+
+static void host_log_started(const cbm_daemon_host_config_t *config, const host_state_t *host) {
+    char process_id[HOST_NUMERIC_TEXT_CAP];
+    char memory_budget[HOST_NUMERIC_TEXT_CAP];
+    char physical_job_limit[HOST_NUMERIC_TEXT_CAP];
+    char worker_memory_budget[HOST_NUMERIC_TEXT_CAP];
+    (void)snprintf(process_id, sizeof(process_id), "%llu",
+                   (unsigned long long)host_current_process_id());
+    (void)snprintf(memory_budget, sizeof(memory_budget), "%zu", cbm_mem_budget());
+    (void)snprintf(physical_job_limit, sizeof(physical_job_limit), "%zu",
+                   cbm_daemon_application_physical_job_limit(host->application));
+    (void)snprintf(worker_memory_budget, sizeof(worker_memory_budget), "%zu",
+                   cbm_daemon_application_worker_memory_budget_bytes(host->application));
+    const char *cache_fingerprint =
+        config->identity.cache_fingerprint ? config->identity.cache_fingerprint : "unavailable";
+    cbm_log_info("daemon.start", "version", config->identity.semantic_version, "pid", process_id,
+                 "cache_fingerprint", cache_fingerprint, "memory_budget_bytes", memory_budget,
+                 "physical_job_limit", physical_job_limit, "worker_memory_budget_bytes",
+                 worker_memory_budget);
+}
+
 _Noreturn void cbm_daemon_host_force_terminate_for_test(const char *component) {
     char conflict_log[HOST_PATH_CAP];
     cbm_ui_log_init();
@@ -921,13 +969,13 @@ _Noreturn void cbm_daemon_host_force_terminate_for_test(const char *component) {
 int cbm_daemon_host_run(const cbm_daemon_host_config_t *config) {
     if (!config || !config->endpoint || !config->executable_path ||
         !config->identity.semantic_version || !config->identity.build_fingerprint) {
-        return -1;
+        return HOST_STATUS_FAILURE;
     }
     cbm_ui_log_init();
     char conflict_log[HOST_PATH_CAP];
     if (!host_log_open(conflict_log)) {
         (void)fprintf(stderr, "codebase-memory: daemon log path is not private or safe\n");
-        return -1;
+        return HOST_STATUS_FAILURE;
     }
     cbm_version_cohort_manager_t *cohort_manager = cbm_version_cohort_manager_new(config->endpoint);
     cbm_version_cohort_lease_t *cohort_lease = NULL;
@@ -953,16 +1001,17 @@ int cbm_daemon_host_run(const cbm_daemon_host_config_t *config) {
                       formatted ? message : "daemon exact-build admission failed");
         host_cohort_close(&cohort_lease, &cohort_manager);
         host_log_close();
-        return -1;
+        return HOST_STATUS_FAILURE;
     }
     cbm_daemon_ipc_participant_guard_t *participant_guard = NULL;
-    if (cbm_daemon_ipc_participant_guard_try_join(config->endpoint, &participant_guard) != 1) {
+    if (cbm_daemon_ipc_participant_guard_try_join(config->endpoint, &participant_guard) !=
+        HOST_IPC_RESERVATION_ACQUIRED) {
         cbm_log_error("daemon.start_failed", "component", "participant");
         (void)fprintf(stderr, "codebase-memory: daemon participant admission failed\n");
         host_participant_guard_close(&participant_guard);
         host_cohort_close(&cohort_lease, &cohort_manager);
         host_log_close();
-        return -1;
+        return HOST_STATUS_FAILURE;
     }
     cbm_version_cohort_daemon_claim_t *daemon_claim = NULL;
     uint64_t claim_deadline = host_deadline_after(HOST_DAEMON_CLAIM_TIMEOUT_MS);
@@ -980,17 +1029,18 @@ int cbm_daemon_host_run(const cbm_daemon_host_config_t *config) {
         host_daemon_claim_close(&daemon_claim);
         host_cohort_close(&cohort_lease, &cohort_manager);
         host_log_close();
-        return -1;
+        return HOST_STATUS_FAILURE;
     }
     cbm_daemon_ipc_lifetime_reservation_t *lifetime_reservation = NULL;
-    if (host_lifetime_reservation_acquire(config->endpoint, &lifetime_reservation) != 1) {
+    if (host_lifetime_reservation_acquire(config->endpoint, &lifetime_reservation) !=
+        HOST_IPC_RESERVATION_ACQUIRED) {
         cbm_log_error("daemon.start_failed", "component", "lifetime");
         cbm_daemon_ipc_lifetime_reservation_release(lifetime_reservation);
         host_participant_guard_close(&participant_guard);
         host_daemon_claim_close(&daemon_claim);
         host_cohort_close(&cohort_lease, &cohort_manager);
         host_log_close();
-        return -1;
+        return HOST_STATUS_FAILURE;
     }
     cbm_mem_init(cbm_mem_ram_fraction_for_total(cbm_system_info().total_ram));
     cbm_http_server_set_binary_path(config->executable_path);
@@ -1006,7 +1056,7 @@ int cbm_daemon_host_run(const cbm_daemon_host_config_t *config) {
         host_participant_guard_close(&participant_guard);
         host_daemon_claim_close(&daemon_claim);
         host_cohort_close(&cohort_lease, &cohort_manager);
-        return -1;
+        return HOST_STATUS_FAILURE;
     }
     cbm_daemon_runtime_application_callbacks_t callbacks =
         cbm_daemon_application_runtime_callbacks(host.application);
@@ -1033,62 +1083,28 @@ int cbm_daemon_host_run(const cbm_daemon_host_config_t *config) {
         host_participant_guard_close(&participant_guard);
         host_daemon_claim_close(&daemon_claim);
         host_cohort_close(&cohort_lease, &cohort_manager);
-        return -1;
+        return HOST_STATUS_FAILURE;
     }
     if (!host_background_start(&host)) {
         cbm_log_error("daemon.start_failed", "component", "background");
-        if (!host_application_shutdown(&host)) {
-            host_force_terminate("operations");
-        }
-        host_background_stop(&host);
-        if (!host_background_join(&host)) {
-            host_force_terminate("background");
-        }
-        if (!host_runtime_stop_free(service)) {
-            host_force_terminate("runtime");
-        }
+        host_shutdown_components(&host, service);
         host_state_free(&host);
         host_log_close();
         host_participant_guard_close(&participant_guard);
         host_daemon_claim_close(&daemon_claim);
         host_cohort_close(&cohort_lease, &cohort_manager);
-        return -1;
+        return HOST_STATUS_FAILURE;
     }
     cbm_diag_start();
 
-    char process_id[32];
-    char memory_budget[32];
-    char physical_job_limit[32];
-    char worker_memory_budget[32];
-    (void)snprintf(process_id, sizeof(process_id), "%llu",
-                   (unsigned long long)host_current_process_id());
-    (void)snprintf(memory_budget, sizeof(memory_budget), "%zu", cbm_mem_budget());
-    (void)snprintf(physical_job_limit, sizeof(physical_job_limit), "%zu",
-                   cbm_daemon_application_physical_job_limit(host.application));
-    (void)snprintf(worker_memory_budget, sizeof(worker_memory_budget), "%zu",
-                   cbm_daemon_application_worker_memory_budget_bytes(host.application));
-    cbm_log_info("daemon.start", "version", config->identity.semantic_version, "pid", process_id,
-                 "cache_fingerprint",
-                 config->identity.cache_fingerprint ? config->identity.cache_fingerprint
-                                                    : "unavailable",
-                 "memory_budget_bytes", memory_budget, "physical_job_limit", physical_job_limit,
-                 "worker_memory_budget_bytes", worker_memory_budget);
+    host_log_started(config, &host);
     if (!host_wait_for_lifetime(service, config->stop_requested, &host, config->permanent)) {
         host_force_terminate("runtime");
     }
 
     /* Prevent any new UI/watcher operation, then cancel/reap every physical
      * job before those background loops and the daemon process disappear. */
-    if (!host_application_shutdown(&host)) {
-        host_force_terminate("operations");
-    }
-    host_background_stop(&host);
-    if (!host_background_join(&host)) {
-        host_force_terminate("background");
-    }
-    if (!host_runtime_stop_free(service)) {
-        host_force_terminate("runtime");
-    }
+    host_shutdown_components(&host, service);
     host_state_free(&host);
     cbm_diag_stop();
     cbm_log_info("daemon.stop");

@@ -130,6 +130,17 @@ struct cbm_watcher {
 #define WATCHER_GIT_HEAD_MAX 4096U
 #define WATCHER_GIT_POLL_US 10000U
 
+/* Git porcelain records begin with XY plus a separating space. */
+enum {
+    WATCHER_GIT_HEAD_MIN_CAPACITY = CBM_SZ_2,
+    WATCHER_PORCELAIN_STATUS_LENGTH = PAIR_LEN,
+    WATCHER_PORCELAIN_PATH_OFFSET = WATCHER_PORCELAIN_STATUS_LENGTH + SKIP_ONE,
+    WATCHER_PENDING_FREE_GROWTH_FACTOR = CBM_SZ_2,
+    WATCHER_PENDING_FREE_INITIAL_CAPACITY = CBM_SZ_8,
+    WATCHER_SIGNATURE_NONZERO_FALLBACK = CBM_ALLOC_ONE,
+    WATCHER_STOP_REQUESTED = CBM_INIT_DONE,
+};
+
 /* ── Time helper ────────────────────────────────────────────────── */
 
 static int64_t now_ns(void) {
@@ -316,19 +327,155 @@ static bool watcher_resolve_git_executable(char output[CBM_SZ_4K]) {
 }
 #endif
 
+typedef struct {
+    cbm_proc_result_t result;
+    bool cancelled;
+    bool deadline_expired;
+    bool output_exceeded;
+    bool publication_conflict;
+} watcher_git_supervision_t;
+
+static bool watcher_git_is_stopped(const cbm_watcher_t *watcher, const project_state_t *state) {
+    return atomic_load_explicit(&watcher->stopped, memory_order_acquire) ||
+           !atomic_load_explicit(&state->registered, memory_order_acquire);
+}
+
+static bool watcher_git_prepare_output(size_t output_limit, watcher_git_output_t *output) {
+    if (output) {
+        memset(output, 0, sizeof(*output));
+    }
+    return output_limit == 0 || (output && watcher_git_output_create(output));
+}
+
+static bool watcher_git_publish(cbm_watcher_t *watcher, project_state_t *state,
+                                cbm_subprocess_t *process, bool *conflict_out) {
+    bool cancelled = false;
+    *conflict_out = false;
+    cbm_mutex_lock(&watcher->projects_lock);
+    if (state->active_git) {
+        *conflict_out = true;
+        cancelled = cbm_subprocess_request_cancel(process);
+    } else {
+        state->active_git = process;
+    }
+    if (!cancelled && watcher_git_is_stopped(watcher, state)) {
+        cancelled = cbm_subprocess_request_cancel(process);
+    }
+    cbm_mutex_unlock(&watcher->projects_lock);
+    return cancelled;
+}
+
+static void watcher_git_unpublish(cbm_watcher_t *watcher, project_state_t *state,
+                                  cbm_subprocess_t *process) {
+    cbm_mutex_lock(&watcher->projects_lock);
+    if (state->active_git == process) {
+        state->active_git = NULL;
+    }
+    cbm_mutex_unlock(&watcher->projects_lock);
+}
+
+static void watcher_git_enforce_limits(cbm_watcher_t *watcher, project_state_t *state,
+                                       cbm_subprocess_t *process, size_t output_limit,
+                                       const watcher_git_output_t *output, uint64_t started_at,
+                                       watcher_git_supervision_t *supervision) {
+    if (supervision->cancelled) {
+        return;
+    }
+    uint64_t now = cbm_now_ms();
+    if (watcher_git_is_stopped(watcher, state)) {
+        supervision->cancelled = cbm_subprocess_request_cancel(process);
+    } else if (now - started_at >= WATCHER_GIT_DEADLINE_MS) {
+        supervision->deadline_expired = true;
+        supervision->cancelled = cbm_subprocess_request_cancel(process);
+    } else if (output_limit > 0) {
+        int64_t observed_size = cbm_file_size(output->path);
+        if (observed_size > 0 && (uint64_t)observed_size > output_limit) {
+            supervision->output_exceeded = true;
+            supervision->cancelled = cbm_subprocess_request_cancel(process);
+        }
+    }
+}
+
+static void watcher_git_supervise(cbm_watcher_t *watcher, project_state_t *state,
+                                  cbm_subprocess_t *process, size_t output_limit,
+                                  const watcher_git_output_t *output,
+                                  watcher_git_supervision_t *supervision) {
+    uint64_t started_at = cbm_now_ms();
+    for (;;) {
+        watcher_git_enforce_limits(watcher, state, process, output_limit, output, started_at,
+                                   supervision);
+        cbm_proc_poll_t polled = cbm_subprocess_poll(process, &supervision->result);
+        if (polled == CBM_PROC_POLL_TERMINAL) {
+            return;
+        }
+        if (polled == CBM_PROC_POLL_ERROR) {
+            supervision->cancelled =
+                cbm_subprocess_request_cancel(process) || supervision->cancelled;
+        }
+        cbm_usleep(WATCHER_GIT_POLL_US);
+    }
+}
+
+static watcher_git_status_t watcher_git_status(const watcher_git_supervision_t *supervision) {
+    if (supervision->publication_conflict || !supervision->result.tree_quiesced ||
+        supervision->result.supervision_failed) {
+        return WATCHER_GIT_SUPERVISION_FAILED;
+    }
+    if (supervision->output_exceeded) {
+        return WATCHER_GIT_OUTPUT_LIMIT;
+    }
+    if (supervision->deadline_expired) {
+        return WATCHER_GIT_DEADLINE;
+    }
+    if (supervision->result.cancellation_requested || supervision->cancelled) {
+        return WATCHER_GIT_CANCELLED;
+    }
+    return supervision->result.outcome == CBM_PROC_CLEAN ? WATCHER_GIT_OK
+                                                         : WATCHER_GIT_COMMAND_FAILED;
+}
+
+static watcher_git_status_t watcher_git_finalize_output(watcher_git_status_t status,
+                                                        size_t output_limit,
+                                                        watcher_git_output_t *output) {
+    if (status != WATCHER_GIT_OK || output_limit == 0) {
+        return status;
+    }
+    int64_t final_size = cbm_file_size(output->path);
+    if (final_size < 0) {
+        return WATCHER_GIT_SUPERVISION_FAILED;
+    }
+    if ((uint64_t)final_size > output_limit) {
+        return WATCHER_GIT_OUTPUT_LIMIT;
+    }
+    output->size = (size_t)final_size;
+    return WATCHER_GIT_OK;
+}
+
+static const char *watcher_git_failure_reason(watcher_git_status_t status) {
+    if (status == WATCHER_GIT_DEADLINE) {
+        return "deadline";
+    }
+    if (status == WATCHER_GIT_OUTPUT_LIMIT) {
+        return "output_limit";
+    }
+    return "supervision";
+}
+
+static void watcher_git_log_failure(watcher_git_status_t status, const project_state_t *state) {
+    if (status == WATCHER_GIT_DEADLINE || status == WATCHER_GIT_OUTPUT_LIMIT ||
+        status == WATCHER_GIT_SUPERVISION_FAILED) {
+        cbm_log_warn("watcher.git.failed", "project", state->project_name, "reason",
+                     watcher_git_failure_reason(status));
+    }
+}
+
 /* Run one literal argv vector in a contained process tree. active_git is
  * published under projects_lock before supervision starts, so stop/unwatch can
  * request cancellation without racing destruction of the handle. */
 static watcher_git_status_t watcher_git_run(cbm_watcher_t *w, project_state_t *state,
                                             const char *const *argv, size_t output_limit,
                                             watcher_git_output_t *output) {
-    if (!w || !state || !argv || !argv[0]) {
-        return WATCHER_GIT_SUPERVISION_FAILED;
-    }
-    if (output) {
-        memset(output, 0, sizeof(*output));
-    }
-    if (output_limit > 0 && (!output || !watcher_git_output_create(output))) {
+    if (!w || !state || !argv || !argv[0] || !watcher_git_prepare_output(output_limit, output)) {
         return WATCHER_GIT_SUPERVISION_FAILED;
     }
 
@@ -360,94 +507,19 @@ static watcher_git_status_t watcher_git_run(cbm_watcher_t *w, project_state_t *s
         return WATCHER_GIT_SUPERVISION_FAILED;
     }
 
-    bool cancelled = false;
-    bool deadline_expired = false;
-    bool output_exceeded = false;
-    bool publication_conflict = false;
-    cbm_mutex_lock(&w->projects_lock);
-    if (state->active_git) {
-        publication_conflict = true;
-        cancelled = cbm_subprocess_request_cancel(process);
-    } else {
-        state->active_git = process;
-    }
-    if (!cancelled && (atomic_load_explicit(&w->stopped, memory_order_acquire) ||
-                       !atomic_load_explicit(&state->registered, memory_order_acquire))) {
-        cancelled = cbm_subprocess_request_cancel(process);
-    }
-    cbm_mutex_unlock(&w->projects_lock);
-
-    uint64_t started_at = cbm_now_ms();
-    cbm_proc_result_t result = {0};
-    for (;;) {
-        uint64_t now = cbm_now_ms();
-        if (!cancelled && (atomic_load_explicit(&w->stopped, memory_order_acquire) ||
-                           !atomic_load_explicit(&state->registered, memory_order_acquire))) {
-            cancelled = cbm_subprocess_request_cancel(process);
-        }
-        if (!cancelled && now - started_at >= WATCHER_GIT_DEADLINE_MS) {
-            deadline_expired = true;
-            cancelled = cbm_subprocess_request_cancel(process);
-        }
-        if (!cancelled && output_limit > 0) {
-            int64_t observed_size = cbm_file_size(output->path);
-            if (observed_size > 0 && (uint64_t)observed_size > output_limit) {
-                output_exceeded = true;
-                cancelled = cbm_subprocess_request_cancel(process);
-            }
-        }
-        cbm_proc_poll_t polled = cbm_subprocess_poll(process, &result);
-        if (polled == CBM_PROC_POLL_TERMINAL) {
-            break;
-        }
-        if (polled == CBM_PROC_POLL_ERROR) {
-            /* Valid owned handles have no ERROR transition. Fail closed, but
-             * continue polling so the contained tree is never abandoned. */
-            cancelled = cbm_subprocess_request_cancel(process) || cancelled;
-        }
-        cbm_usleep(WATCHER_GIT_POLL_US);
-    }
-
-    cbm_mutex_lock(&w->projects_lock);
-    if (state->active_git == process) {
-        state->active_git = NULL;
-    }
-    cbm_mutex_unlock(&w->projects_lock);
+    watcher_git_supervision_t supervision = {0};
+    supervision.cancelled =
+        watcher_git_publish(w, state, process, &supervision.publication_conflict);
+    watcher_git_supervise(w, state, process, output_limit, output, &supervision);
+    watcher_git_unpublish(w, state, process);
     cbm_subprocess_destroy(process);
 
-    watcher_git_status_t status = WATCHER_GIT_OK;
-    if (publication_conflict || !result.tree_quiesced || result.supervision_failed) {
-        status = WATCHER_GIT_SUPERVISION_FAILED;
-    } else if (output_exceeded) {
-        status = WATCHER_GIT_OUTPUT_LIMIT;
-    } else if (deadline_expired) {
-        status = WATCHER_GIT_DEADLINE;
-    } else if (result.cancellation_requested || cancelled) {
-        status = WATCHER_GIT_CANCELLED;
-    } else if (result.outcome != CBM_PROC_CLEAN) {
-        status = WATCHER_GIT_COMMAND_FAILED;
-    }
-
-    if (status == WATCHER_GIT_OK && output_limit > 0) {
-        int64_t final_size = cbm_file_size(output->path);
-        if (final_size < 0) {
-            status = WATCHER_GIT_SUPERVISION_FAILED;
-        } else if ((uint64_t)final_size > output_limit) {
-            status = WATCHER_GIT_OUTPUT_LIMIT;
-        } else {
-            output->size = (size_t)final_size;
-        }
-    }
+    watcher_git_status_t status =
+        watcher_git_finalize_output(watcher_git_status(&supervision), output_limit, output);
     if (status != WATCHER_GIT_OK) {
         watcher_git_output_cleanup(output);
     }
-    if (status == WATCHER_GIT_DEADLINE || status == WATCHER_GIT_OUTPUT_LIMIT ||
-        status == WATCHER_GIT_SUPERVISION_FAILED) {
-        cbm_log_warn("watcher.git.failed", "project", state->project_name, "reason",
-                     status == WATCHER_GIT_DEADLINE
-                         ? "deadline"
-                         : (status == WATCHER_GIT_OUTPUT_LIMIT ? "output_limit" : "supervision"));
-    }
+    watcher_git_log_failure(status, state);
     return status;
 }
 
@@ -458,7 +530,7 @@ static watcher_git_status_t git_repo_status(cbm_watcher_t *w, project_state_t *s
 
 static watcher_git_status_t git_head(cbm_watcher_t *w, project_state_t *state, char *out,
                                      size_t out_size) {
-    if (!out || out_size < 2) {
+    if (!out || out_size < WATCHER_GIT_HEAD_MIN_CAPACITY) {
         return WATCHER_GIT_SUPERVISION_FAILED;
     }
     out[0] = '\0';
@@ -536,40 +608,40 @@ static uint64_t sig_fold_path_stat(uint64_t h, const char *root_path, const char
  * untracked directories individually (a nested addition under `?? dir/`
  * would otherwise be invisible); -z gives unquoted NUL-separated paths that
  * hash identically across polls and stat cleanly. */
-static watcher_git_status_t git_dirty_signature(cbm_watcher_t *w, project_state_t *state,
-                                                uint64_t *signature_out) {
-    if (!signature_out) {
-        return WATCHER_GIT_SUPERVISION_FAILED;
+static void sig_fold_porcelain_entry(uint64_t *signature, bool *any, const char *entry,
+                                     size_t entry_length, bool overflow, bool *origin_token,
+                                     const char *root_path) {
+    if (entry_length == 0) {
+        return;
     }
-    *signature_out = 0;
-    const char *status_argv[] = {"git",    "--no-optional-locks", "-C",    state->root_path,
-                                 "status", "--porcelain",         "-uall", "-z",
-                                 NULL};
-    watcher_git_output_t output;
-    watcher_git_status_t status =
-        watcher_git_run(w, state, status_argv, WATCHER_GIT_OUTPUT_MAX, &output);
-    if (status != WATCHER_GIT_OK) {
-        return status;
+    *any = true;
+    *signature = sig_fold(*signature, entry, entry_length);
+    *signature = sig_fold(*signature, "", sizeof(""));
+    if (*origin_token) {
+        *origin_token = false;
+        return;
     }
-    FILE *fp = cbm_fopen(output.path, "rb");
-    if (!fp) {
-        watcher_git_output_cleanup(&output);
-        return WATCHER_GIT_SUPERVISION_FAILED;
+    if (overflow || entry_length <= WATCHER_PORCELAIN_PATH_OFFSET ||
+        entry[WATCHER_PORCELAIN_STATUS_LENGTH] != ' ') {
+        return;
     }
+    if (entry[0] == 'R' || entry[0] == 'C') {
+        *origin_token = true;
+    }
+    *signature = sig_fold_path_stat(*signature, root_path, entry + WATCHER_PORCELAIN_PATH_OFFSET);
+}
 
-    uint64_t h = SIG_FNV_OFFSET;
-    bool any = false;
+static bool sig_fold_porcelain(FILE *file, const char *root_path, uint64_t *signature, bool *any) {
     char entry[CBM_SZ_4K];
     size_t elen = 0;
     bool overflow = false;
     /* Rename/copy entries are followed by a second NUL token (the origin
      * path) that carries no XY prefix — fold it as text, don't stat it. */
     bool origin_token = false;
-    int c;
     for (;;) {
-        c = fgetc(fp);
+        int c = fgetc(file);
         if (c != EOF && c != '\0') {
-            if (elen + 1 < sizeof(entry)) {
+            if (elen + SKIP_ONE < sizeof(entry)) {
                 entry[elen] = (char)c;
             } else {
                 overflow = true; /* keep hashing prefix; skip stat for entry */
@@ -577,34 +649,28 @@ static watcher_git_status_t git_dirty_signature(cbm_watcher_t *w, project_state_
             elen++;
             continue;
         }
-        size_t stored = elen < sizeof(entry) ? elen : sizeof(entry) - 1;
+        size_t stored = elen < sizeof(entry) ? elen : sizeof(entry) - SKIP_ONE;
         entry[stored] = '\0';
-        if (stored > 0) {
-            any = true;
-            h = sig_fold(h, entry, stored);
-            h = sig_fold(h, "", 1); /* token separator */
-            if (origin_token) {
-                origin_token = false;
-            } else if (!overflow && stored > 3 && entry[2] == ' ') {
-                if (entry[0] == 'R' || entry[0] == 'C') {
-                    origin_token = true;
-                }
-                h = sig_fold_path_stat(h, state->root_path, entry + 3);
-            }
-        }
+        sig_fold_porcelain_entry(signature, any, entry, stored, overflow, &origin_token, root_path);
         elen = 0;
         overflow = false;
         if (c == EOF) {
             break;
         }
     }
-    bool parsed = !ferror(fp) && fclose(fp) == 0;
-    watcher_git_output_cleanup(&output);
-    if (!parsed) {
-        return WATCHER_GIT_SUPERVISION_FAILED;
+    return !ferror(file);
+}
+
+static void sig_trim_line(char *line) {
+    size_t length = strlen(line);
+    while (length > 0 && (line[length - SKIP_ONE] == '\n' || line[length - SKIP_ONE] == '\r')) {
+        line[--length] = '\0';
     }
+}
 
 #ifndef _WIN32
+static watcher_git_status_t sig_fold_submodules(cbm_watcher_t *watcher, project_state_t *state,
+                                                uint64_t *signature, bool *any) {
     /* `submodule foreach` necessarily evaluates its final fixed argument in
      * Git's documented POSIX-shell environment. No repository/user text is
      * interpolated into that argument; the outer process is still argv-spawned
@@ -621,31 +687,32 @@ static watcher_git_status_t git_dirty_signature(cbm_watcher_t *w, project_state_
         "git status --porcelain -uall 2>/dev/null | sed -e \"s@^\\(..\\) @\\1 $displaypath/@\"",
         NULL,
     };
+    watcher_git_output_t output;
     watcher_git_status_t submodule_status =
-        watcher_git_run(w, state, submodule_argv, WATCHER_GIT_OUTPUT_MAX, &output);
+        watcher_git_run(watcher, state, submodule_argv, WATCHER_GIT_OUTPUT_MAX, &output);
     if (submodule_status == WATCHER_GIT_OK) {
-        fp = cbm_fopen(output.path, "rb");
-        if (!fp) {
+        FILE *file = cbm_fopen(output.path, "rb");
+        if (!file) {
             watcher_git_output_cleanup(&output);
             return WATCHER_GIT_SUPERVISION_FAILED;
         }
         char line[CBM_SZ_4K];
-        while (fgets(line, sizeof(line), fp)) {
+        while (fgets(line, sizeof(line), file)) {
+            sig_trim_line(line);
             size_t len = strlen(line);
-            while (len > 0 && (line[len - SKIP_ONE] == '\n' || line[len - SKIP_ONE] == '\r')) {
-                line[--len] = '\0';
-            }
             if (len == 0) {
                 continue;
             }
-            any = true;
-            h = sig_fold(h, line, len);
-            h = sig_fold(h, "", 1);
-            if (len > 3 && line[2] == ' ') {
-                h = sig_fold_path_stat(h, state->root_path, line + 3);
+            *any = true;
+            *signature = sig_fold(*signature, line, len);
+            *signature = sig_fold(*signature, "", sizeof(""));
+            if (len > WATCHER_PORCELAIN_PATH_OFFSET &&
+                line[WATCHER_PORCELAIN_STATUS_LENGTH] == ' ') {
+                *signature = sig_fold_path_stat(*signature, state->root_path,
+                                                line + WATCHER_PORCELAIN_PATH_OFFSET);
             }
         }
-        parsed = !ferror(fp) && fclose(fp) == 0;
+        bool parsed = !ferror(file) && fclose(file) == 0;
         watcher_git_output_cleanup(&output);
         if (!parsed) {
             return WATCHER_GIT_SUPERVISION_FAILED;
@@ -653,13 +720,52 @@ static watcher_git_status_t git_dirty_signature(cbm_watcher_t *w, project_state_
     } else if (submodule_status != WATCHER_GIT_COMMAND_FAILED) {
         return submodule_status;
     }
+    return WATCHER_GIT_OK;
+}
+#endif
+
+static watcher_git_status_t git_dirty_signature(cbm_watcher_t *w, project_state_t *state,
+                                                uint64_t *signature_out) {
+    if (!signature_out) {
+        return WATCHER_GIT_SUPERVISION_FAILED;
+    }
+    *signature_out = 0;
+    const char *status_argv[] = {"git",    "--no-optional-locks", "-C",    state->root_path,
+                                 "status", "--porcelain",         "-uall", "-z",
+                                 NULL};
+    watcher_git_output_t output;
+    watcher_git_status_t status =
+        watcher_git_run(w, state, status_argv, WATCHER_GIT_OUTPUT_MAX, &output);
+    if (status != WATCHER_GIT_OK) {
+        return status;
+    }
+    FILE *file = cbm_fopen(output.path, "rb");
+    if (!file) {
+        watcher_git_output_cleanup(&output);
+        return WATCHER_GIT_SUPERVISION_FAILED;
+    }
+
+    uint64_t signature = SIG_FNV_OFFSET;
+    bool any = false;
+    bool parsed = sig_fold_porcelain(file, state->root_path, &signature, &any);
+    parsed = fclose(file) == 0 && parsed;
+    watcher_git_output_cleanup(&output);
+    if (!parsed) {
+        return WATCHER_GIT_SUPERVISION_FAILED;
+    }
+
+#ifndef _WIN32
+    status = sig_fold_submodules(w, state, &signature, &any);
+    if (status != WATCHER_GIT_OK) {
+        return status;
+    }
 #endif
 
     *signature_out = 0; /* reserve 0 for "clean" */
     if (any) {
-        *signature_out = h;
+        *signature_out = signature;
         if (*signature_out == 0) {
-            *signature_out = 1;
+            *signature_out = WATCHER_SIGNATURE_NONZERO_FALLBACK;
         }
     }
     return WATCHER_GIT_OK;
@@ -688,7 +794,7 @@ static watcher_git_status_t git_file_count(cbm_watcher_t *w, project_state_t *st
     int count = 0;
     char buf[CBM_SZ_1K];
     size_t n;
-    while ((n = fread(buf, 1, sizeof(buf), fp)) > 0) {
+    while ((n = fread(buf, sizeof(*buf), sizeof(buf), fp)) > 0) {
         for (size_t i = 0; i < n; i++) {
             if (buf[i] == '\0' && count < INT_MAX) {
                 count++;
@@ -741,7 +847,9 @@ static void state_free(project_state_t *s) {
  * a use-after-free against an in-flight poll snapshot. */
 static bool defer_state_free(cbm_watcher_t *w, project_state_t *s) {
     if (w->pending_free_count >= w->pending_free_cap) {
-        size_t new_cap = w->pending_free_cap ? w->pending_free_cap * 2 : 8;
+        size_t new_cap = w->pending_free_cap
+                             ? w->pending_free_cap * WATCHER_PENDING_FREE_GROWTH_FACTOR
+                             : WATCHER_PENDING_FREE_INITIAL_CAPACITY;
         project_state_t **tmp = realloc(w->pending_free, new_cap * sizeof(project_state_t *));
         if (!tmp) {
             cbm_log_warn("watcher.unwatch.oom", "project", s->project_name);
@@ -797,7 +905,7 @@ static long prune_grace_s(void) {
     if (raw && raw[0]) {
         errno = 0;
         char *end = NULL;
-        long v = strtol(raw, &end, 10);
+        long v = strtol(raw, &end, CBM_DECIMAL_BASE);
         if (errno == 0 && end != raw && *end == '\0' && v >= 0) {
             return v;
         }
@@ -1227,6 +1335,75 @@ static void prune_missing_project(cbm_watcher_t *w, project_state_t *s) {
     free(root_path);
 }
 
+static bool poll_root_available(poll_ctx_t *ctx, project_state_t *state) {
+    /* Classify roots before baseline, Git, and interval gates so a vanished
+     * root is pruned even when polling would otherwise be skipped. */
+    int stat_errno = 0;
+    root_status_t status = root_status(state->root_path, &stat_errno);
+    if (status == ROOT_UNCERTAIN) {
+        if (state->missing_root_count > 0) {
+            state->missing_root_count = 0;
+            state->first_missing_ms = 0;
+        }
+        cbm_log_warn("watcher.root_stat_error", "project", state->project_name, "path",
+                     state->root_path, "errno", itoa_buf(stat_errno));
+        return false;
+    }
+    if (status == ROOT_MISSING) {
+        uint64_t now_ms = cbm_now_ms();
+        if (state->missing_root_count == 0) {
+            state->first_missing_ms = now_ms;
+        }
+        state->missing_root_count++;
+        cbm_log_warn("watcher.root_missing", "project", state->project_name, "path",
+                     state->root_path, "polls", itoa_buf(state->missing_root_count));
+        if (state->missing_root_count >= MISSING_ROOT_DELETE_AFTER &&
+            now_ms - state->first_missing_ms >= (uint64_t)prune_grace_s() * CBM_MSEC_PER_SEC) {
+            prune_missing_project(ctx->w, state);
+        }
+        return false;
+    }
+    if (state->missing_root_count > 0) {
+        cbm_log_info("watcher.root_restored", "project", state->project_name, "path",
+                     state->root_path);
+        state->missing_root_count = 0;
+        state->first_missing_ms = 0;
+    }
+    return true;
+}
+
+static void poll_run_index(poll_ctx_t *ctx, project_state_t *state) {
+    /* A Git probe can outlive the owning daemon session; do not admit an
+     * index callback after unwatch tombstones the snapshot state. */
+    if (!atomic_load_explicit(&state->registered, memory_order_acquire)) {
+        return;
+    }
+    cbm_log_info("watcher.changed", "project", state->project_name, "strategy", "git");
+    if (!ctx->w->index_fn) {
+        return;
+    }
+    int result = ctx->w->index_fn(state->project_name, state->root_path, ctx->w->user_data);
+    if (result == 0) {
+        ctx->reindexed++;
+        /* Commit observations made at check time. Changes arriving during
+         * reindex remain visible to the next poll. */
+        if (state->pending_head[0] != '\0') {
+            snprintf(state->last_head, sizeof(state->last_head), "%s", state->pending_head);
+        }
+        state->last_dirty_sig = state->pending_dirty_sig;
+        int file_count = 0;
+        if (git_file_count(ctx->w, state, &file_count) == WATCHER_GIT_OK) {
+            state->file_count = file_count;
+            state->interval_ms = cbm_watcher_poll_interval_ms(state->file_count);
+        }
+    } else if (result > 0) {
+        /* Keep committed baselines so the next poll retries. */
+        cbm_log_info("watcher.index.retry", "project", state->project_name);
+    } else {
+        cbm_log_warn("watcher.index.err", "project", state->project_name);
+    }
+}
+
 static void poll_project(const char *key, void *val, void *ud) {
     (void)key;
     poll_ctx_t *ctx = ud;
@@ -1234,62 +1411,17 @@ static void poll_project(const char *key, void *val, void *ud) {
     if (!s || !atomic_load_explicit(&s->registered, memory_order_acquire)) {
         return;
     }
-
-    /* Stale-root pruning (#286): classify the root BEFORE the baseline /
-     * is_git / interval gates so vanished roots are noticed even for
-     * non-git projects and regardless of adaptive backoff. */
-    int stat_errno = 0;
-    root_status_t rs = root_status(s->root_path, &stat_errno);
-    if (rs == ROOT_UNCERTAIN) {
-        /* EACCES / EIO / network blip / TCC revocation — the root may still
-         * exist. Never count toward pruning; restart the streak so only an
-         * uninterrupted run of genuine ENOENT/ENOTDIR observations can
-         * delete user data. */
-        if (s->missing_root_count > 0) {
-            s->missing_root_count = 0;
-            s->first_missing_ms = 0;
-        }
-        cbm_log_warn("watcher.root_stat_error", "project", s->project_name, "path", s->root_path,
-                     "errno", itoa_buf(stat_errno));
+    if (!poll_root_available(ctx, s)) {
         return;
     }
-    if (rs == ROOT_MISSING) {
-        uint64_t now_ms = cbm_now_ms();
-        if (s->missing_root_count == 0) {
-            s->first_missing_ms = now_ms;
-        }
-        s->missing_root_count++;
-        cbm_log_warn("watcher.root_missing", "project", s->project_name, "path", s->root_path,
-                     "polls", itoa_buf(s->missing_root_count));
-        if (s->missing_root_count >= MISSING_ROOT_DELETE_AFTER &&
-            now_ms - s->first_missing_ms >= (uint64_t)prune_grace_s() * CBM_MSEC_PER_SEC) {
-            prune_missing_project(ctx->w, s);
-        }
-        return;
-    }
-    if (s->missing_root_count > 0) {
-        cbm_log_info("watcher.root_restored", "project", s->project_name, "path", s->root_path);
-        s->missing_root_count = 0;
-        s->first_missing_ms = 0;
-    }
-
-    /* Initialize baseline on first poll */
     if (!s->baseline_done) {
         (void)init_baseline(ctx->w, s);
         return;
     }
-
-    /* Skip non-git projects */
-    if (!s->is_git) {
+    if (!s->is_git || ctx->now < s->next_poll_ns) {
         return;
     }
 
-    /* Respect adaptive interval */
-    if (ctx->now < s->next_poll_ns) {
-        return;
-    }
-
-    /* Check for changes */
     bool changed = false;
     if (!check_changes(ctx->w, s, &changed)) {
         return;
@@ -1299,40 +1431,7 @@ static void poll_project(const char *key, void *val, void *ud) {
         return;
     }
 
-    /* Trigger reindex */
-    if (!atomic_load_explicit(&s->registered, memory_order_acquire)) {
-        /* Git inspection can take long enough for the final owning daemon
-         * session to disconnect. Unwatch tombstones the snapshot state; do
-         * not admit an index callback after that ownership boundary. */
-        return;
-    }
-    cbm_log_info("watcher.changed", "project", s->project_name, "strategy", "git");
-    if (ctx->w->index_fn) {
-        int rc = ctx->w->index_fn(s->project_name, s->root_path, ctx->w->user_data);
-        if (rc == 0) {
-            ctx->reindexed++;
-            /* Commit the baselines OBSERVED AT CHECK TIME — the state whose
-             * reindex just succeeded. A commit/edit landing during the
-             * reindex is deliberately not absorbed: the next poll sees it
-             * as a new delta (at-least-once, never lost). */
-            if (s->pending_head[0] != '\0') {
-                snprintf(s->last_head, sizeof(s->last_head), "%s", s->pending_head);
-            }
-            s->last_dirty_sig = s->pending_dirty_sig;
-            /* Refresh file count for interval */
-            int file_count = 0;
-            if (git_file_count(ctx->w, s, &file_count) == WATCHER_GIT_OK) {
-                s->file_count = file_count;
-                s->interval_ms = cbm_watcher_poll_interval_ms(s->file_count);
-            }
-        } else if (rc > 0) {
-            /* Busy-skip: baseline stays uncommitted, next poll retries. */
-            cbm_log_info("watcher.index.retry", "project", s->project_name);
-        } else {
-            cbm_log_warn("watcher.index.err", "project", s->project_name);
-        }
-    }
-
+    poll_run_index(ctx, s);
     s->next_poll_ns = ctx->now + ((int64_t)s->interval_ms * US_PER_MS);
 }
 
@@ -1406,7 +1505,7 @@ static void cancel_active_git_entry(const char *key, void *value, void *user_dat
 
 void cbm_watcher_stop(cbm_watcher_t *w) {
     if (w) {
-        atomic_store_explicit(&w->stopped, 1, memory_order_release);
+        atomic_store_explicit(&w->stopped, WATCHER_STOP_REQUESTED, memory_order_release);
         cbm_mutex_lock(&w->projects_lock);
         cbm_ht_foreach(w->projects, cancel_active_git_entry, NULL);
         for (size_t i = 0; i < w->pending_free_count; i++) {

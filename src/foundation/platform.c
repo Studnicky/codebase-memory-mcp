@@ -16,27 +16,37 @@
 #include <string.h>
 
 #define CBM_NSEC_PER_SEC 1000000000ULL
+#define CBM_PLATFORM_BIT_STEP UINT64_C(1)
+#define CBM_PLATFORM_BIT_BASE (CBM_PLATFORM_BIT_STEP << CBM_PLATFORM_BIT_STEP)
+#define CBM_TIMEBASE_UNIT UINT32_C(1)
+
+enum {
+    CBM_DRIVE_LETTER_INDEX = 0,
+    CBM_DRIVE_COLON_INDEX = 1,
+    CBM_DRIVE_SEPARATOR_INDEX = 2,
+    CBM_MINIMUM_PROCESSOR_COUNT = 1,
+};
 
 static uint64_t cbm_platform_scale_fraction(uint64_t remainder, uint64_t multiplier,
                                             uint64_t divisor) {
     uint64_t quotient = 0;
     uint64_t reduced = 0;
-    uint64_t mask = 1;
-    while (mask <= multiplier / 2) {
-        mask <<= 1U;
+    uint64_t mask = CBM_PLATFORM_BIT_STEP;
+    while (mask <= multiplier / CBM_PLATFORM_BIT_BASE) {
+        mask <<= CBM_PLATFORM_BIT_STEP;
     }
-    for (; mask != 0; mask >>= 1U) {
-        quotient *= 2;
+    for (; mask != 0; mask >>= CBM_PLATFORM_BIT_STEP) {
+        quotient *= CBM_PLATFORM_BIT_BASE;
         if (reduced >= divisor - reduced) {
             reduced -= divisor - reduced;
-            quotient++;
+            quotient += CBM_PLATFORM_BIT_STEP;
         } else {
             reduced += reduced;
         }
         if ((multiplier & mask) != 0) {
             if (reduced >= divisor - remainder) {
                 reduced -= divisor - remainder;
-                quotient++;
+                quotient += CBM_PLATFORM_BIT_STEP;
             } else {
                 reduced += remainder;
             }
@@ -69,9 +79,10 @@ uint64_t cbm_platform_scale_counter_ns(uint64_t counter, uint64_t frequency) {
  * Only the strict drive-root form `X:/` or bare `X:` is touched, so ordinary
  * POSIX paths (which never start that way) are unaffected. */
 static void cbm_canonicalize_drive(char *path) {
-    if (path && path[0] >= 'a' && path[0] <= 'z' && path[1] == ':' &&
-        (path[2] == '/' || path[2] == '\0')) {
-        path[0] = (char)(path[0] - 'a' + 'A');
+    if (path && path[CBM_DRIVE_LETTER_INDEX] >= 'a' && path[CBM_DRIVE_LETTER_INDEX] <= 'z' &&
+        path[CBM_DRIVE_COLON_INDEX] == ':' &&
+        (path[CBM_DRIVE_SEPARATOR_INDEX] == '/' || path[CBM_DRIVE_SEPARATOR_INDEX] == '\0')) {
+        path[CBM_DRIVE_LETTER_INDEX] = (char)(path[CBM_DRIVE_LETTER_INDEX] - 'a' + 'A');
     }
 }
 
@@ -257,14 +268,14 @@ void cbm_munmap(void *addr, size_t size) {
 /* ── Timing ───────────────────────────── */
 
 #ifdef __APPLE__
-static mach_timebase_info_data_t timebase_info = {1, 1};
+static mach_timebase_info_data_t timebase_info = {CBM_TIMEBASE_UNIT, CBM_TIMEBASE_UNIT};
 static pthread_once_t timebase_once = PTHREAD_ONCE_INIT;
 
 static void cbm_timebase_initialize(void) {
     (void)mach_timebase_info(&timebase_info);
     if (timebase_info.numer == 0 || timebase_info.denom == 0) {
-        timebase_info.numer = 1;
-        timebase_info.denom = 1;
+        timebase_info.numer = CBM_TIMEBASE_UNIT;
+        timebase_info.denom = CBM_TIMEBASE_UNIT;
     }
 }
 
@@ -296,11 +307,10 @@ int cbm_nprocs(void) {
     if (sysctlbyname("hw.ncpu", &ncpu, &len, NULL, 0) == 0 && ncpu > 0) {
         return ncpu;
     }
-    enum { FILE_EXISTS = 1 };
-    return FILE_EXISTS;
+    return CBM_MINIMUM_PROCESSOR_COUNT;
 #else
     long n = sysconf(_SC_NPROCESSORS_ONLN);
-    return n > 0 ? (int)n : 1;
+    return n > 0 ? (int)n : CBM_MINIMUM_PROCESSOR_COUNT;
 #endif
 }
 

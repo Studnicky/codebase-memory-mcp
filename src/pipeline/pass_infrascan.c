@@ -1274,6 +1274,83 @@ static const char *helm_match_key(const char *content, const char *eol, const ch
     return content + kl + SKIP_ONE;
 }
 
+typedef struct {
+    const char *content;
+    const char *eol;
+    int indent;
+} helm_line_t;
+
+static bool helm_next_line(const char **cursor, helm_line_t *line) {
+    const char *start = *cursor;
+    if (!*start) {
+        return false;
+    }
+    const char *eol = strchr(start, '\n');
+    if (!eol) {
+        eol = start + strlen(start);
+    }
+    const char *content = start;
+    int indent = 0;
+    while (content < eol && *content == ' ') {
+        content++;
+        indent++;
+    }
+    *line = (helm_line_t){
+        .content = content,
+        .eol = eol,
+        .indent = indent,
+    };
+    *cursor = *eol ? eol + SKIP_ONE : eol;
+    return true;
+}
+
+static void helm_scan_top_level(const helm_line_t *line, cbm_helm_chart_t *out, bool *in_deps) {
+    *in_deps = helm_match_key(line->content, line->eol, "dependencies") != NULL;
+    const char *name_value = helm_match_key(line->content, line->eol, "name");
+    if (!*in_deps && name_value && out->chart_name[0] == '\0') {
+        helm_copy_scalar(name_value, line->eol, out->chart_name, CBM_HELM_NAME_MAX);
+    }
+}
+
+static const char *helm_dependency_content(const helm_line_t *line) {
+    const char *content = line->content;
+    if (*content != '-') {
+        return content;
+    }
+    content++;
+    while (content < line->eol && *content == ' ') {
+        content++;
+    }
+    return content;
+}
+
+static void helm_scan_dependency(const helm_line_t *line, cbm_helm_chart_t *out) {
+    const char *name_value = helm_match_key(helm_dependency_content(line), line->eol, "name");
+    if (!name_value || out->dep_count >= CBM_HELM_MAX_DEPS) {
+        return;
+    }
+    char name[CBM_HELM_NAME_MAX];
+    helm_copy_scalar(name_value, line->eol, name, sizeof(name));
+    if (!name[0]) {
+        return;
+    }
+    memcpy(out->deps[out->dep_count], name, sizeof(name));
+    out->dep_count++;
+}
+
+static void helm_scan_line(const helm_line_t *line, cbm_helm_chart_t *out, bool *in_deps) {
+    if (line->content == line->eol || *line->content == '#') {
+        return;
+    }
+    if (line->indent == 0) {
+        helm_scan_top_level(line, out, in_deps);
+        return;
+    }
+    if (*in_deps) {
+        helm_scan_dependency(line, out);
+    }
+}
+
 int cbm_parse_helm_chart(const char *source, cbm_helm_chart_t *out) {
     if (!source || !out) {
         return HELM_PARSE_INVALID;
@@ -1283,49 +1360,9 @@ int cbm_parse_helm_chart(const char *source, cbm_helm_chart_t *out) {
 
     bool in_deps = false;
     const char *p = source;
-    while (*p) {
-        const char *eol = strchr(p, '\n');
-        if (!eol) {
-            eol = p + strlen(p);
-        }
-        int indent = 0;
-        const char *content = p;
-        while (content < eol && *content == ' ') {
-            content++;
-            indent++;
-        }
-        if (content < eol && *content != '#') {
-            if (indent == 0) {
-                /* New top-level key ends any dependencies block. */
-                in_deps = (helm_match_key(content, eol, "dependencies") != NULL);
-                const char *nv = helm_match_key(content, eol, "name");
-                if (!in_deps && nv && out->chart_name[0] == '\0') {
-                    helm_copy_scalar(nv, eol, out->chart_name, CBM_HELM_NAME_MAX);
-                }
-            } else if (in_deps) {
-                /* List item: optional leading "- ", then look for name:. */
-                const char *q = content;
-                if (*q == '-') {
-                    q++;
-                    while (q < eol && *q == ' ') {
-                        q++;
-                    }
-                }
-                const char *nv = helm_match_key(q, eol, "name");
-                if (nv && out->dep_count < CBM_HELM_MAX_DEPS) {
-                    char buf[CBM_HELM_NAME_MAX];
-                    helm_copy_scalar(nv, eol, buf, CBM_HELM_NAME_MAX);
-                    if (buf[0]) {
-                        memcpy(out->deps[out->dep_count], buf, CBM_HELM_NAME_MAX);
-                        out->dep_count++;
-                    }
-                }
-            }
-        }
-        if (*eol == '\0') {
-            break;
-        }
-        p = eol + SKIP_ONE;
+    helm_line_t line;
+    while (helm_next_line(&p, &line)) {
+        helm_scan_line(&line, out, &in_deps);
     }
     return (out->chart_name[0] || out->dep_count > 0) ? HELM_PARSE_OK : HELM_PARSE_INVALID;
 }

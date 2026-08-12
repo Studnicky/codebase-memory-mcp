@@ -13,6 +13,8 @@
 #include "foundation/profile.h"  /* cbm_profile_active (keep worker log under CBM_PROFILE) */
 #include "foundation/subprocess.h"
 
+#include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -44,6 +46,33 @@ static size_t g_worker_memory_budget_bytes = 0;
 static bool g_build_fingerprint_capture_attempted = false;
 static char g_build_fingerprint[CBM_INDEX_WORKER_BUILD_FINGERPRINT_SIZE] = {0};
 
+enum {
+    INDEX_WORKER_ENV_REPLACE_EXISTING = 1,
+    INDEX_WORKER_DECIMAL_BASE = 10,
+    INDEX_WORKER_ARGV_EXECUTABLE = 0,
+    INDEX_WORKER_ARGV_MODE = 1,
+    INDEX_WORKER_ARGV_ROLE = 2,
+    INDEX_WORKER_ARGV_BUILD_FLAG = 3,
+    INDEX_WORKER_ARGV_BUILD_FINGERPRINT = 4,
+    INDEX_WORKER_ARGV_METHOD = 5,
+    INDEX_WORKER_ARGV_ARGUMENTS = 6,
+    INDEX_WORKER_ARGV_RESPONSE_FLAG = 7,
+    INDEX_WORKER_ARGV_RESPONSE_PATH = 8,
+    INDEX_WORKER_ARGV_REQUIRED_COUNT = 9,
+    INDEX_WORKER_OPTION_VALUE_OFFSET = 1,
+    INDEX_WORKER_OPTION_PAIR_WIDTH = 2,
+    INDEX_WORKER_MILLISECONDS_PER_SECOND = 1000,
+    INDEX_WORKER_STRING_TERMINATOR_BYTES = 1,
+    INDEX_WORKER_FILE_READ_ITEM_BYTES = 1,
+    INDEX_WORKER_RELAY_LINE_CAP = 1024,
+    INDEX_WORKER_TEMP_LOCK_PAUSE_US = 1000,
+    INDEX_WORKER_CACHE_DIRECTORY_MODE = 0700,
+    INDEX_WORKER_STATUS_TEXT_CAP = 16,
+    INDEX_WORKER_COUNTER_INCREMENT = 1,
+    INDEX_WORKER_HANDLE_COUNT = 1,
+    INDEX_WORKER_FAILURE_EXIT_CODE = -1,
+};
+
 void cbm_index_set_worker_role(bool is_worker, const char *response_out) {
     g_worker_active = is_worker;
     if (response_out && response_out[0]) {
@@ -55,7 +84,7 @@ void cbm_index_set_worker_role(bool is_worker, const char *response_out) {
 
 static void worker_set_local_env(const char *name, const char *value) {
     if (value && value[0]) {
-        (void)cbm_setenv(name, value, 1);
+        (void)cbm_setenv(name, value, INDEX_WORKER_ENV_REPLACE_EXISTING);
     } else {
         (void)cbm_unsetenv(name);
     }
@@ -145,10 +174,10 @@ static bool worker_parse_positive_size(const char *text, size_t *value_out) {
             return false;
         }
         size_t digit = (size_t)(*cursor - '0');
-        if (value > (SIZE_MAX - digit) / 10U) {
+        if (value > (SIZE_MAX - digit) / INDEX_WORKER_DECIMAL_BASE) {
             return false;
         }
-        value = (value * 10U) + digit;
+        value = (value * INDEX_WORKER_DECIMAL_BASE) + digit;
     }
     if (value == 0) {
         return false;
@@ -157,62 +186,102 @@ static bool worker_parse_positive_size(const char *text, size_t *value_out) {
     return true;
 }
 
+static bool worker_argv_required_valid(int argc, char *const argv[]) {
+    return argc >= INDEX_WORKER_ARGV_REQUIRED_COUNT && argv && argv[INDEX_WORKER_ARGV_EXECUTABLE] &&
+           argv[INDEX_WORKER_ARGV_EXECUTABLE][0] && argv[INDEX_WORKER_ARGV_MODE] &&
+           strcmp(argv[INDEX_WORKER_ARGV_MODE], "cli") == 0 && argv[INDEX_WORKER_ARGV_ROLE] &&
+           strcmp(argv[INDEX_WORKER_ARGV_ROLE], "--index-worker") == 0 &&
+           argv[INDEX_WORKER_ARGV_BUILD_FLAG] &&
+           strcmp(argv[INDEX_WORKER_ARGV_BUILD_FLAG], CBM_INDEX_WORKER_BUILD_ARG) == 0 &&
+           worker_fingerprint_valid(argv[INDEX_WORKER_ARGV_BUILD_FINGERPRINT]) &&
+           argv[INDEX_WORKER_ARGV_METHOD] &&
+           strcmp(argv[INDEX_WORKER_ARGV_METHOD], "index_repository") == 0 &&
+           argv[INDEX_WORKER_ARGV_ARGUMENTS] && argv[INDEX_WORKER_ARGV_ARGUMENTS][0] &&
+           argv[INDEX_WORKER_ARGV_RESPONSE_FLAG] &&
+           strcmp(argv[INDEX_WORKER_ARGV_RESPONSE_FLAG], "--response-out") == 0 &&
+           argv[INDEX_WORKER_ARGV_RESPONSE_PATH] && argv[INDEX_WORKER_ARGV_RESPONSE_PATH][0];
+}
+
+static bool worker_argument_matches_option(const char *argument, const char *option) {
+    return argument && strcmp(argument, option) == 0;
+}
+
+static bool worker_parse_optional_memory(int argc, char *const argv[], int *next,
+                                         cbm_index_worker_invocation_t *invocation) {
+    if (*next >= argc ||
+        !worker_argument_matches_option(argv[*next], CBM_INDEX_WORKER_MEMORY_BUDGET_ARG)) {
+        return true;
+    }
+    int value_index = *next + INDEX_WORKER_OPTION_VALUE_OFFSET;
+    if (value_index >= argc ||
+        !worker_parse_positive_size(argv[value_index], &invocation->memory_budget_bytes)) {
+        return false;
+    }
+    *next += INDEX_WORKER_OPTION_PAIR_WIDTH;
+    return true;
+}
+
+static void worker_parse_optional_single_thread(int argc, char *const argv[], int *next,
+                                                cbm_index_worker_invocation_t *invocation) {
+    if (*next < argc &&
+        worker_argument_matches_option(argv[*next], CBM_INDEX_WORKER_SINGLE_THREAD_ARG)) {
+        invocation->single_thread = true;
+        (*next)++;
+    }
+}
+
+static bool worker_parse_optional_path(int argc, char *const argv[], int *next, const char *option,
+                                       const char **path_out) {
+    if (*next >= argc || !worker_argument_matches_option(argv[*next], option)) {
+        return true;
+    }
+    int value_index = *next + INDEX_WORKER_OPTION_VALUE_OFFSET;
+    if (value_index >= argc || !argv[value_index] || !argv[value_index][0]) {
+        return false;
+    }
+    *path_out = argv[value_index];
+    *next += INDEX_WORKER_OPTION_PAIR_WIDTH;
+    return true;
+}
+
+static bool worker_parse_optional_arguments(int argc, char *const argv[], int *next,
+                                            cbm_index_worker_invocation_t *invocation) {
+    if (!worker_parse_optional_memory(argc, argv, next, invocation)) {
+        return false;
+    }
+    worker_parse_optional_single_thread(argc, argv, next, invocation);
+    return worker_parse_optional_path(argc, argv, next, CBM_INDEX_WORKER_MARKER_ARG,
+                                      &invocation->marker_file) &&
+           worker_parse_optional_path(argc, argv, next, CBM_INDEX_WORKER_QUARANTINE_ARG,
+                                      &invocation->quarantine_file);
+}
+
 cbm_index_worker_argv_status_t cbm_index_worker_parse_process_argv(
     int argc, char *const argv[], cbm_index_worker_invocation_t *invocation_out) {
     if (invocation_out) {
         memset(invocation_out, 0, sizeof(*invocation_out));
     }
-    bool contains_worker_role = false;
-    for (int index = 1; argv && index < argc; index++) {
-        if (argv[index] && strcmp(argv[index], "--index-worker") == 0) {
-            contains_worker_role = true;
+    bool has_worker_role = false;
+    for (int index = INDEX_WORKER_ARGV_MODE; index < argc; index++) {
+        if (worker_argument_matches_option(argv[index], "--index-worker")) {
+            has_worker_role = true;
             break;
         }
     }
-    if (!contains_worker_role) {
+    if (!has_worker_role) {
         return CBM_INDEX_WORKER_ARGV_NOT_WORKER;
     }
-    if (!invocation_out || argc < 9 || !argv || !argv[0] || !argv[0][0] || !argv[1] ||
-        strcmp(argv[1], "cli") != 0 || !argv[2] || strcmp(argv[2], "--index-worker") != 0 ||
-        !argv[3] || strcmp(argv[3], CBM_INDEX_WORKER_BUILD_ARG) != 0 ||
-        !worker_fingerprint_valid(argv[4]) || !argv[5] ||
-        strcmp(argv[5], "index_repository") != 0 || !argv[6] || !argv[6][0] || !argv[7] ||
-        strcmp(argv[7], "--response-out") != 0 || !argv[8] || !argv[8][0]) {
+    if (!invocation_out || !worker_argv_required_valid(argc, argv)) {
         return CBM_INDEX_WORKER_ARGV_INVALID;
     }
 
     cbm_index_worker_invocation_t parsed = {
-        .expected_build_fingerprint = argv[4],
-        .args_json = argv[6],
-        .response_out = argv[8],
+        .expected_build_fingerprint = argv[INDEX_WORKER_ARGV_BUILD_FINGERPRINT],
+        .args_json = argv[INDEX_WORKER_ARGV_ARGUMENTS],
+        .response_out = argv[INDEX_WORKER_ARGV_RESPONSE_PATH],
     };
-    int next = 9;
-    if (next < argc && argv[next] && strcmp(argv[next], CBM_INDEX_WORKER_MEMORY_BUDGET_ARG) == 0) {
-        if (next + 1 >= argc ||
-            !worker_parse_positive_size(argv[next + 1], &parsed.memory_budget_bytes)) {
-            return CBM_INDEX_WORKER_ARGV_INVALID;
-        }
-        next += 2;
-    }
-    if (next < argc && argv[next] && strcmp(argv[next], CBM_INDEX_WORKER_SINGLE_THREAD_ARG) == 0) {
-        parsed.single_thread = true;
-        next++;
-    }
-    if (next < argc && argv[next] && strcmp(argv[next], CBM_INDEX_WORKER_MARKER_ARG) == 0) {
-        if (next + 1 >= argc || !argv[next + 1] || !argv[next + 1][0]) {
-            return CBM_INDEX_WORKER_ARGV_INVALID;
-        }
-        parsed.marker_file = argv[next + 1];
-        next += 2;
-    }
-    if (next < argc && argv[next] && strcmp(argv[next], CBM_INDEX_WORKER_QUARANTINE_ARG) == 0) {
-        if (next + 1 >= argc || !argv[next + 1] || !argv[next + 1][0]) {
-            return CBM_INDEX_WORKER_ARGV_INVALID;
-        }
-        parsed.quarantine_file = argv[next + 1];
-        next += 2;
-    }
-    if (next != argc) {
+    int next = INDEX_WORKER_ARGV_REQUIRED_COUNT;
+    if (!worker_parse_optional_arguments(argc, argv, &next, &parsed) || next != argc) {
         return CBM_INDEX_WORKER_ARGV_INVALID;
     }
     if (!g_build_fingerprint[0]) {
@@ -287,6 +356,21 @@ static bool supervisor_disable_requested(void) {
            strcmp(supervisor_setting, "0") == 0;
 }
 
+static bool worker_parse_timeout_ms(const char *text, int *timeout_out) {
+    if (!text || !text[0]) {
+        return false;
+    }
+    errno = 0;
+    char *end = NULL;
+    long seconds = strtol(text, &end, INDEX_WORKER_DECIMAL_BASE);
+    if (errno == ERANGE || end == text || *end != '\0' || seconds <= 0 ||
+        seconds > INT_MAX / INDEX_WORKER_MILLISECONDS_PER_SECOND) {
+        return false;
+    }
+    *timeout_out = (int)(seconds * INDEX_WORKER_MILLISECONDS_PER_SECOND);
+    return true;
+}
+
 /* Quiet-timeout (ms) for a supervised worker: killed + reported as a hang if it
  * emits no NEW log line within the window. This is a NO-PROGRESS timeout — every
  * completed log line the worker tails (per-batch parallel.extract.progress every
@@ -297,13 +381,11 @@ static bool supervisor_disable_requested(void) {
 static int worker_quiet_timeout_ms(void) {
     enum { DEFAULT_QUIET_TIMEOUT_MS = 900000 }; /* 15 min with no progress */
     char timeout_seconds[CBM_SZ_32] = {0};
+    int timeout_seconds_ms = 0;
     if (cbm_safe_getenv("CBM_INDEX_WORKER_TIMEOUT_S", timeout_seconds, sizeof(timeout_seconds),
                         NULL) &&
-        timeout_seconds[0]) {
-        long s = atol(timeout_seconds);
-        if (s > 0) {
-            return (int)(s * 1000);
-        }
+        worker_parse_timeout_ms(timeout_seconds, &timeout_seconds_ms)) {
+        return timeout_seconds_ms;
     }
     return DEFAULT_QUIET_TIMEOUT_MS;
 }
@@ -341,12 +423,12 @@ static char *slurp_worker_response(const char *path, worker_response_read_status
         (void)fclose(f);
         return NULL;
     }
-    char *buf = (char *)malloc((size_t)n + 1);
+    char *buf = (char *)malloc((size_t)n + INDEX_WORKER_STRING_TERMINATOR_BYTES);
     if (!buf) {
         (void)fclose(f);
         return NULL;
     }
-    size_t rd = fread(buf, 1, (size_t)n, f);
+    size_t rd = fread(buf, INDEX_WORKER_FILE_READ_ITEM_BYTES, (size_t)n, f);
     bool complete = rd == (size_t)n && !ferror(f);
     (void)fclose(f);
     if (!complete) {
@@ -390,13 +472,9 @@ struct cbm_index_worker_handle {
  * Returns true when the relay cursor is at EOF (or no callback was requested),
  * false when another bounded poll is needed. A partial final line is deliberately
  * left undelivered, matching cbm_proc_log_cb's completed-line contract. */
-static bool worker_relay_log(cbm_index_worker_handle_t *handle) {
-    if (!handle || !handle->log_callback) {
-        return true;
-    }
-
+static FILE *worker_relay_open(const cbm_index_worker_handle_t *handle) {
 #ifdef _WIN32
-    FILE *log = cbm_fopen(handle->log_path, "rb");
+    return cbm_fopen(handle->log_path, "rb");
 #else
     int flags = O_RDONLY | O_NONBLOCK;
 #ifdef O_CLOEXEC
@@ -407,65 +485,84 @@ static bool worker_relay_log(cbm_index_worker_handle_t *handle) {
 #endif
     int descriptor = open(handle->log_path, flags);
     if (descriptor < 0) {
-        return true;
+        return NULL;
     }
     struct stat status;
     if (fstat(descriptor, &status) != 0 || !S_ISREG(status.st_mode)) {
         (void)close(descriptor);
-        return true;
+        return NULL;
     }
     FILE *log = fdopen(descriptor, "r");
-#endif
     if (!log) {
-#ifndef _WIN32
         (void)close(descriptor);
+    }
+    return log;
 #endif
+}
+
+static bool worker_relay_line(cbm_index_worker_handle_t *handle, FILE *log, size_t *delivered_lines,
+                              size_t *delivered_bytes) {
+    char line[INDEX_WORKER_RELAY_LINE_CAP];
+    long before = ftell(log);
+    if (!fgets(line, sizeof(line), log)) {
+        return false;
+    }
+    size_t length = strlen(line);
+    *delivered_bytes += length;
+    bool complete = length > 0 && line[length - INDEX_WORKER_STRING_TERMINATOR_BYTES] == '\n';
+    if (complete) {
+        line[length - INDEX_WORKER_STRING_TERMINATOR_BYTES] = '\0';
+        handle->relay_tail_pos = ftell(log);
+        (*delivered_lines)++;
+        if (line[0]) {
+            handle->log_callback(line, handle->log_context);
+        }
+        return true;
+    }
+    if (length == sizeof(line) - INDEX_WORKER_STRING_TERMINATOR_BYTES) {
+        /* Consume an oversized line in bounded chunks so it cannot pin the
+         * cursor forever. This mirrors the subprocess tailer. */
+        handle->relay_tail_pos = ftell(log);
+        (*delivered_lines)++;
+        handle->log_callback(line, handle->log_context);
+        return true;
+    }
+    /* The worker may append the rest before a later running poll. Once its
+     * process tree is quiescent this remains intentionally undelivered because
+     * callbacks are for complete lines only. */
+    handle->relay_tail_pos = before;
+    return false;
+}
+
+static bool worker_relay_drain(cbm_index_worker_handle_t *handle, FILE *log) {
+    if (fseek(log, handle->relay_tail_pos, SEEK_SET) != 0) {
+        return true;
+    }
+    size_t delivered_lines = 0;
+    size_t delivered_bytes = 0;
+    while (delivered_lines < INDEX_WORKER_RELAY_LINES_PER_POLL &&
+           delivered_bytes < INDEX_WORKER_RELAY_BYTES_PER_POLL &&
+           worker_relay_line(handle, log, &delivered_lines, &delivered_bytes)) {}
+    if (delivered_lines != INDEX_WORKER_RELAY_LINES_PER_POLL &&
+        delivered_bytes < INDEX_WORKER_RELAY_BYTES_PER_POLL) {
+        return true;
+    }
+    /* Probe without advancing the durable cursor. The FILE is closed
+     * immediately, so consuming this byte only answers whether another bounded
+     * owner-thread poll is required. */
+    return fgetc(log) == EOF;
+}
+
+static bool worker_relay_log(cbm_index_worker_handle_t *handle) {
+    if (!handle || !handle->log_callback) {
+        return true;
+    }
+    FILE *log = worker_relay_open(handle);
+    if (!log) {
         return true;
     }
 
-    bool caught_up = true;
-    if (fseek(log, handle->relay_tail_pos, SEEK_SET) == 0) {
-        char line[1024];
-        size_t delivered_lines = 0;
-        size_t delivered_bytes = 0;
-        while (delivered_lines < INDEX_WORKER_RELAY_LINES_PER_POLL &&
-               delivered_bytes < INDEX_WORKER_RELAY_BYTES_PER_POLL) {
-            long before = ftell(log);
-            if (!fgets(line, sizeof(line), log)) {
-                break;
-            }
-            size_t length = strlen(line);
-            delivered_bytes += length;
-            bool complete = length > 0 && line[length - 1] == '\n';
-            if (complete) {
-                line[length - 1] = '\0';
-                handle->relay_tail_pos = ftell(log);
-                delivered_lines++;
-                if (line[0]) {
-                    handle->log_callback(line, handle->log_context);
-                }
-            } else if (length == sizeof(line) - 1) {
-                /* Consume an oversized line in bounded chunks so it cannot pin
-                 * the cursor forever. This mirrors the subprocess tailer. */
-                handle->relay_tail_pos = ftell(log);
-                delivered_lines++;
-                handle->log_callback(line, handle->log_context);
-            } else {
-                /* The worker may append the rest before a later running poll.
-                 * Once its process tree is quiescent this remains intentionally
-                 * undelivered because callbacks are for complete lines only. */
-                handle->relay_tail_pos = before;
-                break;
-            }
-        }
-        if (delivered_lines == INDEX_WORKER_RELAY_LINES_PER_POLL ||
-            delivered_bytes >= INDEX_WORKER_RELAY_BYTES_PER_POLL) {
-            /* Probe without advancing the durable cursor. The FILE is closed
-             * immediately, so consuming this byte only answers whether another
-             * bounded owner-thread poll is required. */
-            caught_up = fgetc(log) == EOF;
-        }
-    }
+    bool caught_up = worker_relay_drain(handle, log);
     (void)fclose(log);
     return caught_up;
 }
@@ -477,7 +574,7 @@ static atomic_flag g_worker_tmp_lock = ATOMIC_FLAG_INIT;
 
 static void worker_tmp_lock(void) {
     while (atomic_flag_test_and_set_explicit(&g_worker_tmp_lock, memory_order_acquire)) {
-        cbm_usleep(1000);
+        cbm_usleep(INDEX_WORKER_TEMP_LOCK_PAUSE_US);
     }
 }
 
@@ -488,7 +585,7 @@ static void worker_tmp_unlock(void) {
 static void worker_result_init(cbm_index_worker_result_t *result) {
     memset(result, 0, sizeof(*result));
     result->outcome = CBM_PROC_SPAWN_FAILED;
-    result->exit_code = -1;
+    result->exit_code = INDEX_WORKER_FAILURE_EXIT_CODE;
 }
 
 /* Resolve into caller-owned storage. The generic resolver returns a shared
@@ -528,7 +625,8 @@ static bool worker_unique_file(char *out, size_t out_size, const char *kind) {
     if (have_cache) {
         char directory[INDEX_WORKER_PATH_CAP];
         written = snprintf(directory, sizeof(directory), "%s/logs", cache_copy);
-        if (written <= 0 || written >= (int)sizeof(directory) || !cbm_mkdir_p(directory, 0700)) {
+        if (written <= 0 || written >= (int)sizeof(directory) ||
+            !cbm_mkdir_p(directory, INDEX_WORKER_CACHE_DIRECTORY_MODE)) {
             return false;
         }
         written = snprintf(out, out_size, "%s/.worker-%s-XXXXXX", directory, kind);
@@ -556,8 +654,8 @@ static bool worker_result_succeeded(const cbm_index_worker_result_t *result) {
 }
 
 static void worker_terminal_log(cbm_index_worker_handle_t *handle) {
-    char signal_text[16];
-    char exit_text[16];
+    char signal_text[INDEX_WORKER_STATUS_TEXT_CAP];
+    char exit_text[INDEX_WORKER_STATUS_TEXT_CAP];
     (void)snprintf(signal_text, sizeof(signal_text), "%d", handle->result.term_signal);
     (void)snprintf(exit_text, sizeof(exit_text), "%d", handle->result.exit_code);
     cbm_log_info("index.supervisor.reap", "outcome", cbm_proc_outcome_str(handle->result.outcome),
@@ -589,33 +687,34 @@ int cbm_index_worker_start_with_log(const char *args_json, size_t memory_budget_
     if (handle_out) {
         *handle_out = NULL;
     }
-    atomic_fetch_add_explicit(&g_spawn_count, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_spawn_count, INDEX_WORKER_COUNTER_INCREMENT, memory_order_relaxed);
     if (single_thread) {
-        atomic_fetch_add_explicit(&g_spawn_st_count, 1, memory_order_relaxed);
+        atomic_fetch_add_explicit(&g_spawn_st_count, INDEX_WORKER_COUNTER_INCREMENT,
+                                  memory_order_relaxed);
     }
     if (!handle_out || !args_json || !args_json[0]) {
-        return -1;
+        return INDEX_WORKER_FAILURE_EXIT_CODE;
     }
     if (g_host_marked && !g_worker_active && supervisor_disable_requested()) {
         /* Keep the old variable as a deterministic refusal seam, but never as
          * a production escape hatch into unsafe in-process indexing. */
         cbm_log_error("index.supervisor.disable_refused", "action", "fail_closed");
-        return -1;
+        return INDEX_WORKER_FAILURE_EXIT_CODE;
     }
     const char *build_fingerprint = cbm_index_supervisor_build_fingerprint();
     if (!build_fingerprint) {
         cbm_log_error("index.supervisor.build_fingerprint_unavailable", "action", "refuse_spawn");
-        return -1;
+        return INDEX_WORKER_FAILURE_EXIT_CODE;
     }
 
     char self[INDEX_WORKER_PATH_CAP] = {0};
     if (!cbm_resolve_executable_path(NULL, self, sizeof(self)) || !self[0]) {
         cbm_log_error("index.supervisor.no_self_path", "action", "fail_closed");
-        return -1;
+        return INDEX_WORKER_FAILURE_EXIT_CODE;
     }
-    cbm_index_worker_handle_t *handle = calloc(1, sizeof(*handle));
+    cbm_index_worker_handle_t *handle = calloc(INDEX_WORKER_HANDLE_COUNT, sizeof(*handle));
     if (!handle) {
-        return -1;
+        return INDEX_WORKER_FAILURE_EXIT_CODE;
     }
     atomic_init(&handle->terminal, false);
     handle->log_callback = log_callback;
@@ -626,7 +725,7 @@ int cbm_index_worker_start_with_log(const char *args_json, size_t memory_budget_
         (void)cbm_unlink(handle->response_path);
         (void)cbm_unlink(handle->log_path);
         free(handle);
-        return -1;
+        return INDEX_WORKER_FAILURE_EXIT_CODE;
     }
 
     const char *argv[INDEX_WORKER_ARGV_CAP];
@@ -675,7 +774,7 @@ int cbm_index_worker_start_with_log(const char *args_json, size_t memory_budget_
         (void)cbm_unlink(handle->log_path);
         free(handle);
         cbm_log_error("index.supervisor.spawn_failed", "action", "fail_closed");
-        return -1;
+        return INDEX_WORKER_FAILURE_EXIT_CODE;
     }
     *handle_out = handle;
     return 0;
@@ -738,7 +837,7 @@ cbm_index_worker_poll_t cbm_index_worker_poll(cbm_index_worker_handle_t *handle,
              * worker failure, not a fallback to in-process indexing. */
             handle->result.response_rejected = true;
             handle->result.outcome = CBM_PROC_EXIT_NONZERO;
-            handle->result.exit_code = -1;
+            handle->result.exit_code = INDEX_WORKER_FAILURE_EXIT_CODE;
         }
     }
     (void)cbm_unlink(handle->response_path);
@@ -781,13 +880,13 @@ int cbm_index_spawn_worker_with_log_cancel(const char *args_json, bool single_th
                                            const atomic_int *cancel_requested,
                                            cbm_index_worker_result_t *result) {
     if (!result) {
-        return -1;
+        return INDEX_WORKER_FAILURE_EXIT_CODE;
     }
     worker_result_init(result);
     cbm_index_worker_handle_t *handle = NULL;
     if (cbm_index_worker_start_with_log(args_json, 0, single_thread, marker_file, quarantine_file,
                                         log_callback, log_context, &handle) != 0) {
-        return -1;
+        return INDEX_WORKER_FAILURE_EXIT_CODE;
     }
     const cbm_index_worker_result_t *cached = NULL;
     bool cancellation_forwarded = false;

@@ -58,7 +58,7 @@
  * (which is where the page header lives). */
 #define SLAB_PAGE_SIZE ((size_t)65536)
 #define SLAB_PAGE_SHIFT 16 /* log2(SLAB_PAGE_SIZE) */
-#define SLAB_PAGE_MASK (~((uintptr_t)SLAB_PAGE_SIZE - 1))
+#define SLAB_PAGE_MASK (~((uintptr_t)SLAB_PAGE_SIZE - SKIP_ONE))
 
 /* Chunk region starts after the page header. SLAB_DATA_OFFSET must be a
  * multiple of SLAB_CHUNK_SIZE (so chunks stay 64-byte aligned) and at least
@@ -122,6 +122,11 @@ static CBM_TLS slab_state_t tls_slab;
 #define SLAB_MAP_L1_SIZE ((size_t)1 << SLAB_MAP_L1_BITS)
 #define SLAB_MAP_L2_SIZE ((size_t)1 << SLAB_MAP_L2_BITS)
 #define SLAB_MAP_L3_SIZE ((size_t)1 << SLAB_MAP_L3_BITS)
+#define SLAB_MAP_L1_MASK (SLAB_MAP_L1_SIZE - SKIP_ONE)
+#define SLAB_MAP_L2_MASK (SLAB_MAP_L2_SIZE - SKIP_ONE)
+#define SLAB_MAP_L3_MASK (SLAB_MAP_L3_SIZE - SKIP_ONE)
+
+enum { SLAB_REFCOUNT_UNIT = 1U };
 
 typedef struct {
     _Atomic(slab_page_t *) e[SLAB_MAP_L3_SIZE];
@@ -147,9 +152,9 @@ static bool slab_map_indices(uintptr_t base, size_t *i1, size_t *i2, size_t *i3)
     if ((pnum >> SLAB_MAP_TOTAL_BITS) != 0) {
         return false; /* address beyond coverage — never produced by malloc here */
     }
-    *i1 = (size_t)((pnum >> (SLAB_MAP_L2_BITS + SLAB_MAP_L3_BITS)) & (SLAB_MAP_L1_SIZE - 1));
-    *i2 = (size_t)((pnum >> SLAB_MAP_L3_BITS) & (SLAB_MAP_L2_SIZE - 1));
-    *i3 = (size_t)(pnum & (SLAB_MAP_L3_SIZE - 1));
+    *i1 = (size_t)((pnum >> (SLAB_MAP_L2_BITS + SLAB_MAP_L3_BITS)) & SLAB_MAP_L1_MASK);
+    *i2 = (size_t)((pnum >> SLAB_MAP_L3_BITS) & SLAB_MAP_L2_MASK);
+    *i3 = (size_t)(pnum & SLAB_MAP_L3_MASK);
     return true;
 }
 
@@ -190,7 +195,7 @@ static bool slab_map_set(uintptr_t base, slab_page_t *val) {
             slab_map_unlock();
             return true; /* nothing to unregister */
         }
-        l2 = (slab_map_l2_t *)calloc(1, sizeof(*l2));
+        l2 = (slab_map_l2_t *)calloc(CBM_ALLOC_ONE, sizeof(*l2));
         if (!l2) {
             slab_map_unlock();
             return false;
@@ -203,7 +208,7 @@ static bool slab_map_set(uintptr_t base, slab_page_t *val) {
             slab_map_unlock();
             return true;
         }
-        l3 = (slab_map_l3_t *)calloc(1, sizeof(*l3));
+        l3 = (slab_map_l3_t *)calloc(CBM_ALLOC_ONE, sizeof(*l3));
         if (!l3) {
             slab_map_unlock();
             return false;
@@ -221,6 +226,14 @@ static void slab_free(void *ptr);
 static bool slab_map_register_page(slab_page_t *page);
 static void slab_map_unregister_page(slab_page_t *page);
 
+static slab_page_t *slab_page_for_pointer(const void *pointer) {
+    return slab_map_lookup((uintptr_t)pointer & SLAB_PAGE_MASK);
+}
+
+static void *slab_chunk_at(slab_page_t *page, size_t index) {
+    return (char *)page + SLAB_DATA_OFFSET + (index * SLAB_CHUNK_SIZE);
+}
+
 /* Allocate and register a new SLAB_PAGE_SIZE-aligned page, threading its chunks
  * onto the thread-local free list. Returns false on OOM (caller falls back to
  * malloc). Registration happens before any chunk is handed out so that a later
@@ -234,7 +247,7 @@ static bool slab_grow(slab_state_t *s) {
     page->next = s->pages;
     atomic_init(&page->owner, s);
     atomic_init(&page->remote_free_head, (slab_free_node_t *)NULL);
-    atomic_init(&page->refcount, 1U); /* owner guard */
+    atomic_init(&page->refcount, SLAB_REFCOUNT_UNIT); /* owner guard */
 
     if (!slab_map_register_page(page)) {
         cbm_aligned_free(page);
@@ -243,11 +256,7 @@ static bool slab_grow(slab_state_t *s) {
     s->pages = page;
 
     for (size_t i = 0; i < SLAB_PAGE_CHUNKS; i++) {
-        /* Alignment is guaranteed by construction (see the _Static_asserts
-         * above), so route through uintptr_t rather than a char* pointer
-         * cast that increases alignment requirements. */
-        uintptr_t addr = (uintptr_t)page + SLAB_DATA_OFFSET + (i * SLAB_CHUNK_SIZE);
-        slab_free_node_t *node = (slab_free_node_t *)addr;
+        slab_free_node_t *node = slab_chunk_at(page, i);
         node->next = s->freelist;
         s->freelist = node;
     }
@@ -282,8 +291,9 @@ static void slab_reclaim_pages(slab_state_t *s, bool clear_installed) {
     while (p) {
         slab_page_t *next = p->next;
         atomic_store_explicit(&p->owner, (slab_state_t *)NULL, memory_order_relaxed);
-        unsigned prev = atomic_fetch_sub_explicit(&p->refcount, 1U, memory_order_acq_rel);
-        if (prev == 1U) {
+        unsigned prev =
+            atomic_fetch_sub_explicit(&p->refcount, SLAB_REFCOUNT_UNIT, memory_order_acq_rel);
+        if (prev == SLAB_REFCOUNT_UNIT) {
             slab_map_unregister_page(p);
             cbm_aligned_free(p);
         }
@@ -313,8 +323,8 @@ static void *slab_malloc(size_t size) {
         }
         slab_free_node_t *node = s->freelist;
         s->freelist = node->next;
-        slab_page_t *page = (slab_page_t *)((uintptr_t)node & SLAB_PAGE_MASK);
-        atomic_fetch_add_explicit(&page->refcount, 1U, memory_order_relaxed);
+        slab_page_t *page = slab_page_for_pointer(node);
+        atomic_fetch_add_explicit(&page->refcount, SLAB_REFCOUNT_UNIT, memory_order_relaxed);
         return node;
     }
 
@@ -347,7 +357,7 @@ static void *slab_realloc(void *ptr, size_t new_size) {
     }
 
     /* Case 1: ptr is in a slab page (≤64B block) */
-    slab_page_t *page = slab_map_lookup((uintptr_t)ptr & SLAB_PAGE_MASK);
+    slab_page_t *page = slab_page_for_pointer(ptr);
     if (page) {
         if (new_size <= SLAB_CHUNK_SIZE) {
             /* Still fits in a slab chunk — reuse same slot */
@@ -371,8 +381,7 @@ static void slab_free(void *ptr) {
     if (!ptr) {
         return;
     }
-    uintptr_t base = (uintptr_t)ptr & SLAB_PAGE_MASK;
-    slab_page_t *page = slab_map_lookup(base);
+    slab_page_t *page = slab_page_for_pointer(ptr);
     if (!page) {
         /* Not a slab chunk → plain heap pointer (>64B or grow-fallback). */
         free(ptr);
@@ -388,7 +397,7 @@ static void slab_free(void *ptr) {
         /* Fast path: owner returns the chunk to its thread-local free list. */
         node->next = s->freelist;
         s->freelist = node;
-        atomic_fetch_sub_explicit(&page->refcount, 1U, memory_order_acq_rel);
+        atomic_fetch_sub_explicit(&page->refcount, SLAB_REFCOUNT_UNIT, memory_order_acq_rel);
         return; /* owner guard keeps refcount ≥ 1; page is reused, not freed */
     }
 
@@ -398,8 +407,9 @@ static void slab_free(void *ptr) {
         node->next = head;
     } while (!atomic_compare_exchange_weak_explicit(&page->remote_free_head, &head, node,
                                                     memory_order_release, memory_order_relaxed));
-    unsigned prev = atomic_fetch_sub_explicit(&page->refcount, 1U, memory_order_acq_rel);
-    if (prev == 1U) {
+    unsigned prev =
+        atomic_fetch_sub_explicit(&page->refcount, SLAB_REFCOUNT_UNIT, memory_order_acq_rel);
+    if (prev == SLAB_REFCOUNT_UNIT) {
         /* We returned the final chunk of a retired page → release it. */
         slab_map_unregister_page(page);
         cbm_aligned_free(page);

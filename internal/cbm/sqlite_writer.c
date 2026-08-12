@@ -2104,6 +2104,32 @@ static void parallel_sort_indexes(SortJob *nsorts, int n_node, SortJob *esorts, 
     }
 }
 
+typedef struct {
+    uint32_t edges;
+    uint32_t vectors;
+    uint32_t token_vectors;
+} write_db_data_roots_t;
+
+static int write_db_data_tables(write_db_ctx_t *writer, int node_count, int edge_count,
+                                write_db_data_roots_t *roots) {
+    CBM_PROF_START(t_data);
+    int status = write_one_table(writer, &roots->edges, writer->edges, writer->edge_count,
+                                 adapt_build_edge, adapt_edge_id);
+    if (status == 0) {
+        status = write_one_table(writer, &roots->vectors, writer->vectors, writer->vector_count,
+                                 adapt_build_vector, adapt_vector_id);
+    }
+    if (status == 0) {
+        status =
+            write_one_table(writer, &roots->token_vectors, writer->token_vecs,
+                            writer->token_vec_count, adapt_build_token_vec, adapt_token_vec_id);
+    }
+    if (status == 0) {
+        CBM_PROF_END_N("write_db", "1_data_tables", t_data, node_count + edge_count);
+    }
+    return status;
+}
+
 /* Write everything after the nodes table: the edges/vectors/token_vectors data
  * tables, metadata tables, all indexes, and the sqlite_master page-1 + file
  * header. `nodes_root` is the root of the already-written nodes table. Closes
@@ -2116,26 +2142,14 @@ static int write_db_after_nodes(write_db_ctx_t *w, uint32_t nodes_root) {
     int edge_count = w->edge_count;
 
     // Phase 1 (cont.): remaining data tables (edge + vector + token_vector records)
-    CBM_PROF_START(t_data);
-    uint32_t edges_root;
-    uint32_t vectors_root;
-    uint32_t token_vecs_root;
-    int rc =
-        write_one_table(w, &edges_root, w->edges, w->edge_count, adapt_build_edge, adapt_edge_id);
+    write_db_data_roots_t data_roots = {0};
+    int rc = write_db_data_tables(w, node_count, edge_count, &data_roots);
     if (rc != 0) {
         return discard_writer_output(w, rc);
     }
-    rc = write_one_table(w, &vectors_root, w->vectors, w->vector_count, adapt_build_vector,
-                         adapt_vector_id);
-    if (rc != 0) {
-        return discard_writer_output(w, rc);
-    }
-    rc = write_one_table(w, &token_vecs_root, w->token_vecs, w->token_vec_count,
-                         adapt_build_token_vec, adapt_token_vec_id);
-    if (rc != 0) {
-        return discard_writer_output(w, rc);
-    }
-    CBM_PROF_END_N("write_db", "1_data_tables", t_data, node_count + edge_count);
+    uint32_t edges_root = data_roots.edges;
+    uint32_t vectors_root = data_roots.vectors;
+    uint32_t token_vecs_root = data_roots.token_vectors;
 
     // Phase 2: Metadata tables (projects, file_hashes, summaries, sqlite_sequence)
     CBM_PROF_START(t_meta);

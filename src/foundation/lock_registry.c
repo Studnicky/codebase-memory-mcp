@@ -24,6 +24,9 @@
 #endif
 
 enum {
+    LOCK_REGISTRY_CONDITION_WAITER_STEP = 1,
+    LOCK_REGISTRY_SINGLE_OBJECT_COUNT = 1,
+    LOCK_REGISTRY_C_STRING_TERMINATOR_BYTES = sizeof(char),
     LOCK_REGISTRY_RESOURCE_CAP = 4096,
     LOCK_REGISTRY_NATIVE_RETRY_MS = 1,
 };
@@ -152,13 +155,16 @@ static void lock_registry_broadcast_locked(cbm_lock_registry_t *registry) {
  * full G -> R lock order before returning. */
 static cbm_private_fork_wait_status_t lock_registry_wait_locked(cbm_lock_registry_t *registry,
                                                                 uint64_t deadline_ms) {
-    (void)atomic_fetch_add_explicit(&registry->test_condition_wait_calls, 1, memory_order_relaxed);
-    (void)atomic_fetch_add_explicit(&registry->test_condition_waiters_now, 1, memory_order_relaxed);
+    (void)atomic_fetch_add_explicit(&registry->test_condition_wait_calls,
+                                    LOCK_REGISTRY_CONDITION_WAITER_STEP, memory_order_relaxed);
+    (void)atomic_fetch_add_explicit(&registry->test_condition_waiters_now,
+                                    LOCK_REGISTRY_CONDITION_WAITER_STEP, memory_order_relaxed);
     cbm_mutex_unlock(&registry->mutex);
     cbm_private_fork_wait_status_t status =
         cbm_private_fork_condition_wait_until_while_guarded(registry->condition, deadline_ms);
     cbm_mutex_lock(&registry->mutex);
-    (void)atomic_fetch_sub_explicit(&registry->test_condition_waiters_now, 1, memory_order_relaxed);
+    (void)atomic_fetch_sub_explicit(&registry->test_condition_waiters_now,
+                                    LOCK_REGISTRY_CONDITION_WAITER_STEP, memory_order_relaxed);
     return status;
 }
 
@@ -302,11 +308,12 @@ bool cbm_lock_registry_resource_names(const char *resource_key,
     if (!resource_key || !resource_key[0] || !turn_out || !rw_out) {
         return false;
     }
-    size_t length = strnlen(resource_key, LOCK_REGISTRY_RESOURCE_CAP + 1U);
+    size_t length =
+        strnlen(resource_key, LOCK_REGISTRY_RESOURCE_CAP + LOCK_REGISTRY_C_STRING_TERMINATOR_BYTES);
     if (length == 0 || length > LOCK_REGISTRY_RESOURCE_CAP) {
         return false;
     }
-    char digest[CBM_SHA256_HEX_LEN + 1];
+    char digest[CBM_SHA256_HEX_LEN + LOCK_REGISTRY_C_STRING_TERMINATOR_BYTES];
     cbm_sha256_hex(resource_key, length, digest);
     int turn_written = snprintf(turn_out, CBM_LOCK_REGISTRY_NAME_CAP, "cbm-%s.turn", digest);
     int rw_written = snprintf(rw_out, CBM_LOCK_REGISTRY_NAME_CAP, "cbm-%s.rw", digest);
@@ -318,7 +325,7 @@ cbm_lock_registry_t *cbm_lock_registry_new(cbm_private_lock_directory_t *directo
     if (!directory) {
         return NULL;
     }
-    cbm_lock_registry_t *registry = calloc(1, sizeof(*registry));
+    cbm_lock_registry_t *registry = calloc(LOCK_REGISTRY_SINGLE_OBJECT_COUNT, sizeof(*registry));
     if (!registry) {
         return NULL;
     }
@@ -436,6 +443,132 @@ static cbm_private_file_lock_status_t lock_registry_abort_attempt(
     return owns_attempt ? requested_status : CBM_PRIVATE_FILE_LOCK_IO;
 }
 
+static bool lock_registry_wait_for_publication(bool try_once, bool owns_attempt,
+                                               const cbm_lock_cancel_token_t *cancel_token) {
+    return !try_once && owns_attempt &&
+           (!cancel_token || !atomic_load_explicit(cancel_token, memory_order_acquire));
+}
+
+static bool lock_registry_publication_failed(bool owns_attempt,
+                                             cbm_private_fork_wait_status_t wait_status) {
+    return !owns_attempt || wait_status == CBM_PRIVATE_FORK_WAIT_ERROR;
+}
+
+static cbm_private_file_lock_status_t lock_registry_publish_native_lease(
+    cbm_lock_registry_t *registry, lock_registry_entry_t *entry, lock_registry_waiter_t *waiter,
+    uint64_t deadline_ms, const cbm_lock_cancel_token_t *cancel_token, bool try_once,
+    cbm_private_file_lock_t **rw_io, cbm_private_file_lock_t **turn_io, cbm_lock_lease_t *lease,
+    cbm_lock_lease_t **lease_out) {
+    for (;;) {
+        if (!try_once && lock_registry_should_stop(deadline_ms, cancel_token)) {
+            return lock_registry_abort_attempt(registry, entry, waiter, rw_io, turn_io,
+                                               CBM_PRIVATE_FILE_LOCK_BUSY, lease, lease_out);
+        }
+        if (!lock_registry_lock(registry)) {
+            return lock_registry_abort_attempt(registry, entry, waiter, rw_io, turn_io,
+                                               CBM_PRIVATE_FILE_LOCK_IO, lease, lease_out);
+        }
+        bool owns_attempt = entry->attempt_waiter == waiter && entry->waiter_head == waiter;
+        bool ready = waiter->mode == CBM_PRIVATE_FILE_LOCK_SH
+                         ? !entry->writer_active
+                         : !entry->writer_active && entry->active_readers == 0;
+        bool removed =
+            owns_attempt && ready && lock_registry_waiter_remove(registry, entry, waiter);
+        cbm_private_fork_wait_status_t wait_status = CBM_PRIVATE_FORK_WAIT_SIGNALED;
+        if (removed) {
+            entry->attempt_waiter = NULL;
+            if (waiter->mode == CBM_PRIVATE_FILE_LOCK_SH) {
+                entry->active_readers++;
+            } else {
+                entry->writer_active = true;
+            }
+            registry->active_lease_count++;
+            lease->registry = registry;
+            lease->entry = entry;
+            lease->mode = waiter->mode;
+            lease->turn = *turn_io;
+            lease->rw = *rw_io;
+            lease->owner_pid = registry->owner_pid;
+            lease->active = true;
+            *turn_io = NULL;
+            *rw_io = NULL;
+            lock_registry_broadcast_locked(registry);
+        } else if (lock_registry_wait_for_publication(try_once, owns_attempt, cancel_token)) {
+            wait_status = lock_registry_wait_locked(registry, deadline_ms);
+        }
+        lock_registry_unlock(registry);
+        if (removed) {
+            *lease_out = lease;
+            return CBM_PRIVATE_FILE_LOCK_OK;
+        }
+        if (try_once) {
+            return lock_registry_abort_attempt(registry, entry, waiter, rw_io, turn_io,
+                                               CBM_PRIVATE_FILE_LOCK_BUSY, lease, lease_out);
+        }
+        if (lock_registry_publication_failed(owns_attempt, wait_status)) {
+            return lock_registry_abort_attempt(registry, entry, waiter, rw_io, turn_io,
+                                               CBM_PRIVATE_FILE_LOCK_IO, lease, lease_out);
+        }
+    }
+}
+
+static cbm_private_file_lock_status_t lock_registry_acquire_turn(
+    cbm_lock_registry_t *registry, const lock_registry_entry_t *entry,
+    const lock_registry_waiter_t *waiter, cbm_private_file_lock_t **turn_io) {
+    if (*turn_io) {
+        return CBM_PRIVATE_FILE_LOCK_OK;
+    }
+    cbm_private_file_lock_mode_t mode = waiter->mode == CBM_PRIVATE_FILE_LOCK_SH
+                                            ? CBM_PRIVATE_FILE_LOCK_EX
+                                            : CBM_PRIVATE_FILE_LOCK_SH;
+    cbm_private_file_lock_status_t status =
+        cbm_private_file_lock_try_acquire(registry->directory, entry->turn_name, mode, turn_io);
+    if (status == CBM_PRIVATE_FILE_LOCK_OK) {
+        lock_registry_notify(registry, waiter->mode, CBM_LOCK_REGISTRY_STAGE_TURN_HELD);
+    } else if (status == CBM_PRIVATE_FILE_LOCK_BUSY) {
+        lock_registry_notify(registry, waiter->mode, CBM_LOCK_REGISTRY_STAGE_TURN_BUSY);
+    }
+    return status;
+}
+
+static cbm_private_file_lock_status_t lock_registry_acquire_rw(cbm_lock_registry_t *registry,
+                                                               const lock_registry_entry_t *entry,
+                                                               const lock_registry_waiter_t *waiter,
+                                                               cbm_private_file_lock_t **rw_io,
+                                                               cbm_private_file_lock_t **turn_io) {
+    cbm_private_file_lock_status_t status =
+        cbm_private_file_lock_try_acquire(registry->directory, entry->rw_name, waiter->mode, rw_io);
+    if (status == CBM_PRIVATE_FILE_LOCK_BUSY) {
+        lock_registry_notify(registry, waiter->mode, CBM_LOCK_REGISTRY_STAGE_RW_BUSY);
+        return status;
+    }
+    if (status != CBM_PRIVATE_FILE_LOCK_OK) {
+        return status;
+    }
+    if (waiter->mode == CBM_PRIVATE_FILE_LOCK_SH) {
+        status = cbm_private_file_lock_release(turn_io);
+    }
+    if (status == CBM_PRIVATE_FILE_LOCK_OK) {
+        lock_registry_notify(registry, waiter->mode, CBM_LOCK_REGISTRY_STAGE_NATIVE_READY);
+    }
+    return status;
+}
+
+static bool lock_registry_retry_after_native_busy(cbm_lock_registry_t *registry,
+                                                  uint64_t deadline_ms,
+                                                  const cbm_lock_cancel_token_t *cancel_token,
+                                                  bool try_once,
+                                                  cbm_private_file_lock_status_t *status) {
+    if (try_once) {
+        return false;
+    }
+    if (lock_registry_park_native(registry, deadline_ms, cancel_token)) {
+        return true;
+    }
+    *status = CBM_PRIVATE_FILE_LOCK_IO;
+    return false;
+}
+
 static cbm_private_file_lock_status_t lock_registry_attempt_native(
     cbm_lock_registry_t *registry, lock_registry_entry_t *entry, lock_registry_waiter_t *waiter,
     uint64_t deadline_ms, const cbm_lock_cancel_token_t *cancel_token, bool try_once,
@@ -449,42 +582,10 @@ static cbm_private_file_lock_status_t lock_registry_attempt_native(
             status = CBM_PRIVATE_FILE_LOCK_BUSY;
             break;
         }
-        if (!turn) {
-            cbm_private_file_lock_mode_t turn_mode = waiter->mode == CBM_PRIVATE_FILE_LOCK_SH
-                                                         ? CBM_PRIVATE_FILE_LOCK_EX
-                                                         : CBM_PRIVATE_FILE_LOCK_SH;
-            status = cbm_private_file_lock_try_acquire(registry->directory, entry->turn_name,
-                                                       turn_mode, &turn);
-            if (status == CBM_PRIVATE_FILE_LOCK_BUSY) {
-                lock_registry_notify(registry, waiter->mode, CBM_LOCK_REGISTRY_STAGE_TURN_BUSY);
-                if (try_once) {
-                    break;
-                }
-                if (!lock_registry_park_native(registry, deadline_ms, cancel_token)) {
-                    status = CBM_PRIVATE_FILE_LOCK_IO;
-                    break;
-                }
-                continue;
-            }
-            if (status != CBM_PRIVATE_FILE_LOCK_OK) {
-                break;
-            }
-            lock_registry_notify(registry, waiter->mode, CBM_LOCK_REGISTRY_STAGE_TURN_HELD);
-        }
-
-        if (!try_once && lock_registry_should_stop(deadline_ms, cancel_token)) {
-            status = CBM_PRIVATE_FILE_LOCK_BUSY;
-            break;
-        }
-        status = cbm_private_file_lock_try_acquire(registry->directory, entry->rw_name,
-                                                   waiter->mode, &rw);
+        status = lock_registry_acquire_turn(registry, entry, waiter, &turn);
         if (status == CBM_PRIVATE_FILE_LOCK_BUSY) {
-            lock_registry_notify(registry, waiter->mode, CBM_LOCK_REGISTRY_STAGE_RW_BUSY);
-            if (try_once) {
-                break;
-            }
-            if (!lock_registry_park_native(registry, deadline_ms, cancel_token)) {
-                status = CBM_PRIVATE_FILE_LOCK_IO;
+            if (!lock_registry_retry_after_native_busy(registry, deadline_ms, cancel_token,
+                                                       try_once, &status)) {
                 break;
             }
             continue;
@@ -492,13 +593,22 @@ static cbm_private_file_lock_status_t lock_registry_attempt_native(
         if (status != CBM_PRIVATE_FILE_LOCK_OK) {
             break;
         }
-        if (waiter->mode == CBM_PRIVATE_FILE_LOCK_SH) {
-            status = cbm_private_file_lock_release(&turn);
-            if (status != CBM_PRIVATE_FILE_LOCK_OK) {
+
+        if (!try_once && lock_registry_should_stop(deadline_ms, cancel_token)) {
+            status = CBM_PRIVATE_FILE_LOCK_BUSY;
+            break;
+        }
+        status = lock_registry_acquire_rw(registry, entry, waiter, &rw, &turn);
+        if (status == CBM_PRIVATE_FILE_LOCK_BUSY) {
+            if (!lock_registry_retry_after_native_busy(registry, deadline_ms, cancel_token,
+                                                       try_once, &status)) {
                 break;
             }
+            continue;
         }
-        lock_registry_notify(registry, waiter->mode, CBM_LOCK_REGISTRY_STAGE_NATIVE_READY);
+        if (status != CBM_PRIVATE_FILE_LOCK_OK) {
+            break;
+        }
     }
 
     if (!rw || status != CBM_PRIVATE_FILE_LOCK_OK) {
@@ -506,117 +616,14 @@ static cbm_private_file_lock_status_t lock_registry_attempt_native(
                                            lease_out);
     }
 
-    for (;;) {
-        if (!try_once && lock_registry_should_stop(deadline_ms, cancel_token)) {
-            return lock_registry_abort_attempt(registry, entry, waiter, &rw, &turn,
-                                               CBM_PRIVATE_FILE_LOCK_BUSY, lease, lease_out);
-        }
-        if (!lock_registry_lock(registry)) {
-            return lock_registry_abort_attempt(registry, entry, waiter, &rw, &turn,
-                                               CBM_PRIVATE_FILE_LOCK_IO, lease, lease_out);
-        }
-        bool owns_attempt = entry->attempt_waiter == waiter && entry->waiter_head == waiter;
-        bool local_state_ready = waiter->mode == CBM_PRIVATE_FILE_LOCK_SH
-                                     ? !entry->writer_active
-                                     : !entry->writer_active && entry->active_readers == 0;
-        bool removed = owns_attempt && local_state_ready &&
-                       lock_registry_waiter_remove(registry, entry, waiter);
-        cbm_private_fork_wait_status_t wait_status = CBM_PRIVATE_FORK_WAIT_SIGNALED;
-        if (removed) {
-            entry->attempt_waiter = NULL;
-            if (waiter->mode == CBM_PRIVATE_FILE_LOCK_SH) {
-                entry->active_readers++;
-            } else {
-                entry->writer_active = true;
-            }
-            registry->active_lease_count++;
-            lease->registry = registry;
-            lease->entry = entry;
-            lease->mode = waiter->mode;
-            lease->turn = turn;
-            lease->rw = rw;
-            lease->owner_pid = registry->owner_pid;
-            lease->active = true;
-            turn = NULL;
-            rw = NULL;
-            lock_registry_broadcast_locked(registry);
-        } else if (!try_once && owns_attempt &&
-                   (!cancel_token || !atomic_load_explicit(cancel_token, memory_order_acquire))) {
-            wait_status = lock_registry_wait_locked(registry, deadline_ms);
-        }
-        lock_registry_unlock(registry);
-        if (removed) {
-            *lease_out = lease;
-            return CBM_PRIVATE_FILE_LOCK_OK;
-        }
-        if (try_once) {
-            return lock_registry_abort_attempt(registry, entry, waiter, &rw, &turn,
-                                               CBM_PRIVATE_FILE_LOCK_BUSY, lease, lease_out);
-        }
-        if (!owns_attempt) {
-            return lock_registry_abort_attempt(registry, entry, waiter, &rw, &turn,
-                                               CBM_PRIVATE_FILE_LOCK_IO, lease, lease_out);
-        }
-        if (wait_status == CBM_PRIVATE_FORK_WAIT_ERROR) {
-            return lock_registry_abort_attempt(registry, entry, waiter, &rw, &turn,
-                                               CBM_PRIVATE_FILE_LOCK_IO, lease, lease_out);
-        }
-    }
+    return lock_registry_publish_native_lease(registry, entry, waiter, deadline_ms, cancel_token,
+                                              try_once, &rw, &turn, lease, lease_out);
 }
 
-static cbm_private_file_lock_status_t lock_registry_acquire_internal(
-    cbm_lock_registry_t *registry, const char *resource_key, cbm_private_file_lock_mode_t mode,
+static cbm_private_file_lock_status_t lock_registry_wait_for_attempt(
+    cbm_lock_registry_t *registry, lock_registry_entry_t *entry, cbm_lock_lease_t *lease,
     uint64_t deadline_ms, const cbm_lock_cancel_token_t *cancel_token, bool try_once,
     cbm_lock_lease_t **lease_out) {
-    if (lease_out) {
-        *lease_out = NULL;
-    }
-    if (!registry || !lease_out) {
-        return CBM_PRIVATE_FILE_LOCK_IO;
-    }
-    if (mode != CBM_PRIVATE_FILE_LOCK_SH && mode != CBM_PRIVATE_FILE_LOCK_EX) {
-        return CBM_PRIVATE_FILE_LOCK_UNSAFE;
-    }
-    char turn_name[CBM_LOCK_REGISTRY_NAME_CAP];
-    char rw_name[CBM_LOCK_REGISTRY_NAME_CAP];
-    if (!cbm_lock_registry_resource_names(resource_key, turn_name, rw_name)) {
-        return CBM_PRIVATE_FILE_LOCK_UNSAFE;
-    }
-    if (!try_once && lock_registry_should_stop(deadline_ms, cancel_token)) {
-        return CBM_PRIVATE_FILE_LOCK_BUSY;
-    }
-
-    lock_registry_entry_t *candidate = calloc(1, sizeof(*candidate));
-    cbm_lock_lease_t *lease = calloc(1, sizeof(*lease));
-    if (!candidate || !lease) {
-        free(candidate);
-        free(lease);
-        return CBM_PRIVATE_FILE_LOCK_IO;
-    }
-    (void)snprintf(candidate->turn_name, sizeof(candidate->turn_name), "%s", turn_name);
-    (void)snprintf(candidate->rw_name, sizeof(candidate->rw_name), "%s", rw_name);
-    lease->waiter.mode = mode;
-
-    if (!lock_registry_lock(registry)) {
-        free(candidate);
-        free(lease);
-        return CBM_PRIVATE_FILE_LOCK_IO;
-    }
-    lock_registry_entry_t *entry = lock_registry_find_entry(registry, turn_name, rw_name);
-    if (!entry) {
-        entry = candidate;
-        candidate = NULL;
-        entry->next = registry->entries;
-        registry->entries = entry;
-    }
-    lease->registry = registry;
-    lease->entry = entry;
-    lease->mode = mode;
-    lease->owner_pid = registry->owner_pid;
-    lock_registry_waiter_push(registry, entry, &lease->waiter);
-    lock_registry_unlock(registry);
-    free(candidate);
-
     for (;;) {
         bool should_stop = !try_once && lock_registry_should_stop(deadline_ms, cancel_token);
         if (!lock_registry_lock(registry)) {
@@ -669,6 +676,64 @@ static cbm_private_file_lock_status_t lock_registry_acquire_internal(
     }
 }
 
+static cbm_private_file_lock_status_t lock_registry_acquire_internal(
+    cbm_lock_registry_t *registry, const char *resource_key, cbm_private_file_lock_mode_t mode,
+    uint64_t deadline_ms, const cbm_lock_cancel_token_t *cancel_token, bool try_once,
+    cbm_lock_lease_t **lease_out) {
+    if (lease_out) {
+        *lease_out = NULL;
+    }
+    if (!registry || !lease_out) {
+        return CBM_PRIVATE_FILE_LOCK_IO;
+    }
+    if (mode != CBM_PRIVATE_FILE_LOCK_SH && mode != CBM_PRIVATE_FILE_LOCK_EX) {
+        return CBM_PRIVATE_FILE_LOCK_UNSAFE;
+    }
+    char turn_name[CBM_LOCK_REGISTRY_NAME_CAP];
+    char rw_name[CBM_LOCK_REGISTRY_NAME_CAP];
+    if (!cbm_lock_registry_resource_names(resource_key, turn_name, rw_name)) {
+        return CBM_PRIVATE_FILE_LOCK_UNSAFE;
+    }
+    if (!try_once && lock_registry_should_stop(deadline_ms, cancel_token)) {
+        return CBM_PRIVATE_FILE_LOCK_BUSY;
+    }
+
+    lock_registry_entry_t *candidate =
+        calloc(LOCK_REGISTRY_SINGLE_OBJECT_COUNT, sizeof(*candidate));
+    cbm_lock_lease_t *lease = calloc(LOCK_REGISTRY_SINGLE_OBJECT_COUNT, sizeof(*lease));
+    if (!candidate || !lease) {
+        free(candidate);
+        free(lease);
+        return CBM_PRIVATE_FILE_LOCK_IO;
+    }
+    (void)snprintf(candidate->turn_name, sizeof(candidate->turn_name), "%s", turn_name);
+    (void)snprintf(candidate->rw_name, sizeof(candidate->rw_name), "%s", rw_name);
+    lease->waiter.mode = mode;
+
+    if (!lock_registry_lock(registry)) {
+        free(candidate);
+        free(lease);
+        return CBM_PRIVATE_FILE_LOCK_IO;
+    }
+    lock_registry_entry_t *entry = lock_registry_find_entry(registry, turn_name, rw_name);
+    if (!entry) {
+        entry = candidate;
+        candidate = NULL;
+        entry->next = registry->entries;
+        registry->entries = entry;
+    }
+    lease->registry = registry;
+    lease->entry = entry;
+    lease->mode = mode;
+    lease->owner_pid = registry->owner_pid;
+    lock_registry_waiter_push(registry, entry, &lease->waiter);
+    lock_registry_unlock(registry);
+    free(candidate);
+
+    return lock_registry_wait_for_attempt(registry, entry, lease, deadline_ms, cancel_token,
+                                          try_once, lease_out);
+}
+
 cbm_private_file_lock_status_t cbm_lock_registry_acquire(
     cbm_lock_registry_t *registry, const char *resource_key, cbm_private_file_lock_mode_t mode,
     uint64_t deadline_ms, const cbm_lock_cancel_token_t *cancel_token,
@@ -685,6 +750,44 @@ cbm_private_file_lock_status_t cbm_lock_registry_try_acquire(cbm_lock_registry_t
                                           lease_out);
 }
 
+static cbm_private_file_lock_status_t lock_registry_cleanup_waiter(cbm_lock_lease_t **lease_io,
+                                                                   bool *has_native) {
+    cbm_lock_lease_t *lease = *lease_io;
+    cbm_lock_registry_t *registry = lease->registry;
+    if (!lease->waiter_cleanup_pending) {
+        *has_native = lease->rw || lease->turn;
+        return CBM_PRIVATE_FILE_LOCK_OK;
+    }
+    if (!lock_registry_lock(registry)) {
+        return CBM_PRIVATE_FILE_LOCK_IO;
+    }
+    lock_registry_entry_t *entry = lease->entry;
+    bool removed = lock_registry_waiter_remove(registry, entry, &lease->waiter);
+    if (!removed) {
+        lock_registry_unlock(registry);
+        return CBM_PRIVATE_FILE_LOCK_IO;
+    }
+    if (entry->attempt_waiter == &lease->waiter) {
+        entry->attempt_waiter = NULL;
+    }
+    lease->waiter_cleanup_pending = false;
+    lease->entry = NULL;
+    *has_native = lease->rw || lease->turn;
+    if (*has_native) {
+        registry->pending_cleanup_count++;
+        lease->pending_registered = true;
+        lock_registry_broadcast_locked(registry);
+    } else {
+        lease->native_released = true;
+    }
+    lock_registry_unlock(registry);
+    if (!*has_native) {
+        *lease_io = NULL;
+        free(lease);
+    }
+    return CBM_PRIVATE_FILE_LOCK_OK;
+}
+
 static cbm_private_file_lock_status_t lock_registry_cleanup_lease_release(
     cbm_lock_lease_t **lease_io) {
     cbm_lock_lease_t *lease = *lease_io;
@@ -699,33 +802,13 @@ static cbm_private_file_lock_status_t lock_registry_cleanup_lease_release(
         return CBM_PRIVATE_FILE_LOCK_IO;
     }
 
+    bool has_native = false;
     if (lease->waiter_cleanup_pending) {
-        if (!lock_registry_lock(registry)) {
-            return CBM_PRIVATE_FILE_LOCK_IO;
+        cbm_private_file_lock_status_t status = lock_registry_cleanup_waiter(lease_io, &has_native);
+        if (status != CBM_PRIVATE_FILE_LOCK_OK) {
+            return status;
         }
-        lock_registry_entry_t *entry = lease->entry;
-        bool removed = lock_registry_waiter_remove(registry, entry, &lease->waiter);
-        if (!removed) {
-            lock_registry_unlock(registry);
-            return CBM_PRIVATE_FILE_LOCK_IO;
-        }
-        if (entry->attempt_waiter == &lease->waiter) {
-            entry->attempt_waiter = NULL;
-        }
-        lease->waiter_cleanup_pending = false;
-        lease->entry = NULL;
-        bool has_native = lease->rw || lease->turn;
-        if (has_native) {
-            registry->pending_cleanup_count++;
-            lease->pending_registered = true;
-            lock_registry_broadcast_locked(registry);
-        } else {
-            lease->native_released = true;
-        }
-        lock_registry_unlock(registry);
         if (!has_native) {
-            *lease_io = NULL;
-            free(lease);
             return CBM_PRIVATE_FILE_LOCK_OK;
         }
     }
@@ -767,66 +850,81 @@ static cbm_private_file_lock_status_t lock_registry_cleanup_lease_release(
     return result;
 }
 
+static cbm_private_file_lock_status_t lock_registry_release_foreign_process(
+    cbm_lock_lease_t **lease_io) {
+    cbm_lock_lease_t *lease = *lease_io;
+    cbm_private_file_lock_status_t status =
+        lock_registry_release_native(lease->registry, &lease->rw, &lease->turn);
+    if (lease->waiter_cleanup_pending || lease->waiter.queued) {
+        return CBM_PRIVATE_FILE_LOCK_IO;
+    }
+    if (status == CBM_PRIVATE_FILE_LOCK_OK) {
+        *lease_io = NULL;
+        free(lease);
+    }
+    return status;
+}
+
+static bool lock_registry_active_lease_valid(cbm_lock_lease_t *lease) {
+    cbm_lock_registry_t *registry = lease->registry;
+    lock_registry_entry_t *entry = lease->entry;
+    bool native_valid = lease->critical_released ||
+                        (lease->mode == CBM_PRIVATE_FILE_LOCK_SH && lease->rw && !lease->turn) ||
+                        (lease->mode == CBM_PRIVATE_FILE_LOCK_EX && lease->turn != NULL);
+    if (!registry || !entry || !lease->active || !native_valid || !lock_registry_lock(registry)) {
+        return false;
+    }
+    bool valid = registry->active_lease_count > 0;
+    if (lease->mode == CBM_PRIVATE_FILE_LOCK_SH) {
+        valid = valid && entry->active_readers > 0;
+    } else if (lease->mode == CBM_PRIVATE_FILE_LOCK_EX) {
+        valid = valid && entry->writer_active;
+    } else {
+        valid = false;
+    }
+    lock_registry_unlock(registry);
+    return valid;
+}
+
+static cbm_private_file_lock_status_t lock_registry_release_critical(cbm_lock_lease_t *lease) {
+    if (lease->critical_released) {
+        return CBM_PRIVATE_FILE_LOCK_OK;
+    }
+    cbm_private_file_lock_status_t status =
+        lock_registry_release_native(lease->registry, &lease->rw, &lease->turn);
+    if (status != CBM_PRIVATE_FILE_LOCK_OK) {
+        lease->release_error = true;
+    }
+    if (lease->rw && !cbm_private_file_lock_unlock_complete(lease->rw)) {
+        return status;
+    }
+    lease->critical_released = true;
+    lease->native_released = !lease->rw && !lease->turn;
+    return status;
+}
+
 cbm_private_file_lock_status_t cbm_lock_lease_release(cbm_lock_lease_t **lease_io) {
     if (!lease_io || !*lease_io) {
         return CBM_PRIVATE_FILE_LOCK_IO;
     }
     cbm_lock_lease_t *lease = *lease_io;
     if (lease->owner_pid != lock_registry_current_pid()) {
-        cbm_private_file_lock_status_t status =
-            lock_registry_release_native(lease->registry, &lease->rw, &lease->turn);
-        if (lease->waiter_cleanup_pending || lease->waiter.queued) {
-            return CBM_PRIVATE_FILE_LOCK_IO;
-        }
-        if (status == CBM_PRIVATE_FILE_LOCK_OK) {
-            *lease_io = NULL;
-            free(lease);
-        }
-        return status;
+        return lock_registry_release_foreign_process(lease_io);
     }
     if (lease->cleanup_only) {
         return lock_registry_cleanup_lease_release(lease_io);
     }
 
-    cbm_lock_registry_t *registry = lease->registry;
-    lock_registry_entry_t *entry = lease->entry;
-    bool native_state_valid = false;
-    if (lease->critical_released) {
-        native_state_valid = true;
-    } else if (lease->mode == CBM_PRIVATE_FILE_LOCK_SH) {
-        native_state_valid = lease->rw && !lease->turn;
-    } else if (lease->mode == CBM_PRIVATE_FILE_LOCK_EX) {
-        native_state_valid = lease->turn != NULL;
-    }
-    if (!registry || !entry || !lease->active || !native_state_valid ||
-        !lock_registry_lock(registry)) {
-        return CBM_PRIVATE_FILE_LOCK_IO;
-    }
-    bool valid = registry->active_lease_count > 0;
-    if (valid && lease->mode == CBM_PRIVATE_FILE_LOCK_SH) {
-        valid = entry->active_readers > 0;
-    } else if (valid && lease->mode == CBM_PRIVATE_FILE_LOCK_EX) {
-        valid = entry->writer_active;
-    } else {
-        valid = false;
-    }
-    lock_registry_unlock(registry);
-    if (!valid) {
+    if (!lock_registry_active_lease_valid(lease)) {
         return CBM_PRIVATE_FILE_LOCK_IO;
     }
 
+    cbm_private_file_lock_status_t critical_status = lock_registry_release_critical(lease);
     if (!lease->critical_released) {
-        cbm_private_file_lock_status_t status =
-            lock_registry_release_native(registry, &lease->rw, &lease->turn);
-        if (status != CBM_PRIVATE_FILE_LOCK_OK) {
-            lease->release_error = true;
-        }
-        if (lease->rw && !cbm_private_file_lock_unlock_complete(lease->rw)) {
-            return status;
-        }
-        lease->critical_released = true;
-        lease->native_released = !lease->rw && !lease->turn;
+        return critical_status;
     }
+    cbm_lock_registry_t *registry = lease->registry;
+    lock_registry_entry_t *entry = lease->entry;
     if (!lock_registry_lock(registry)) {
         return CBM_PRIVATE_FILE_LOCK_IO;
     }
@@ -908,10 +1006,10 @@ cbm_private_file_lock_status_t cbm_lock_registry_free(cbm_lock_registry_t **regi
     registry->owner_pid = 0;
     registry->stage_hook = NULL;
     registry->stage_context = NULL;
-    registry->test_release_fault_handle = 0;
-    registry->test_release_fault_step = 0;
+    registry->test_release_fault_handle = CBM_LOCK_REGISTRY_RELEASE_RW;
+    registry->test_release_fault_step = CBM_PRIVATE_FILE_LOCK_RELEASE_UNLOCK;
     registry->test_release_fault_armed = false;
-    registry->test_abort_failure = 0;
+    registry->test_abort_failure = CBM_LOCK_REGISTRY_ABORT_FAIL_LOCK;
     registry->test_abort_failure_armed = false;
     atomic_store_explicit(&registry->test_condition_wait_calls, 0, memory_order_relaxed);
     atomic_store_explicit(&registry->test_condition_waiters_now, 0, memory_order_relaxed);

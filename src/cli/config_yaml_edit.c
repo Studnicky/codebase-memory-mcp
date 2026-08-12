@@ -42,6 +42,7 @@
 
 enum {
     YAML_ERROR = -1,
+    YAML_INVALID_DESCRIPTOR = -1,
     YAML_OK = 0,
     YAML_UNIT = 1,
     YAML_MATCH = 1,
@@ -75,6 +76,25 @@ enum {
     YAML_LOCK_FILE_MODE = 0600,
     YAML_NEW_FILE_MODE = 0600,
     YAML_PERMISSION_MASK = 0777,
+    YAML_REQUIRED_LINK_COUNT = 1,
+    YAML_MIN_SEQUENCE_ALLOCATION_COUNT = 1,
+    YAML_SEQUENCE_ITEM_PREFIX_LEN = 2,
+    YAML_VALIDATION_SEQUENCE_PATH_LEN = 2,
+    YAML_UTF8_ASCII_LIMIT = 0x80,
+    YAML_UTF8_TWO_BYTE_FIRST_MIN = 0xC2,
+    YAML_UTF8_TWO_BYTE_FIRST_MAX = 0xDF,
+    YAML_UTF8_THREE_BYTE_FIRST_MIN = 0xE0,
+    YAML_UTF8_THREE_BYTE_FIRST_MAX = 0xEF,
+    YAML_UTF8_THREE_BYTE_E0 = 0xE0,
+    YAML_UTF8_THREE_BYTE_ED = 0xED,
+    YAML_UTF8_FOUR_BYTE_FIRST_MIN = 0xF0,
+    YAML_UTF8_FOUR_BYTE_FIRST_MAX = 0xF4,
+    YAML_UTF8_FOUR_BYTE_F0 = 0xF0,
+    YAML_UTF8_FOUR_BYTE_F4 = 0xF4,
+    YAML_UTF8_CONTINUATION_PREFIX = 0xC0,
+    YAML_UTF8_CONTINUATION_VALUE = 0x80,
+    YAML_UTF8_THREE_BYTE_SECOND_MIN = 0xA0,
+    YAML_UTF8_FOUR_BYTE_SECOND_MIN = 0x90,
 };
 
 #define YAML_INPUT_MAX ((size_t)YAML_INPUT_MIB * YAML_BYTES_PER_KIB * YAML_BYTES_PER_KIB)
@@ -345,7 +365,8 @@ static void yaml_remove_open_lock_directory(HANDLE handle) {
 }
 #else
 static bool yaml_lock_file_state_is_safe(const struct stat *state) {
-    return S_ISREG(state->st_mode) && state->st_nlink == 1 && state->st_uid == geteuid() &&
+    return S_ISREG(state->st_mode) && state->st_nlink == YAML_REQUIRED_LINK_COUNT &&
+           state->st_uid == geteuid() &&
            (state->st_mode & YAML_PERMISSION_MASK) == YAML_LOCK_FILE_MODE &&
            (state->st_mode & (S_ISUID | S_ISGID | S_ISVTX)) == 0;
 }
@@ -370,7 +391,7 @@ static int yaml_lock_acquire(const char *path, yaml_config_lock_t *lock) {
 #ifdef _WIN32
     lock->handle = INVALID_HANDLE_VALUE;
 #else
-    lock->descriptor = -1;
+    lock->descriptor = YAML_INVALID_DESCRIPTOR;
 #endif
     if (yaml_build_lock_path(path, &lock->path) != 0) {
         return YAML_ERROR;
@@ -531,7 +552,7 @@ static int yaml_lock_release(yaml_config_lock_t *lock) {
         int unlocked = yaml_flock_nointr(lock->descriptor, LOCK_UN);
         int closed = close(lock->descriptor);
         result = same && unlocked == 0 && closed == 0 ? 0 : YAML_ERROR;
-        lock->descriptor = -1;
+        lock->descriptor = YAML_INVALID_DESCRIPTOR;
     }
 #endif
     free(lock->path);
@@ -572,7 +593,7 @@ static int yaml_snapshot_from_handle(HANDLE handle, yaml_file_snapshot_t *snapsh
     BY_HANDLE_FILE_INFORMATION info;
     if (GetFileType(handle) != FILE_TYPE_DISK || !GetFileInformationByHandle(handle, &info) ||
         (info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0 ||
-        info.nNumberOfLinks != 1U) {
+        info.nNumberOfLinks != YAML_REQUIRED_LINK_COUNT) {
         return YAML_ERROR;
     }
     uint64_t size = ((uint64_t)info.nFileSizeHigh << 32U) | (uint64_t)info.nFileSizeLow;
@@ -594,8 +615,8 @@ static int yaml_snapshot_from_handle(HANDLE handle, yaml_file_snapshot_t *snapsh
 }
 #else
 static int yaml_snapshot_from_stat(const struct stat *state, yaml_file_snapshot_t *snapshot) {
-    if (!S_ISREG(state->st_mode) || state->st_nlink != 1U || state->st_size < 0 ||
-        (uint64_t)state->st_size > YAML_INPUT_MAX ||
+    if (!S_ISREG(state->st_mode) || state->st_nlink != YAML_REQUIRED_LINK_COUNT ||
+        state->st_size < 0 || (uint64_t)state->st_size > YAML_INPUT_MAX ||
         (state->st_mode & (S_ISUID | S_ISGID | S_ISVTX)) != 0) {
         return YAML_ERROR;
     }
@@ -711,7 +732,9 @@ static int yaml_read_file(const char *path, char **out_data, size_t *out_len,
     size_t len = (size_t)before.size;
     char *data = (char *)malloc(len + YAML_UNIT);
     if (!data) {
-        fclose(file);
+        if (fclose(file) != 0) {
+            return YAML_ERROR;
+        }
         return YAML_ERROR;
     }
     size_t read_count = fread(data, YAML_UNIT, len, file);
@@ -843,9 +866,7 @@ static int yaml_replace_file(const char *temp_path, const char *path, bool desti
 #endif
 }
 
-static int yaml_write_atomic(const char *path, const char *data, size_t len,
-                             const char *expected_data, size_t expected_len,
-                             const yaml_file_snapshot_t *expected_snapshot) {
+static int yaml_allocate_temp_path(const char *path, char **out_path, size_t *out_capacity) {
     size_t path_len = 0U;
     if (yaml_bounded_strlen(path, YAML_OUTPUT_MAX, &path_len) != 0 ||
         path_len > SIZE_MAX - YAML_TMP_SUFFIX_MAX - YAML_UNIT) {
@@ -856,20 +877,25 @@ static int yaml_write_atomic(const char *path, const char *data, size_t len,
     if (!temp_path) {
         return YAML_ERROR;
     }
+    *out_path = temp_path;
+    *out_capacity = capacity;
+    return 0;
+}
 
-    FILE *file = NULL;
+static int yaml_open_temp_file(const char *path, char *temp_path, size_t capacity,
+                               FILE **out_file) {
+    *out_file = NULL;
     for (unsigned attempt = 0U; attempt < YAML_TMP_ATTEMPTS; attempt++) {
         unsigned sequence =
             atomic_fetch_add_explicit(&yaml_temp_sequence, YAML_UNIT, memory_order_relaxed);
         int written = snprintf(temp_path, capacity, "%s.cbm-yaml-%ld-%u.tmp", path,
                                (long)YAML_PROCESS_ID(), sequence);
         if (written < 0 || (size_t)written >= capacity) {
-            free(temp_path);
             return YAML_ERROR;
         }
         errno = 0;
 #ifdef _WIN32
-        file = cbm_fopen(temp_path, "wbx");
+        *out_file = cbm_fopen(temp_path, "wbx");
 #else
         int flags = O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW;
 #ifdef O_CLOEXEC
@@ -877,32 +903,27 @@ static int yaml_write_atomic(const char *path, const char *data, size_t len,
 #endif
         int descriptor = open(temp_path, flags, YAML_NEW_FILE_MODE);
         if (descriptor >= 0) {
-            file = fdopen(descriptor, "wb");
-            if (!file) {
+            *out_file = fdopen(descriptor, "wb");
+            if (!*out_file) {
                 (void)close(descriptor);
                 (void)cbm_unlink(temp_path);
-                free(temp_path);
                 return YAML_ERROR;
             }
         }
 #endif
-        if (file) {
-            break;
+        if (*out_file) {
+            return 0;
         }
         if (errno != EEXIST) {
-            free(temp_path);
             return YAML_ERROR;
         }
     }
-    if (!file) {
-        free(temp_path);
-        return YAML_ERROR;
-    }
+    return YAML_ERROR;
+}
 
-    bool failed = fwrite(data, YAML_UNIT, len, file) != len;
-    if (!failed && fflush(file) != 0) {
-        failed = true;
-    }
+static int yaml_write_temp_file(FILE *file, const char *data, size_t len,
+                                const yaml_file_snapshot_t *expected_snapshot) {
+    bool failed = fwrite(data, YAML_UNIT, len, file) != len || fflush(file) != 0;
 #ifndef _WIN32
     if (!failed && expected_snapshot->exists &&
         fchown(cbm_fileno(file), expected_snapshot->owner, expected_snapshot->group) != 0) {
@@ -917,35 +938,31 @@ static int yaml_write_atomic(const char *path, const char *data, size_t len,
     if (!failed && YAML_SYNC(cbm_fileno(file)) != 0) {
         failed = true;
     }
-    if (fclose(file) != 0) {
-        failed = true;
-    }
-    if (failed) {
-        (void)cbm_unlink(temp_path);
-        free(temp_path);
-        return YAML_ERROR;
-    }
+    int close_result = fclose(file);
+    return !failed && close_result == 0 ? 0 : YAML_ERROR;
+}
+
+static int yaml_temp_file_matches(const char *temp_path, const char *data, size_t len,
+                                  yaml_file_snapshot_t *snapshot) {
     char *temp_data = NULL;
     size_t temp_len = 0U;
-    yaml_file_snapshot_t temp_snapshot;
-    if (yaml_read_file(temp_path, &temp_data, &temp_len, &temp_snapshot) != 0 ||
-        !temp_snapshot.exists || temp_len != len ||
-        (len != 0U && memcmp(temp_data, data, len) != 0)) {
-        free(temp_data);
-        (void)cbm_unlink(temp_path);
-        free(temp_path);
-        return YAML_ERROR;
-    }
+    int read_result = yaml_read_file(temp_path, &temp_data, &temp_len, snapshot);
+    bool matches = read_result == 0 && snapshot->exists && temp_len == len &&
+                   (len == 0U || memcmp(temp_data, data, len) == 0);
     free(temp_data);
+    return matches ? 0 : YAML_ERROR;
+}
 
+static int yaml_publish_temp_file(const char *path, const char *temp_path, const char *data,
+                                  size_t len, const char *expected_data, size_t expected_len,
+                                  const yaml_file_snapshot_t *expected_snapshot,
+                                  const yaml_file_snapshot_t *temp_snapshot) {
 #ifdef CBM_YAML_ENABLE_TEST_API
     if (yaml_precommit_test_hook) {
         yaml_precommit_test_hook(path, yaml_precommit_test_context);
     }
 #endif
     if (yaml_snapshot_matches_path(path, expected_data, expected_len, expected_snapshot) != 0) {
-        (void)cbm_unlink(temp_path);
-        free(temp_path);
         return YAML_ERROR;
     }
 #ifdef CBM_YAML_ENABLE_TEST_API
@@ -954,8 +971,31 @@ static int yaml_write_atomic(const char *path, const char *data, size_t len,
     }
 #endif
     if (yaml_snapshot_matches_path(path, expected_data, expected_len, expected_snapshot) != 0 ||
-        yaml_snapshot_matches_path(temp_path, data, len, &temp_snapshot) != 0 ||
-        yaml_replace_file(temp_path, path, expected_snapshot->exists) != 0) {
+        yaml_snapshot_matches_path(temp_path, data, len, temp_snapshot) != 0) {
+        return YAML_ERROR;
+    }
+    return yaml_replace_file(temp_path, path, expected_snapshot->exists);
+}
+
+static int yaml_write_atomic(const char *path, const char *data, size_t len,
+                             const char *expected_data, size_t expected_len,
+                             const yaml_file_snapshot_t *expected_snapshot) {
+    char *temp_path = NULL;
+    size_t capacity = 0U;
+    if (yaml_allocate_temp_path(path, &temp_path, &capacity) != 0) {
+        return YAML_ERROR;
+    }
+    FILE *file = NULL;
+    if (yaml_open_temp_file(path, temp_path, capacity, &file) != 0 ||
+        yaml_write_temp_file(file, data, len, expected_snapshot) != 0) {
+        (void)cbm_unlink(temp_path);
+        free(temp_path);
+        return YAML_ERROR;
+    }
+    yaml_file_snapshot_t temp_snapshot;
+    if (yaml_temp_file_matches(temp_path, data, len, &temp_snapshot) != 0 ||
+        yaml_publish_temp_file(path, temp_path, data, len, expected_data, expected_len,
+                               expected_snapshot, &temp_snapshot) != 0) {
         (void)cbm_unlink(temp_path);
         free(temp_path);
         return YAML_ERROR;
@@ -1361,56 +1401,86 @@ static int yaml_value_starts_multiline(const char *data, size_t colon, size_t en
     return pos < end && (data[pos] == '|' || data[pos] == '>');
 }
 
+typedef struct {
+    size_t target_count;
+    size_t mapping_count;
+    bool have_entry;
+} yaml_mapping_validation_t;
+
+static int yaml_validate_mapping_entry(const yaml_doc_t *doc, const yaml_line_t *line,
+                                       size_t line_index, const char *entry_key, size_t entry_len,
+                                       yaml_mapping_target_t *target,
+                                       yaml_mapping_validation_t *validation) {
+    size_t colon = 0U;
+    if (yaml_find_mapping_colon(doc->data, line->start + YAML_ENTRY_INDENT, line->text_end,
+                                &colon) != 0 ||
+        yaml_value_starts_multiline(doc->data, colon, line->text_end)) {
+        return YAML_ERROR;
+    }
+    validation->have_entry = true;
+    validation->mapping_count++;
+    size_t target_colon = 0U;
+    int match =
+        yaml_line_matches_key(doc, line, YAML_ENTRY_INDENT, entry_key, entry_len, &target_colon);
+    if (match < 0) {
+        return YAML_ERROR;
+    }
+    if (match != YAML_MATCH) {
+        return 0;
+    }
+    validation->target_count++;
+    target->entry_line = line_index;
+    return yaml_tail_is_empty(doc->data, target_colon, line->text_end) ? 0 : YAML_ERROR;
+}
+
+static int yaml_validate_mapping_child(const yaml_doc_t *doc, const yaml_line_t *line,
+                                       const yaml_mapping_validation_t *validation) {
+    if (!validation->have_entry) {
+        return YAML_ERROR;
+    }
+    size_t colon = 0U;
+    if (yaml_find_mapping_colon(doc->data, line->start + line->indent, line->text_end, &colon) ==
+            0 &&
+        yaml_value_starts_multiline(doc->data, colon, line->text_end)) {
+        return YAML_ERROR;
+    }
+    return 0;
+}
+
+static int yaml_validate_mapping_line(const yaml_doc_t *doc, const yaml_line_t *line,
+                                      size_t line_index, const char *entry_key, size_t entry_len,
+                                      yaml_mapping_target_t *target,
+                                      yaml_mapping_validation_t *validation) {
+    if (line->blank || line->comment) {
+        return 0;
+    }
+    if (line->indent < YAML_ENTRY_INDENT || (line->indent & YAML_UNIT) != 0U ||
+        yaml_range_has_unsupported(doc->data, line->start + line->indent, line->text_end)) {
+        return YAML_ERROR;
+    }
+    if (line->indent == YAML_ENTRY_INDENT) {
+        return yaml_validate_mapping_entry(doc, line, line_index, entry_key, entry_len, target,
+                                           validation);
+    }
+    return yaml_validate_mapping_child(doc, line, validation);
+}
+
 static int yaml_validate_mapping_body(const yaml_doc_t *doc, size_t first_line, size_t end_line,
                                       const char *entry_key, size_t entry_len,
                                       yaml_mapping_target_t *target) {
-    size_t target_count = 0U;
-    size_t mapping_count = 0U;
-    bool have_entry = false;
+    yaml_mapping_validation_t validation = {0};
     for (size_t i = first_line; i < end_line; i++) {
         const yaml_line_t *line = &doc->lines[i];
-        if (line->blank || line->comment) {
-            continue;
-        }
-        if (line->indent < YAML_ENTRY_INDENT || (line->indent & YAML_UNIT) != 0U ||
-            yaml_range_has_unsupported(doc->data, line->start + line->indent, line->text_end)) {
-            return YAML_ERROR;
-        }
-        size_t colon = 0U;
-        if (line->indent == YAML_ENTRY_INDENT) {
-            if (yaml_find_mapping_colon(doc->data, line->start + YAML_ENTRY_INDENT, line->text_end,
-                                        &colon) != 0 ||
-                yaml_value_starts_multiline(doc->data, colon, line->text_end)) {
-                return YAML_ERROR;
-            }
-            have_entry = true;
-            mapping_count++;
-            size_t target_colon = 0U;
-            int match = yaml_line_matches_key(doc, line, YAML_ENTRY_INDENT, entry_key, entry_len,
-                                              &target_colon);
-            if (match < 0) {
-                return YAML_ERROR;
-            }
-            if (match == YAML_MATCH) {
-                target_count++;
-                target->entry_line = i;
-                if (!yaml_tail_is_empty(doc->data, target_colon, line->text_end)) {
-                    return YAML_ERROR;
-                }
-            }
-            continue;
-        }
-        if (!have_entry || (yaml_find_mapping_colon(doc->data, line->start + line->indent,
-                                                    line->text_end, &colon) == 0 &&
-                            yaml_value_starts_multiline(doc->data, colon, line->text_end))) {
+        if (yaml_validate_mapping_line(doc, line, i, entry_key, entry_len, target, &validation) !=
+            0) {
             return YAML_ERROR;
         }
     }
-    if (target_count > YAML_UNIT) {
+    if (validation.target_count > YAML_UNIT) {
         return YAML_ERROR;
     }
-    target->entry_found = target_count == YAML_UNIT;
-    target->entry_count = mapping_count;
+    target->entry_found = validation.target_count == YAML_UNIT;
+    target->entry_count = validation.mapping_count;
     return 0;
 }
 
@@ -1937,43 +2007,65 @@ static size_t yaml_item_match_count(const yaml_item_vec_t *items, const char *it
     return count;
 }
 
+static bool yaml_utf8_is_continuation(unsigned char byte) {
+    return (byte & YAML_UTF8_CONTINUATION_PREFIX) == YAML_UTF8_CONTINUATION_VALUE;
+}
+
+static size_t yaml_utf8_sequence_length(unsigned char first) {
+    if (first < YAML_UTF8_ASCII_LIMIT) {
+        return YAML_UNIT;
+    }
+    if (first >= YAML_UTF8_TWO_BYTE_FIRST_MIN && first <= YAML_UTF8_TWO_BYTE_FIRST_MAX) {
+        return YAML_ENTRY_INDENT;
+    }
+    if (first >= YAML_UTF8_THREE_BYTE_FIRST_MIN && first <= YAML_UTF8_THREE_BYTE_FIRST_MAX) {
+        return YAML_DOC_MARKER_LEN;
+    }
+    if (first >= YAML_UTF8_FOUR_BYTE_FIRST_MIN && first <= YAML_UTF8_FOUR_BYTE_FIRST_MAX) {
+        return YAML_VALUE_INDENT;
+    }
+    return 0U;
+}
+
+static bool yaml_utf8_valid_continuations(const unsigned char *bytes, size_t start, size_t len,
+                                          size_t sequence_length) {
+    if (sequence_length > len - start) {
+        return false;
+    }
+    for (size_t offset = YAML_UNIT; offset < sequence_length; offset++) {
+        if (!yaml_utf8_is_continuation(bytes[start + offset])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool yaml_utf8_valid_leading_byte(const unsigned char *bytes, size_t start,
+                                         unsigned char first, size_t sequence_length) {
+    if (sequence_length == YAML_DOC_MARKER_LEN) {
+        unsigned char second = bytes[start + YAML_UNIT];
+        return !(first == YAML_UTF8_THREE_BYTE_E0 && second < YAML_UTF8_THREE_BYTE_SECOND_MIN) &&
+               !(first == YAML_UTF8_THREE_BYTE_ED && second >= YAML_UTF8_THREE_BYTE_SECOND_MIN);
+    }
+    if (sequence_length == YAML_VALUE_INDENT) {
+        unsigned char second = bytes[start + YAML_UNIT];
+        return !(first == YAML_UTF8_FOUR_BYTE_F0 && second < YAML_UTF8_FOUR_BYTE_SECOND_MIN) &&
+               !(first == YAML_UTF8_FOUR_BYTE_F4 && second >= YAML_UTF8_FOUR_BYTE_SECOND_MIN);
+    }
+    return true;
+}
+
 static int yaml_validate_utf8(const char *value, size_t len) {
     const unsigned char *bytes = (const unsigned char *)value;
     for (size_t i = 0U; i < len;) {
         unsigned char first = bytes[i];
-        if (first < 0x80U) {
-            i++;
-            continue;
+        size_t sequence_length = yaml_utf8_sequence_length(first);
+        if (sequence_length == 0U ||
+            !yaml_utf8_valid_continuations(bytes, i, len, sequence_length) ||
+            !yaml_utf8_valid_leading_byte(bytes, i, first, sequence_length)) {
+            return YAML_ERROR;
         }
-        if (first >= 0xC2U && first <= 0xDFU) {
-            if (i + YAML_UNIT >= len || (bytes[i + YAML_UNIT] & 0xC0U) != 0x80U) {
-                return YAML_ERROR;
-            }
-            i += YAML_ENTRY_INDENT;
-            continue;
-        }
-        if (first >= 0xE0U && first <= 0xEFU) {
-            if (i + YAML_ENTRY_INDENT >= len || (bytes[i + YAML_UNIT] & 0xC0U) != 0x80U ||
-                (bytes[i + YAML_ENTRY_INDENT] & 0xC0U) != 0x80U ||
-                (first == 0xE0U && bytes[i + YAML_UNIT] < 0xA0U) ||
-                (first == 0xEDU && bytes[i + YAML_UNIT] >= 0xA0U)) {
-                return YAML_ERROR;
-            }
-            i += YAML_DOC_MARKER_LEN;
-            continue;
-        }
-        if (first >= 0xF0U && first <= 0xF4U) {
-            if (i + YAML_DOC_MARKER_LEN >= len || (bytes[i + YAML_UNIT] & 0xC0U) != 0x80U ||
-                (bytes[i + YAML_ENTRY_INDENT] & 0xC0U) != 0x80U ||
-                (bytes[i + YAML_DOC_MARKER_LEN] & 0xC0U) != 0x80U ||
-                (first == 0xF0U && bytes[i + YAML_UNIT] < 0x90U) ||
-                (first == 0xF4U && bytes[i + YAML_UNIT] >= 0x90U)) {
-                return YAML_ERROR;
-            }
-            i += YAML_VALUE_INDENT;
-            continue;
-        }
-        return YAML_ERROR;
+        i += sequence_length;
     }
     return 0;
 }
@@ -2560,7 +2652,8 @@ static int yaml_sequence_parse_block(const yaml_doc_t *doc, size_t begin_line, s
     /* Minimum one element: a NULL-for-empty-range starts is only safe through
      * the loop-bound == alloc-bound invariant, which a path-sensitive
      * analyzer (rightly) refuses to assume across expressions. */
-    size_t *starts = (size_t *)calloc(range_len ? range_len : 1, sizeof(*starts));
+    size_t *starts = (size_t *)calloc(range_len ? range_len : YAML_MIN_SEQUENCE_ALLOCATION_COUNT,
+                                      sizeof(*starts));
     if (!starts) {
         return YAML_ERROR;
     }
@@ -2691,7 +2784,8 @@ static int yaml_sequence_render_item(yaml_buf_t *out, const char *canonical_item
             source_indent++;
         }
         source_indent -= start;
-        bool valid_first = line_index == 0U && source_indent == 0U && text_end - start >= 2U &&
+        bool valid_first = line_index == 0U && source_indent == 0U &&
+                           text_end - start >= YAML_SEQUENCE_ITEM_PREFIX_LEN &&
                            canonical_item[start] == '-' && canonical_item[start + YAML_UNIT] == ' ';
         bool valid_continuation = line_index > 0U && source_indent == YAML_ENTRY_INDENT &&
                                   start + source_indent < text_end;
@@ -2727,8 +2821,8 @@ static int yaml_sequence_validate_canonical(const char *canonical_item, size_t c
         const char *const path[] = {"root", "sequence"};
         const size_t lengths[] = {YAML_LITERAL_LEN("root"), YAML_LITERAL_LEN("sequence")};
         yaml_mapping_sequence_target_t target;
-        if (yaml_sequence_analyze(&doc, path, lengths, 2U, identity_key, identity_value, &target) !=
-                0 ||
+        if (yaml_sequence_analyze(&doc, path, lengths, YAML_VALIDATION_SEQUENCE_PATH_LEN,
+                                  identity_key, identity_value, &target) != 0 ||
             !target.sequence_found || target.item_count != YAML_UNIT || !target.identity_found ||
             target.identity_end - target.identity_start != rendered.len ||
             memcmp(doc.data + target.identity_start, rendered.data, rendered.len) != 0) {

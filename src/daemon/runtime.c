@@ -99,6 +99,71 @@ enum {
     APPLICATION_CANCEL_REQUEST_SIZE = 8,
     APPLICATION_REQUEST_PREFIX_SIZE = 12,
     APPLICATION_RESPONSE_PREFIX_SIZE = 16,
+
+    RUNTIME_WIRE_BOOL_FALSE = 0,
+    RUNTIME_WIRE_BOOL_TRUE = 1,
+    RUNTIME_IPC_FRAME_RECEIVED = 1,
+    RUNTIME_FILE_DESCRIPTOR_INVALID = -1,
+    RUNTIME_SIZE_TERMINATOR_BYTES = 1,
+    RUNTIME_MILLISECONDS_TO_NANOSECONDS = 1000000,
+    RUNTIME_WAIT_FINAL_MILLISECOND = 1,
+    RUNTIME_MAC_MAX_VM_REGIONS = 65536,
+    RUNTIME_BYTE_BITS = 8,
+    RUNTIME_U32_BYTES = 4,
+    RUNTIME_U64_BYTES = 8,
+    RUNTIME_U32_MOST_SIGNIFICANT_SHIFT = 24,
+    RUNTIME_U32_MIDDLE_HIGH_SHIFT = 16,
+    RUNTIME_U32_MIDDLE_LOW_SHIFT = 8,
+    RUNTIME_U64_MOST_SIGNIFICANT_SHIFT = 56,
+    RUNTIME_BYTE_VALUE_MASK = 0xFFU,
+    RUNTIME_U32_BYTE_0_OFFSET = 0,
+    RUNTIME_U32_BYTE_1_OFFSET = 1,
+    RUNTIME_U32_BYTE_2_OFFSET = 2,
+    RUNTIME_U32_BYTE_3_OFFSET = 3,
+
+    RUNTIME_CONNECT_ACCEPTED_VALUE = 1,
+    RUNTIME_CONNECT_CONFLICT_VALUE = 2,
+    RUNTIME_CONNECT_REJECTED_VALUE = 3,
+    RUNTIME_HELLO_COMPATIBLE_VALUE = 1,
+    RUNTIME_HELLO_VERSION_CONFLICT_VALUE = 2,
+    RUNTIME_HELLO_BUILD_CONFLICT_VALUE = 3,
+    RUNTIME_HELLO_PROTOCOL_ABI_CONFLICT_VALUE = 4,
+    RUNTIME_HELLO_STORE_ABI_CONFLICT_VALUE = 5,
+    RUNTIME_HELLO_FEATURE_ABI_CONFLICT_VALUE = 6,
+    RUNTIME_RENDEZVOUS_FRAME_VERSION_VALUE = 1,
+    RUNTIME_RENDEZVOUS_ABI_VALUE = 1,
+    RUNTIME_FRAME_REQUEST_VALUE = 1,
+    RUNTIME_FRAME_RESPONSE_VALUE = 2,
+    RUNTIME_HELLO_OPERATION_VALUE = 1,
+    RUNTIME_ACTIVATION_SHUTDOWN_OPERATION_VALUE = 8,
+    RUNTIME_ACTIVATION_INSTALL_VALUE = 1,
+    RUNTIME_ACTIVATION_UPDATE_VALUE = 2,
+    RUNTIME_ACTIVATION_UNINSTALL_VALUE = 3,
+
+    RUNTIME_CONTROL_STATUS_VALID_OFFSET = 0,
+    RUNTIME_CONTROL_STATUS_FLAGS_OFFSET = 1,
+    RUNTIME_CONTROL_STATUS_CLIENTS_HIGH_OFFSET = 2,
+    RUNTIME_CONTROL_STATUS_CLIENTS_LOW_OFFSET = 3,
+    RUNTIME_CONTROL_STATUS_PROCESS_ID_OFFSET = 4,
+    RUNTIME_CONTROL_STATUS_PROCESS_ID_SIZE = 4,
+    RUNTIME_CONTROL_STATUS_CLIENT_COUNT_OFFSET = 8,
+    RUNTIME_CONTROL_STATUS_CLIENTS_OFFSET = 12,
+    RUNTIME_CONTROL_STATUS_BUILD_OFFSET = 44,
+    RUNTIME_CONTROL_STATUS_VERSION_OFFSET = 109,
+    RUNTIME_CONTROL_STATUS_VERSION_CAP = 12,
+    RUNTIME_CONTROL_STOP_VALID_OFFSET = 0,
+    RUNTIME_CONTROL_STOP_FLAGS_OFFSET = 1,
+    RUNTIME_CONTROL_STOP_CLIENTS_HIGH_OFFSET = 2,
+    RUNTIME_CONTROL_STOP_CLIENTS_LOW_OFFSET = 3,
+    RUNTIME_CONTROL_STOP_CLIENT_COUNT_OFFSET = 4,
+    RUNTIME_CONTROL_STOP_CLIENTS_OFFSET = 8,
+    RUNTIME_CONTROL_FLAG_ACCEPTED = 0x01U,
+    RUNTIME_CONTROL_FLAG_BUSY_OR_STOPPING = 0x02U,
+    RUNTIME_LOG_INTEGER_TEXT_CAP = 32,
+    RUNTIME_LOG_RECEIVE_RESULT_TEXT_CAP = 16,
+    RUNTIME_SHORT_TICK_MS = 1,
+    RUNTIME_SINGLE_ALLOCATION_ELEMENT = 1,
+    RUNTIME_IPC_LOCK_ACQUIRED = 1,
 };
 
 _Static_assert(RENDEZVOUS_REQUEST_BUILD_OFFSET + CBM_DAEMON_RENDEZVOUS_BUILD_FINGERPRINT_CAP ==
@@ -109,7 +174,7 @@ _Static_assert(RENDEZVOUS_RESPONSE_MESSAGE_OFFSET + CBM_DAEMON_RENDEZVOUS_MESSAG
                "rendezvous response layout changed");
 _Static_assert(ACTIVATION_REQUEST_IDENTITY_OFFSET + CBM_DAEMON_RENDEZVOUS_REQUEST_SIZE ==
                        CBM_DAEMON_ACTIVATION_SHUTDOWN_REQUEST_SIZE &&
-                   ACTIVATION_RESPONSE_CONNECTIONS_OFFSET + 8 ==
+                   ACTIVATION_RESPONSE_CONNECTIONS_OFFSET + RUNTIME_U64_BYTES ==
                        CBM_DAEMON_ACTIVATION_SHUTDOWN_RESPONSE_SIZE,
                "activation shutdown layout changed");
 _Static_assert(CBM_DAEMON_RENDEZVOUS_VERSION_TEXT_CAP == CBM_DAEMON_VERSION_TEXT_SIZE,
@@ -118,23 +183,31 @@ _Static_assert(CBM_DAEMON_RENDEZVOUS_BUILD_FINGERPRINT_CAP == CBM_DAEMON_BUILD_F
                "service fingerprint capacity requires a new rendezvous strategy");
 _Static_assert(CBM_DAEMON_RENDEZVOUS_MESSAGE_CAP == CBM_DAEMON_CONFLICT_MESSAGE_SIZE,
                "service message capacity requires a new rendezvous strategy");
-_Static_assert(CBM_DAEMON_RUNTIME_CONNECT_ERROR == 0 && CBM_DAEMON_RUNTIME_CONNECT_ACCEPTED == 1 &&
-                   CBM_DAEMON_RUNTIME_CONNECT_CONFLICT == 2 &&
-                   CBM_DAEMON_RUNTIME_CONNECT_REJECTED == 3,
+_Static_assert(CBM_DAEMON_RUNTIME_CONNECT_ERROR == RUNTIME_WIRE_BOOL_FALSE &&
+                   CBM_DAEMON_RUNTIME_CONNECT_ACCEPTED == RUNTIME_CONNECT_ACCEPTED_VALUE &&
+                   CBM_DAEMON_RUNTIME_CONNECT_CONFLICT == RUNTIME_CONNECT_CONFLICT_VALUE &&
+                   CBM_DAEMON_RUNTIME_CONNECT_REJECTED == RUNTIME_CONNECT_REJECTED_VALUE,
                "rendezvous connect status values changed");
-_Static_assert(CBM_DAEMON_HELLO_INVALID == 0 && CBM_DAEMON_HELLO_COMPATIBLE == 1 &&
-                   CBM_DAEMON_HELLO_VERSION_CONFLICT == 2 && CBM_DAEMON_HELLO_BUILD_CONFLICT == 3 &&
-                   CBM_DAEMON_HELLO_PROTOCOL_ABI_CONFLICT == 4 &&
-                   CBM_DAEMON_HELLO_STORE_ABI_CONFLICT == 5 &&
-                   CBM_DAEMON_HELLO_FEATURE_ABI_CONFLICT == 6,
+_Static_assert(CBM_DAEMON_HELLO_INVALID == RUNTIME_WIRE_BOOL_FALSE &&
+                   CBM_DAEMON_HELLO_COMPATIBLE == RUNTIME_HELLO_COMPATIBLE_VALUE &&
+                   CBM_DAEMON_HELLO_VERSION_CONFLICT == RUNTIME_HELLO_VERSION_CONFLICT_VALUE &&
+                   CBM_DAEMON_HELLO_BUILD_CONFLICT == RUNTIME_HELLO_BUILD_CONFLICT_VALUE &&
+                   CBM_DAEMON_HELLO_PROTOCOL_ABI_CONFLICT ==
+                       RUNTIME_HELLO_PROTOCOL_ABI_CONFLICT_VALUE &&
+                   CBM_DAEMON_HELLO_STORE_ABI_CONFLICT == RUNTIME_HELLO_STORE_ABI_CONFLICT_VALUE &&
+                   CBM_DAEMON_HELLO_FEATURE_ABI_CONFLICT ==
+                       RUNTIME_HELLO_FEATURE_ABI_CONFLICT_VALUE,
                "rendezvous hello status values changed");
-_Static_assert(CBM_DAEMON_RENDEZVOUS_FRAME_VERSION == 1 && CBM_DAEMON_RENDEZVOUS_ABI == 1 &&
-                   CBM_DAEMON_FRAME_REQUEST == 1 && CBM_DAEMON_FRAME_RESPONSE == 2 &&
-                   CBM_DAEMON_RUNTIME_OP_HELLO == 1 &&
-                   CBM_DAEMON_RUNTIME_OP_ACTIVATION_SHUTDOWN == 8 &&
-                   CBM_DAEMON_RUNTIME_ACTIVATION_INSTALL == 1 &&
-                   CBM_DAEMON_RUNTIME_ACTIVATION_UPDATE == 2 &&
-                   CBM_DAEMON_RUNTIME_ACTIVATION_UNINSTALL == 3,
+_Static_assert(CBM_DAEMON_RENDEZVOUS_FRAME_VERSION == RUNTIME_RENDEZVOUS_FRAME_VERSION_VALUE &&
+                   CBM_DAEMON_RENDEZVOUS_ABI == RUNTIME_RENDEZVOUS_ABI_VALUE &&
+                   CBM_DAEMON_FRAME_REQUEST == RUNTIME_FRAME_REQUEST_VALUE &&
+                   CBM_DAEMON_FRAME_RESPONSE == RUNTIME_FRAME_RESPONSE_VALUE &&
+                   CBM_DAEMON_RUNTIME_OP_HELLO == RUNTIME_HELLO_OPERATION_VALUE &&
+                   CBM_DAEMON_RUNTIME_OP_ACTIVATION_SHUTDOWN ==
+                       RUNTIME_ACTIVATION_SHUTDOWN_OPERATION_VALUE &&
+                   CBM_DAEMON_RUNTIME_ACTIVATION_INSTALL == RUNTIME_ACTIVATION_INSTALL_VALUE &&
+                   CBM_DAEMON_RUNTIME_ACTIVATION_UPDATE == RUNTIME_ACTIVATION_UPDATE_VALUE &&
+                   CBM_DAEMON_RUNTIME_ACTIVATION_UNINSTALL == RUNTIME_ACTIVATION_UNINSTALL_VALUE,
                "rendezvous framing values changed");
 
 typedef struct cbm_daemon_runtime_worker cbm_daemon_runtime_worker_t;
@@ -265,33 +338,37 @@ static void runtime_wait_tick(uint64_t deadline_ms) {
     uint64_t remaining_ms = deadline_ms - now_ms;
     struct timespec pause = {
         .tv_sec = 0,
-        .tv_nsec = remaining_ms > 1 ? RUNTIME_WAIT_POLL_NS : (long)(remaining_ms * 1000000ULL),
+        .tv_nsec = remaining_ms > RUNTIME_WAIT_FINAL_MILLISECOND
+                       ? RUNTIME_WAIT_POLL_NS
+                       : (long)(remaining_ms * RUNTIME_MILLISECONDS_TO_NANOSECONDS),
     };
     (void)cbm_nanosleep(&pause, NULL);
 }
 
 static void runtime_put_u32(uint8_t *out, uint32_t value) {
-    out[0] = (uint8_t)(value >> 24);
-    out[1] = (uint8_t)(value >> 16);
-    out[2] = (uint8_t)(value >> 8);
-    out[3] = (uint8_t)value;
+    out[RUNTIME_U32_BYTE_0_OFFSET] = (uint8_t)(value >> RUNTIME_U32_MOST_SIGNIFICANT_SHIFT);
+    out[RUNTIME_U32_BYTE_1_OFFSET] = (uint8_t)(value >> RUNTIME_U32_MIDDLE_HIGH_SHIFT);
+    out[RUNTIME_U32_BYTE_2_OFFSET] = (uint8_t)(value >> RUNTIME_U32_MIDDLE_LOW_SHIFT);
+    out[RUNTIME_U32_BYTE_3_OFFSET] = (uint8_t)value;
 }
 
 static uint32_t runtime_get_u32(const uint8_t *in) {
-    return ((uint32_t)in[0] << 24) | ((uint32_t)in[1] << 16) | ((uint32_t)in[2] << 8) |
-           (uint32_t)in[3];
+    return ((uint32_t)in[RUNTIME_U32_BYTE_0_OFFSET] << RUNTIME_U32_MOST_SIGNIFICANT_SHIFT) |
+           ((uint32_t)in[RUNTIME_U32_BYTE_1_OFFSET] << RUNTIME_U32_MIDDLE_HIGH_SHIFT) |
+           ((uint32_t)in[RUNTIME_U32_BYTE_2_OFFSET] << RUNTIME_U32_MIDDLE_LOW_SHIFT) |
+           (uint32_t)in[RUNTIME_U32_BYTE_3_OFFSET];
 }
 
 static void runtime_put_u64(uint8_t *out, uint64_t value) {
-    for (size_t i = 0; i < 8; i++) {
-        out[i] = (uint8_t)(value >> (56 - (i * 8)));
+    for (size_t i = 0; i < RUNTIME_U64_BYTES; i++) {
+        out[i] = (uint8_t)(value >> (RUNTIME_U64_MOST_SIGNIFICANT_SHIFT - (i * RUNTIME_BYTE_BITS)));
     }
 }
 
 static uint64_t runtime_get_u64(const uint8_t *in) {
     uint64_t value = 0;
-    for (size_t i = 0; i < 8; i++) {
-        value = (value << 8) | in[i];
+    for (size_t i = 0; i < RUNTIME_U64_BYTES; i++) {
+        value = (value << RUNTIME_BYTE_BITS) | in[i];
     }
     return value;
 }
@@ -338,7 +415,7 @@ static bool runtime_wire_string_decode(const uint8_t *in, size_t capacity, char 
     if (length == capacity || (!allow_empty && length == 0)) {
         return false;
     }
-    for (size_t i = length + 1; i < capacity; i++) {
+    for (size_t i = length + RUNTIME_SIZE_TERMINATOR_BYTES; i < capacity; i++) {
         if (in[i] != 0) {
             return false;
         }
@@ -359,16 +436,16 @@ static cbm_daemon_hello_status_t runtime_rendezvous_compare(const char *active_v
     cbm_daemon_build_identity_t active = {
         .semantic_version = active_version,
         .build_fingerprint = active_build,
-        .protocol_abi = 1,
-        .store_abi = 1,
-        .feature_abi = 1,
+        .protocol_abi = RUNTIME_RENDEZVOUS_ABI_VALUE,
+        .store_abi = RUNTIME_RENDEZVOUS_ABI_VALUE,
+        .feature_abi = RUNTIME_RENDEZVOUS_ABI_VALUE,
     };
     cbm_daemon_build_identity_t requested = {
         .semantic_version = requested_version,
         .build_fingerprint = requested_build,
-        .protocol_abi = 1,
-        .store_abi = 1,
-        .feature_abi = 1,
+        .protocol_abi = RUNTIME_RENDEZVOUS_ABI_VALUE,
+        .store_abi = RUNTIME_RENDEZVOUS_ABI_VALUE,
+        .feature_abi = RUNTIME_RENDEZVOUS_ABI_VALUE,
     };
     cbm_daemon_hello_status_t status = cbm_daemon_hello_compare(&active, &requested, conflict_out);
     if (status != CBM_DAEMON_HELLO_INVALID && status != CBM_DAEMON_HELLO_COMPATIBLE &&
@@ -425,6 +502,35 @@ static bool runtime_activation_action_valid(cbm_daemon_runtime_activation_action
            action == CBM_DAEMON_RUNTIME_ACTIVATION_UNINSTALL;
 }
 
+static bool runtime_application_status_decode(uint32_t raw,
+                                              cbm_daemon_runtime_application_status_t *out) {
+    if (!out) {
+        return false;
+    }
+    switch (raw) {
+    case CBM_DAEMON_RUNTIME_APPLICATION_OK:
+        *out = CBM_DAEMON_RUNTIME_APPLICATION_OK;
+        return true;
+    case CBM_DAEMON_RUNTIME_APPLICATION_BUSY:
+        *out = CBM_DAEMON_RUNTIME_APPLICATION_BUSY;
+        return true;
+    case CBM_DAEMON_RUNTIME_APPLICATION_UNAVAILABLE:
+        *out = CBM_DAEMON_RUNTIME_APPLICATION_UNAVAILABLE;
+        return true;
+    case CBM_DAEMON_RUNTIME_APPLICATION_REJECTED:
+        *out = CBM_DAEMON_RUNTIME_APPLICATION_REJECTED;
+        return true;
+    case CBM_DAEMON_RUNTIME_APPLICATION_HANDLER_ERROR:
+        *out = CBM_DAEMON_RUNTIME_APPLICATION_HANDLER_ERROR;
+        return true;
+    case CBM_DAEMON_RUNTIME_APPLICATION_CANCELLED:
+        *out = CBM_DAEMON_RUNTIME_APPLICATION_CANCELLED;
+        return true;
+    default:
+        return false;
+    }
+}
+
 static const char *runtime_activation_action_text(cbm_daemon_runtime_activation_action_t action) {
     switch (action) {
     case CBM_DAEMON_RUNTIME_ACTIVATION_INSTALL:
@@ -478,7 +584,8 @@ static bool runtime_activation_response_encode(
     }
     memset(out, 0, CBM_DAEMON_ACTIVATION_SHUTDOWN_RESPONSE_SIZE);
     runtime_put_u32(out + ACTIVATION_RESPONSE_ABI_OFFSET, CBM_DAEMON_RENDEZVOUS_ABI);
-    runtime_put_u32(out + ACTIVATION_RESPONSE_ACCEPTED_OFFSET, result->accepted ? 1U : 0U);
+    runtime_put_u32(out + ACTIVATION_RESPONSE_ACCEPTED_OFFSET,
+                    result->accepted ? RUNTIME_WIRE_BOOL_TRUE : RUNTIME_WIRE_BOOL_FALSE);
     runtime_put_u64(out + ACTIVATION_RESPONSE_CLIENTS_OFFSET, result->active_clients);
     runtime_put_u64(out + ACTIVATION_RESPONSE_CONNECTIONS_OFFSET, result->active_connections);
     return true;
@@ -492,10 +599,10 @@ static bool runtime_activation_response_decode(
         return false;
     }
     uint32_t accepted = runtime_get_u32(payload + ACTIVATION_RESPONSE_ACCEPTED_OFFSET);
-    if (accepted > 1U) {
+    if (accepted > RUNTIME_WIRE_BOOL_TRUE) {
         return false;
     }
-    result_out->accepted = accepted == 1U;
+    result_out->accepted = accepted == RUNTIME_WIRE_BOOL_TRUE;
     result_out->active_clients = runtime_get_u64(payload + ACTIVATION_RESPONSE_CLIENTS_OFFSET);
     result_out->active_connections =
         runtime_get_u64(payload + ACTIVATION_RESPONSE_CONNECTIONS_OFFSET);
@@ -520,7 +627,7 @@ static void runtime_process_image_reference_init(runtime_process_image_reference
 #ifdef _WIN32
     reference->file = INVALID_HANDLE_VALUE;
 #elif defined(__APPLE__) || defined(__linux__)
-    reference->fd = -1;
+    reference->fd = RUNTIME_FILE_DESCRIPTOR_INVALID;
 #endif
 }
 
@@ -647,7 +754,7 @@ static bool runtime_mac_stat_same(const struct stat *first, const struct stat *s
 
 static bool runtime_mac_process_maps_file_executable(int process_id, const struct stat *status) {
     uint64_t address = 0;
-    for (size_t region_count = 0; region_count < 65536; region_count++) {
+    for (size_t region_count = 0; region_count < RUNTIME_MAC_MAX_VM_REGIONS; region_count++) {
         struct proc_regionwithpathinfo region;
         memset(&region, 0, sizeof(region));
         int received =
@@ -751,7 +858,8 @@ static bool runtime_process_image_reference_acquire(
     if (ok) {
         path[path_length] = '\0';
     }
-    int fd = ok ? open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK) : -1;
+    int fd = ok ? open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
+                : RUNTIME_FILE_DESCRIPTOR_INVALID;
     struct stat file_before;
     struct stat file_after;
     ok = ok && fd >= 0 && fstat(fd, &file_before) == 0 && S_ISREG(file_before.st_mode) &&
@@ -990,7 +1098,7 @@ static bool runtime_worker_send_frame(cbm_daemon_runtime_worker_t *worker,
 static bool runtime_worker_send_status(cbm_daemon_runtime_worker_t *worker,
                                        cbm_daemon_runtime_operation_t operation, bool success) {
     uint8_t payload[STATUS_RESPONSE_SIZE];
-    runtime_put_u32(payload, success ? 1U : 0U);
+    runtime_put_u32(payload, success ? RUNTIME_WIRE_BOOL_TRUE : RUNTIME_WIRE_BOOL_FALSE);
     return runtime_worker_send_frame(worker, CBM_DAEMON_FRAME_RESPONSE, operation, payload,
                                      (uint32_t)sizeof(payload));
 }
@@ -1023,8 +1131,8 @@ static bool runtime_worker_send_application_response(
         return false;
     }
     runtime_put_u64(wire, request_token);
-    runtime_put_u32(wire + 8, (uint32_t)status);
-    runtime_put_u32(wire + 12, response_length);
+    runtime_put_u32(wire + RUNTIME_U64_BYTES, (uint32_t)status);
+    runtime_put_u32(wire + APPLICATION_REQUEST_PREFIX_SIZE, response_length);
     if (response_length > 0) {
         memcpy(wire + APPLICATION_RESPONSE_PREFIX_SIZE, response, response_length);
     }
@@ -1196,7 +1304,7 @@ static bool runtime_worker_handle_subscribe(cbm_daemon_runtime_worker_t *worker,
         length != SUBSCRIBE_REQUEST_PREFIX_SIZE + key_length) {
         return false;
     }
-    char project_key[CBM_DAEMON_RUNTIME_PROJECT_KEY_MAX + 1];
+    char project_key[CBM_DAEMON_RUNTIME_PROJECT_KEY_MAX + RUNTIME_SIZE_TERMINATOR_BYTES];
     memcpy(project_key, payload + SUBSCRIBE_REQUEST_PREFIX_SIZE, key_length);
     project_key[key_length] = '\0';
     if (memchr(project_key, '\0', key_length) != NULL) {
@@ -1207,7 +1315,7 @@ static bool runtime_worker_handle_subscribe(cbm_daemon_runtime_worker_t *worker,
         worker->service->coordinator, worker->client_id, project_key, &subscription_id);
     uint8_t response[SUBSCRIBE_RESPONSE_SIZE];
     runtime_put_u32(response, (uint32_t)result);
-    runtime_put_u64(response + 4, subscription_id);
+    runtime_put_u64(response + RUNTIME_U32_BYTES, subscription_id);
     return runtime_worker_send_frame(worker, CBM_DAEMON_FRAME_RESPONSE,
                                      CBM_DAEMON_RUNTIME_OP_JOB_SUBSCRIBE, response,
                                      (uint32_t)sizeof(response));
@@ -1291,7 +1399,7 @@ static bool runtime_worker_handle_application(cbm_daemon_runtime_worker_t *worke
         return false;
     }
     cbm_daemon_runtime_application_token_t request_token = runtime_get_u64(payload);
-    uint32_t request_length = runtime_get_u32(payload + 8);
+    uint32_t request_length = runtime_get_u32(payload + RUNTIME_U64_BYTES);
     if (request_length > CBM_DAEMON_RUNTIME_APPLICATION_PAYLOAD_MAX ||
         length != APPLICATION_REQUEST_PREFIX_SIZE + request_length ||
         request_token == CBM_DAEMON_RUNTIME_APPLICATION_TOKEN_INVALID ||
@@ -1437,11 +1545,12 @@ static bool runtime_activation_peer_matches_claim(cbm_daemon_runtime_service_t *
 static bool runtime_control_request_decode(const uint8_t *payload, uint32_t length,
                                            char build_out[CBM_DAEMON_BUILD_FINGERPRINT_SIZE]) {
     if (!payload || length != CBM_DAEMON_CONTROL_REQUEST_SIZE ||
-        payload[CBM_DAEMON_CONTROL_REQUEST_SIZE - 1U] != 0U) {
+        payload[CBM_DAEMON_CONTROL_REQUEST_SIZE - RUNTIME_SIZE_TERMINATOR_BYTES] !=
+            RUNTIME_WIRE_BOOL_FALSE) {
         return false;
     }
     memcpy(build_out, payload, CBM_DAEMON_BUILD_FINGERPRINT_SIZE);
-    return strlen(build_out) == CBM_DAEMON_BUILD_FINGERPRINT_SIZE - 1U;
+    return strlen(build_out) == CBM_DAEMON_BUILD_FINGERPRINT_SIZE - RUNTIME_SIZE_TERMINATOR_BYTES;
 }
 
 static void runtime_control_collect_clients_locked(cbm_daemon_runtime_service_t *service,
@@ -1476,32 +1585,46 @@ static void runtime_worker_handle_status(cbm_daemon_runtime_worker_t *worker,
         uint8_t count = 0U;
         uint32_t pids[CBM_DAEMON_CONTROL_CLIENT_CAP] = {0};
         cbm_mutex_lock(&service->mutex);
-        response[0] = 1U;
-        response[1] =
-            (uint8_t)((service->permanent ? 0x01U : 0U) |
-                      (service->state != CBM_DAEMON_RUNTIME_SERVICE_RUNNING ? 0x02U : 0U));
+        response[RUNTIME_CONTROL_STATUS_VALID_OFFSET] = RUNTIME_WIRE_BOOL_TRUE;
+        response[RUNTIME_CONTROL_STATUS_FLAGS_OFFSET] =
+            (uint8_t)((service->permanent ? RUNTIME_CONTROL_FLAG_ACCEPTED
+                                          : RUNTIME_WIRE_BOOL_FALSE) |
+                      (service->state != CBM_DAEMON_RUNTIME_SERVICE_RUNNING
+                           ? RUNTIME_CONTROL_FLAG_BUSY_OR_STOPPING
+                           : RUNTIME_WIRE_BOOL_FALSE));
         uint16_t committed = service->committed_clients > UINT16_MAX
                                  ? UINT16_MAX
                                  : (uint16_t)service->committed_clients;
-        response[2] = (uint8_t)(committed >> 8);
-        response[3] = (uint8_t)(committed & 0xFFU);
+        response[RUNTIME_CONTROL_STATUS_CLIENTS_HIGH_OFFSET] =
+            (uint8_t)(committed >> RUNTIME_BYTE_BITS);
+        response[RUNTIME_CONTROL_STATUS_CLIENTS_LOW_OFFSET] =
+            (uint8_t)(committed & RUNTIME_BYTE_VALUE_MASK);
         uint32_t daemon_pid = (uint32_t)runtime_current_process_id();
-        response[4] = (uint8_t)(daemon_pid >> 24);
-        response[5] = (uint8_t)(daemon_pid >> 16);
-        response[6] = (uint8_t)(daemon_pid >> 8);
-        response[7] = (uint8_t)(daemon_pid & 0xFFU);
+        response[RUNTIME_CONTROL_STATUS_PROCESS_ID_OFFSET] =
+            (uint8_t)(daemon_pid >> RUNTIME_U32_MOST_SIGNIFICANT_SHIFT);
+        response[RUNTIME_CONTROL_STATUS_PROCESS_ID_OFFSET + RUNTIME_U32_BYTE_1_OFFSET] =
+            (uint8_t)(daemon_pid >> RUNTIME_U32_MIDDLE_HIGH_SHIFT);
+        response[RUNTIME_CONTROL_STATUS_PROCESS_ID_OFFSET + RUNTIME_U32_BYTE_2_OFFSET] =
+            (uint8_t)(daemon_pid >> RUNTIME_U32_MIDDLE_LOW_SHIFT);
+        response[RUNTIME_CONTROL_STATUS_PROCESS_ID_OFFSET + RUNTIME_U32_BYTE_3_OFFSET] =
+            (uint8_t)(daemon_pid & RUNTIME_BYTE_VALUE_MASK);
         runtime_control_collect_clients_locked(service, worker, &count, pids);
-        response[8] = count;
+        response[RUNTIME_CONTROL_STATUS_CLIENT_COUNT_OFFSET] = count;
         for (size_t index = 0; index < CBM_DAEMON_CONTROL_CLIENT_CAP; index++) {
-            size_t offset = 12U + (index * 4U);
-            response[offset] = (uint8_t)(pids[index] >> 24);
-            response[offset + 1U] = (uint8_t)(pids[index] >> 16);
-            response[offset + 2U] = (uint8_t)(pids[index] >> 8);
-            response[offset + 3U] = (uint8_t)(pids[index] & 0xFFU);
+            size_t offset = RUNTIME_CONTROL_STATUS_CLIENTS_OFFSET + (index * RUNTIME_U32_BYTES);
+            response[offset] = (uint8_t)(pids[index] >> RUNTIME_U32_MOST_SIGNIFICANT_SHIFT);
+            response[offset + RUNTIME_U32_BYTE_1_OFFSET] =
+                (uint8_t)(pids[index] >> RUNTIME_U32_MIDDLE_HIGH_SHIFT);
+            response[offset + RUNTIME_U32_BYTE_2_OFFSET] =
+                (uint8_t)(pids[index] >> RUNTIME_U32_MIDDLE_LOW_SHIFT);
+            response[offset + RUNTIME_U32_BYTE_3_OFFSET] =
+                (uint8_t)(pids[index] & RUNTIME_BYTE_VALUE_MASK);
         }
-        (void)snprintf((char *)response + 44U, CBM_DAEMON_BUILD_FINGERPRINT_SIZE, "%s",
+        (void)snprintf((char *)response + RUNTIME_CONTROL_STATUS_BUILD_OFFSET,
+                       CBM_DAEMON_BUILD_FINGERPRINT_SIZE, "%s",
                        service->identity.build_fingerprint);
-        (void)snprintf((char *)response + 109U, 12U, "%s",
+        (void)snprintf((char *)response + RUNTIME_CONTROL_STATUS_VERSION_OFFSET,
+                       RUNTIME_CONTROL_STATUS_VERSION_CAP, "%s",
                        service->identity.semantic_version ? service->identity.semantic_version
                                                           : "");
         cbm_mutex_unlock(&service->mutex);
@@ -1526,7 +1649,7 @@ static void runtime_worker_handle_stop(cbm_daemon_runtime_worker_t *worker, cons
         uint32_t pids[CBM_DAEMON_CONTROL_CLIENT_CAP] = {0};
         uint64_t deadline = runtime_deadline_after(service->shutdown_timeout_ms);
         cbm_mutex_lock(&service->mutex);
-        response[0] = 1U;
+        response[RUNTIME_CONTROL_STOP_VALID_OFFSET] = RUNTIME_WIRE_BOOL_TRUE;
         uint16_t committed = service->committed_clients > UINT16_MAX
                                  ? UINT16_MAX
                                  : (uint16_t)service->committed_clients;
@@ -1534,7 +1657,7 @@ static void runtime_worker_handle_stop(cbm_daemon_runtime_worker_t *worker, cons
         if (service->committed_clients > 0) {
             /* Refuse-if-busy: the caller reports these pids to the user as
              * the processes that must exit before a graceful stop. */
-            response[1] = 0x02U;
+            response[RUNTIME_CONTROL_STOP_FLAGS_OFFSET] = RUNTIME_CONTROL_FLAG_BUSY_OR_STOPPING;
         } else if (service->state == CBM_DAEMON_RUNTIME_SERVICE_RUNNING) {
             /* Explicit stop is the sanctioned exit for PERMANENT generations
              * as well — begin_stopping here overrides the permanence gate.
@@ -1549,23 +1672,28 @@ static void runtime_worker_handle_stop(cbm_daemon_runtime_worker_t *worker, cons
             service->activation_shutdown_requested = true;
             service->activation_response_inflight = true;
             worker->final_response_inflight = true;
-            response[1] = 0x01U;
+            response[RUNTIME_CONTROL_STOP_FLAGS_OFFSET] = RUNTIME_CONTROL_FLAG_ACCEPTED;
             accepted = true;
         }
-        response[2] = (uint8_t)(committed >> 8);
-        response[3] = (uint8_t)(committed & 0xFFU);
-        response[4] = count;
+        response[RUNTIME_CONTROL_STOP_CLIENTS_HIGH_OFFSET] =
+            (uint8_t)(committed >> RUNTIME_BYTE_BITS);
+        response[RUNTIME_CONTROL_STOP_CLIENTS_LOW_OFFSET] =
+            (uint8_t)(committed & RUNTIME_BYTE_VALUE_MASK);
+        response[RUNTIME_CONTROL_STOP_CLIENT_COUNT_OFFSET] = count;
         for (size_t index = 0; index < CBM_DAEMON_CONTROL_CLIENT_CAP; index++) {
-            size_t offset = 8U + (index * 4U);
-            response[offset] = (uint8_t)(pids[index] >> 24);
-            response[offset + 1U] = (uint8_t)(pids[index] >> 16);
-            response[offset + 2U] = (uint8_t)(pids[index] >> 8);
-            response[offset + 3U] = (uint8_t)(pids[index] & 0xFFU);
+            size_t offset = RUNTIME_CONTROL_STOP_CLIENTS_OFFSET + (index * RUNTIME_U32_BYTES);
+            response[offset] = (uint8_t)(pids[index] >> RUNTIME_U32_MOST_SIGNIFICANT_SHIFT);
+            response[offset + RUNTIME_U32_BYTE_1_OFFSET] =
+                (uint8_t)(pids[index] >> RUNTIME_U32_MIDDLE_HIGH_SHIFT);
+            response[offset + RUNTIME_U32_BYTE_2_OFFSET] =
+                (uint8_t)(pids[index] >> RUNTIME_U32_MIDDLE_LOW_SHIFT);
+            response[offset + RUNTIME_U32_BYTE_3_OFFSET] =
+                (uint8_t)(pids[index] & RUNTIME_BYTE_VALUE_MASK);
         }
         cbm_mutex_unlock(&service->mutex);
     }
     if (accepted) {
-        char requester_pid[32];
+        char requester_pid[RUNTIME_LOG_INTEGER_TEXT_CAP];
         (void)snprintf(requester_pid, sizeof(requester_pid), "%llu",
                        (unsigned long long)worker->peer_process_id);
         cbm_log_info("daemon.stop_requested", "requester_pid", requester_pid, "requester_build",
@@ -1591,7 +1719,7 @@ static void runtime_worker_handle_activation_shutdown(cbm_daemon_runtime_worker_
                                                       const uint8_t *payload, uint32_t length) {
     cbm_daemon_runtime_service_t *service = worker->service;
     cbm_daemon_runtime_activation_result_t result = {0};
-    cbm_daemon_runtime_activation_action_t action = 0;
+    cbm_daemon_runtime_activation_action_t action = CBM_DAEMON_RUNTIME_ACTIVATION_INSTALL;
     char requested_version[CBM_DAEMON_VERSION_TEXT_SIZE] = {0};
     char requested_build[CBM_DAEMON_BUILD_FINGERPRINT_SIZE] = {0};
     bool request_valid =
@@ -1606,7 +1734,9 @@ static void runtime_worker_handle_activation_shutdown(cbm_daemon_runtime_worker_
         /* Report only connections this request will drain. The authenticated
          * one-shot requester is never a session and excludes itself. */
         result.active_connections =
-            service->active_connections > 0 ? (uint64_t)(service->active_connections - 1U) : 0;
+            service->active_connections > 0
+                ? (uint64_t)(service->active_connections - RUNTIME_SINGLE_ALLOCATION_ELEMENT)
+                : RUNTIME_WIRE_BOOL_FALSE;
         if (service->state == CBM_DAEMON_RUNTIME_SERVICE_RUNNING) {
             runtime_service_begin_stopping_locked(service, deadline, false, "activation_shutdown");
             service->activation_shutdown_requested = true;
@@ -1620,9 +1750,9 @@ static void runtime_worker_handle_activation_shutdown(cbm_daemon_runtime_worker_
     uint8_t response[CBM_DAEMON_ACTIVATION_SHUTDOWN_RESPONSE_SIZE];
     bool encoded = runtime_activation_response_encode(response, &result);
     if (result.accepted) {
-        char requester_pid[32];
-        char active_clients[32];
-        char active_connections[32];
+        char requester_pid[RUNTIME_LOG_INTEGER_TEXT_CAP];
+        char active_clients[RUNTIME_LOG_INTEGER_TEXT_CAP];
+        char active_connections[RUNTIME_LOG_INTEGER_TEXT_CAP];
         (void)snprintf(requester_pid, sizeof(requester_pid), "%llu",
                        (unsigned long long)worker->peer_process_id);
         (void)snprintf(active_clients, sizeof(active_clients), "%llu",
@@ -1665,10 +1795,63 @@ static void runtime_worker_handle_activation_shutdown(cbm_daemon_runtime_worker_
     runtime_worker_finish(worker);
 }
 
+static bool runtime_worker_handle_request_frame(cbm_daemon_runtime_worker_t *worker,
+                                                cbm_daemon_client_id_t client_id,
+                                                const cbm_daemon_frame_t *frame,
+                                                const uint8_t *payload) {
+    cbm_daemon_runtime_service_t *service = worker->service;
+    switch (frame->flags) {
+    case CBM_DAEMON_RUNTIME_OP_HEARTBEAT: {
+        bool valid = frame->length == 0 &&
+                     cbm_daemon_client_heartbeat(service->coordinator, client_id, cbm_now_ms());
+        return valid && runtime_worker_send_status(worker, CBM_DAEMON_RUNTIME_OP_HEARTBEAT, true);
+    }
+    case CBM_DAEMON_RUNTIME_OP_JOB_SUBSCRIBE:
+        return runtime_worker_handle_subscribe(worker, payload, frame->length);
+    case CBM_DAEMON_RUNTIME_OP_JOB_UNSUBSCRIBE:
+        return runtime_worker_handle_unsubscribe(worker, payload, frame->length);
+    case CBM_DAEMON_RUNTIME_OP_APPLICATION_REQUEST:
+        return runtime_worker_handle_application(worker, payload, frame->length);
+    case CBM_DAEMON_RUNTIME_OP_APPLICATION_CANCEL:
+        return runtime_worker_handle_application_cancel(worker, payload, frame->length);
+    case CBM_DAEMON_RUNTIME_OP_CLOSE_INTENT:
+        return runtime_worker_handle_close_intent(worker, frame->length);
+    case CBM_DAEMON_RUNTIME_OP_DISCONNECT:
+        (void)runtime_worker_handle_disconnect(worker, frame->length);
+        return false;
+    default:
+        return false;
+    }
+}
+
+static void runtime_worker_run_requests(cbm_daemon_runtime_worker_t *worker,
+                                        cbm_daemon_client_id_t client_id) {
+    cbm_daemon_frame_t frame = {.type = CBM_DAEMON_FRAME_REQUEST};
+    uint8_t *payload = NULL;
+    bool keep_running = true;
+    while (keep_running && runtime_worker_service_running(worker)) {
+        memset(&frame, 0, sizeof(frame));
+        payload = NULL;
+        int received = cbm_daemon_ipc_receive_frame(worker->connection, CBM_DAEMON_IPC_WAIT_FOREVER,
+                                                    &frame, &payload);
+        if (received != RUNTIME_IPC_FRAME_RECEIVED || frame.type != CBM_DAEMON_FRAME_REQUEST) {
+            char received_text[RUNTIME_LOG_RECEIVE_RESULT_TEXT_CAP];
+            (void)snprintf(received_text, sizeof(received_text), "%d", received);
+            cbm_log_info("daemon.connection_end", "received", received_text, "frame_type",
+                         received == RUNTIME_IPC_FRAME_RECEIVED ? "non_request" : "none");
+            break;
+        }
+        keep_running = runtime_worker_handle_request_frame(worker, client_id, &frame, payload);
+        free(payload);
+        payload = NULL;
+    }
+    free(payload);
+}
+
 static void *runtime_connection_worker(void *opaque) {
     cbm_daemon_runtime_worker_t *worker = opaque;
     cbm_daemon_runtime_service_t *service = worker->service;
-    cbm_daemon_frame_t frame = {0};
+    cbm_daemon_frame_t frame = {.type = CBM_DAEMON_FRAME_REQUEST};
     uint8_t *payload = NULL;
     char requested_version[CBM_DAEMON_VERSION_TEXT_SIZE];
     char requested_build[CBM_DAEMON_BUILD_FINGERPRINT_SIZE];
@@ -1676,7 +1859,7 @@ static void *runtime_connection_worker(void *opaque) {
     int received = cbm_daemon_ipc_receive_frame_bounded(
         worker->connection, service->request_timeout_ms,
         CBM_DAEMON_ACTIVATION_SHUTDOWN_REQUEST_SIZE, &frame, &payload);
-    if (received != 1 || frame.type != CBM_DAEMON_FRAME_REQUEST) {
+    if (received != RUNTIME_IPC_FRAME_RECEIVED || frame.type != CBM_DAEMON_FRAME_REQUEST) {
         free(payload);
         runtime_worker_finish(worker);
         return NULL;
@@ -1822,59 +2005,7 @@ static void *runtime_connection_worker(void *opaque) {
         return NULL;
     }
 
-    bool keep_running = true;
-    while (keep_running && runtime_worker_service_running(worker)) {
-        memset(&frame, 0, sizeof(frame));
-        payload = NULL;
-        received = cbm_daemon_ipc_receive_frame(worker->connection, CBM_DAEMON_IPC_WAIT_FOREVER,
-                                                &frame, &payload);
-        if (received != 1 || frame.type != CBM_DAEMON_FRAME_REQUEST) {
-            /* An admitted frontend disconnecting decides the daemon's fate
-             * (last committed client ends the generation), so the transport
-             * cause must be visible: 0 = orderly EOF, negative = transport
-             * error. A silent break here previously made session-drop races
-             * undiagnosable across three platforms. */
-            char received_text[16];
-            (void)snprintf(received_text, sizeof(received_text), "%d", received);
-            cbm_log_info("daemon.connection_end", "received", received_text, "frame_type",
-                         received == 1 ? "non_request" : "none");
-            break;
-        }
-        switch (frame.flags) {
-        case CBM_DAEMON_RUNTIME_OP_HEARTBEAT: {
-            bool valid = frame.length == 0 &&
-                         cbm_daemon_client_heartbeat(service->coordinator, client_id, cbm_now_ms());
-            keep_running =
-                valid && runtime_worker_send_status(worker, CBM_DAEMON_RUNTIME_OP_HEARTBEAT, true);
-            break;
-        }
-        case CBM_DAEMON_RUNTIME_OP_JOB_SUBSCRIBE:
-            keep_running = runtime_worker_handle_subscribe(worker, payload, frame.length);
-            break;
-        case CBM_DAEMON_RUNTIME_OP_JOB_UNSUBSCRIBE:
-            keep_running = runtime_worker_handle_unsubscribe(worker, payload, frame.length);
-            break;
-        case CBM_DAEMON_RUNTIME_OP_APPLICATION_REQUEST:
-            keep_running = runtime_worker_handle_application(worker, payload, frame.length);
-            break;
-        case CBM_DAEMON_RUNTIME_OP_APPLICATION_CANCEL:
-            keep_running = runtime_worker_handle_application_cancel(worker, payload, frame.length);
-            break;
-        case CBM_DAEMON_RUNTIME_OP_CLOSE_INTENT:
-            keep_running = runtime_worker_handle_close_intent(worker, frame.length);
-            break;
-        case CBM_DAEMON_RUNTIME_OP_DISCONNECT:
-            keep_running = false;
-            (void)runtime_worker_handle_disconnect(worker, frame.length);
-            break;
-        default:
-            keep_running = false;
-            break;
-        }
-        free(payload);
-        payload = NULL;
-    }
-    free(payload);
+    runtime_worker_run_requests(worker, client_id);
     runtime_worker_finish(worker);
     return NULL;
 }
@@ -2039,7 +2170,7 @@ static void *runtime_accept_loop(void *opaque) {
             if (runtime_service_can_exit(service, cbm_now_ms())) {
                 break;
             }
-            uint64_t tick_deadline = runtime_deadline_after(1);
+            uint64_t tick_deadline = runtime_deadline_after(RUNTIME_SHORT_TICK_MS);
             runtime_wait_tick(tick_deadline);
             continue;
         }
@@ -2047,12 +2178,12 @@ static void *runtime_accept_loop(void *opaque) {
         cbm_daemon_ipc_connection_t *connection = NULL;
         int accepted =
             cbm_daemon_ipc_accept(service->listener, RUNTIME_ACCEPT_POLL_MS, &connection);
-        if (accepted == 1 && connection) {
+        if (accepted == RUNTIME_IPC_FRAME_RECEIVED && connection) {
             runtime_accept_connection(service, connection);
         } else if (accepted < 0) {
             /* IPC intentionally combines invalid-peer and listener errors.
              * Retry while RUNNING so one hostile peer cannot stop the daemon. */
-            uint64_t tick_deadline = runtime_deadline_after(1);
+            uint64_t tick_deadline = runtime_deadline_after(RUNTIME_SHORT_TICK_MS);
             runtime_wait_tick(tick_deadline);
         }
     }
@@ -2066,7 +2197,7 @@ static char *runtime_string_copy_bounded(const char *value, size_t capacity) {
     if (!runtime_bounded_length(value, capacity, &length)) {
         return NULL;
     }
-    char *copy = malloc(length + 1);
+    char *copy = malloc(length + RUNTIME_SIZE_TERMINATOR_BYTES);
     if (copy) {
         memcpy(copy, value, length + 1);
     }
@@ -2175,7 +2306,8 @@ cbm_daemon_runtime_service_t *cbm_daemon_runtime_service_start_reserved(
         return NULL;
     }
 
-    cbm_daemon_runtime_service_t *service = calloc(1, sizeof(*service));
+    cbm_daemon_runtime_service_t *service =
+        calloc(RUNTIME_SINGLE_ALLOCATION_ELEMENT, sizeof(*service));
     if (!service) {
         cbm_log_error("daemon.runtime.start_failed", "stage", "service_allocation");
         (void)runtime_process_image_reference_release(&active_image);
@@ -2255,7 +2387,8 @@ cbm_daemon_runtime_service_t *cbm_daemon_runtime_service_start(
         return NULL;
     }
     cbm_daemon_ipc_startup_lock_t *startup_lock = NULL;
-    if (cbm_daemon_ipc_startup_lock_try_acquire(config->endpoint, &startup_lock) != 1) {
+    if (cbm_daemon_ipc_startup_lock_try_acquire(config->endpoint, &startup_lock) !=
+        RUNTIME_IPC_LOCK_ACQUIRED) {
         return NULL;
     }
     int generation =
@@ -2265,12 +2398,14 @@ cbm_daemon_runtime_service_t *cbm_daemon_runtime_service_start(
         return NULL;
     }
     cbm_daemon_ipc_participant_guard_t *participant_guard = NULL;
-    if (cbm_daemon_ipc_participant_guard_try_join(config->endpoint, &participant_guard) != 1) {
+    if (cbm_daemon_ipc_participant_guard_try_join(config->endpoint, &participant_guard) !=
+        RUNTIME_IPC_LOCK_ACQUIRED) {
         runtime_startup_lock_release_complete(&startup_lock, config->shutdown_timeout_ms);
         return NULL;
     }
     cbm_daemon_ipc_lifetime_reservation_t *reservation = NULL;
-    if (cbm_daemon_ipc_lifetime_reservation_try_acquire(config->endpoint, &reservation) != 1) {
+    if (cbm_daemon_ipc_lifetime_reservation_try_acquire(config->endpoint, &reservation) !=
+        RUNTIME_IPC_LOCK_ACQUIRED) {
         if (!runtime_participant_guard_release_complete(&participant_guard,
                                                         config->shutdown_timeout_ms)) {
             runtime_cleanup_fail_stop("participant_guard_cleanup");
@@ -2480,13 +2615,14 @@ bool cbm_daemon_runtime_request_activation_shutdown(
     bool sent = connection && cbm_daemon_ipc_send_frame(connection, CBM_DAEMON_FRAME_REQUEST,
                                                         CBM_DAEMON_RUNTIME_OP_ACTIVATION_SHUTDOWN,
                                                         request, (uint32_t)sizeof(request));
-    cbm_daemon_frame_t frame = {0};
+    cbm_daemon_frame_t frame = {.type = CBM_DAEMON_FRAME_RESPONSE};
     uint8_t *payload = NULL;
     int received = sent ? cbm_daemon_ipc_receive_frame_bounded(
                               connection, timeout_ms, CBM_DAEMON_ACTIVATION_SHUTDOWN_RESPONSE_SIZE,
                               &frame, &payload)
                         : 0;
-    bool valid = received == 1 && frame.type == CBM_DAEMON_FRAME_RESPONSE &&
+    bool valid = received == RUNTIME_IPC_FRAME_RECEIVED &&
+                 frame.type == CBM_DAEMON_FRAME_RESPONSE &&
                  frame.flags == CBM_DAEMON_RUNTIME_OP_ACTIVATION_SHUTDOWN &&
                  frame.length == CBM_DAEMON_ACTIVATION_SHUTDOWN_RESPONSE_SIZE &&
                  runtime_activation_response_decode(payload, result_out);
@@ -2511,7 +2647,8 @@ static bool runtime_control_request_send(const cbm_daemon_ipc_endpoint_t *endpoi
     uint8_t request[CBM_DAEMON_CONTROL_REQUEST_SIZE];
     memset(request, 0, sizeof(request));
     int written = snprintf((char *)request, sizeof(request), "%s", identity->build_fingerprint);
-    if (written <= 0 || (size_t)written != CBM_DAEMON_BUILD_FINGERPRINT_SIZE - 1U) {
+    if (written <= 0 ||
+        (size_t)written != CBM_DAEMON_BUILD_FINGERPRINT_SIZE - RUNTIME_SIZE_TERMINATOR_BYTES) {
         return false;
     }
     cbm_daemon_ipc_connection_t *connection = cbm_daemon_ipc_connect(endpoint, timeout_ms);
@@ -2521,14 +2658,15 @@ static bool runtime_control_request_send(const cbm_daemon_ipc_endpoint_t *endpoi
                                            * cbm_daemon_runtime_operation_t); always
                                            * representable in the wire-format uint16_t. */
                                           (uint16_t)operation, request, (uint32_t)sizeof(request));
-    cbm_daemon_frame_t frame = {0};
+    cbm_daemon_frame_t frame = {.type = CBM_DAEMON_FRAME_RESPONSE};
     uint8_t *payload = NULL;
     int received = sent ? cbm_daemon_ipc_receive_frame_bounded(connection, timeout_ms,
                                                                response_size, &frame, &payload)
                         : 0;
-    bool valid = received == 1 && frame.type == CBM_DAEMON_FRAME_RESPONSE &&
-                 frame.flags == operation && frame.length == response_size && payload &&
-                 payload[0] == 1U;
+    bool valid = received == RUNTIME_IPC_FRAME_RECEIVED &&
+                 frame.type == CBM_DAEMON_FRAME_RESPONSE && frame.flags == operation &&
+                 frame.length == response_size && payload &&
+                 payload[RUNTIME_CONTROL_STATUS_VALID_OFFSET] == RUNTIME_WIRE_BOOL_TRUE;
     cbm_daemon_ipc_connection_close(connection);
     if (!valid) {
         free(payload);
@@ -2539,8 +2677,10 @@ static bool runtime_control_request_send(const cbm_daemon_ipc_endpoint_t *endpoi
 }
 
 static uint32_t runtime_control_read_u32(const uint8_t *bytes) {
-    return ((uint32_t)bytes[0] << 24) | ((uint32_t)bytes[1] << 16) | ((uint32_t)bytes[2] << 8) |
-           (uint32_t)bytes[3];
+    return ((uint32_t)bytes[RUNTIME_U32_BYTE_0_OFFSET] << RUNTIME_U32_MOST_SIGNIFICANT_SHIFT) |
+           ((uint32_t)bytes[RUNTIME_U32_BYTE_1_OFFSET] << RUNTIME_U32_MIDDLE_HIGH_SHIFT) |
+           ((uint32_t)bytes[RUNTIME_U32_BYTE_2_OFFSET] << RUNTIME_U32_MIDDLE_LOW_SHIFT) |
+           (uint32_t)bytes[RUNTIME_U32_BYTE_3_OFFSET];
 }
 
 bool cbm_daemon_runtime_request_status(const cbm_daemon_ipc_endpoint_t *endpoint,
@@ -2556,20 +2696,34 @@ bool cbm_daemon_runtime_request_status(const cbm_daemon_ipc_endpoint_t *endpoint
                                       CBM_DAEMON_STATUS_RESPONSE_SIZE, &payload)) {
         return false;
     }
-    status_out->permanent = (payload[1] & 0x01U) != 0U;
-    status_out->stopping = (payload[1] & 0x02U) != 0U;
-    status_out->committed_clients = (uint16_t)(((uint16_t)payload[2] << 8) | payload[3]);
-    status_out->daemon_pid = runtime_control_read_u32(payload + 4);
-    status_out->client_count = payload[8] > CBM_DAEMON_CONTROL_CLIENT_CAP
-                                   ? (uint8_t)CBM_DAEMON_CONTROL_CLIENT_CAP
-                                   : payload[8];
+    status_out->permanent =
+        (payload[RUNTIME_CONTROL_STATUS_FLAGS_OFFSET] & RUNTIME_CONTROL_FLAG_ACCEPTED) != 0U;
+    status_out->stopping = (payload[RUNTIME_CONTROL_STATUS_FLAGS_OFFSET] &
+                            RUNTIME_CONTROL_FLAG_BUSY_OR_STOPPING) != 0U;
+    status_out->committed_clients =
+        (uint16_t)(((uint16_t)payload[RUNTIME_CONTROL_STATUS_CLIENTS_HIGH_OFFSET]
+                    << RUNTIME_BYTE_BITS) |
+                   payload[RUNTIME_CONTROL_STATUS_CLIENTS_LOW_OFFSET]);
+    status_out->daemon_pid =
+        runtime_control_read_u32(payload + RUNTIME_CONTROL_STATUS_PROCESS_ID_OFFSET);
+    status_out->client_count =
+        payload[RUNTIME_CONTROL_STATUS_CLIENT_COUNT_OFFSET] > CBM_DAEMON_CONTROL_CLIENT_CAP
+            ? (uint8_t)CBM_DAEMON_CONTROL_CLIENT_CAP
+            : payload[RUNTIME_CONTROL_STATUS_CLIENT_COUNT_OFFSET];
     for (size_t index = 0; index < CBM_DAEMON_CONTROL_CLIENT_CAP; index++) {
-        status_out->client_pids[index] = runtime_control_read_u32(payload + 12U + (index * 4U));
+        status_out->client_pids[index] = runtime_control_read_u32(
+            payload + RUNTIME_CONTROL_STATUS_CLIENTS_OFFSET + (index * RUNTIME_U32_BYTES));
     }
-    memcpy(status_out->build_fingerprint, payload + 44U, CBM_DAEMON_BUILD_FINGERPRINT_SIZE);
-    status_out->build_fingerprint[CBM_DAEMON_BUILD_FINGERPRINT_SIZE - 1U] = '\0';
-    memcpy(status_out->semantic_version, payload + 109U, sizeof(status_out->semantic_version));
-    status_out->semantic_version[sizeof(status_out->semantic_version) - 1U] = '\0';
+    memcpy(status_out->build_fingerprint, payload + RUNTIME_CONTROL_STATUS_BUILD_OFFSET,
+           CBM_DAEMON_BUILD_FINGERPRINT_SIZE);
+    status_out
+        ->build_fingerprint[CBM_DAEMON_BUILD_FINGERPRINT_SIZE - RUNTIME_SIZE_TERMINATOR_BYTES] =
+        '\0';
+    memcpy(status_out->semantic_version, payload + RUNTIME_CONTROL_STATUS_VERSION_OFFSET,
+           sizeof(status_out->semantic_version));
+    status_out
+        ->semantic_version[sizeof(status_out->semantic_version) - RUNTIME_SIZE_TERMINATOR_BYTES] =
+        '\0';
     free(payload);
     return true;
 }
@@ -2587,14 +2741,21 @@ bool cbm_daemon_runtime_request_stop(const cbm_daemon_ipc_endpoint_t *endpoint,
                                       CBM_DAEMON_STOP_RESPONSE_SIZE, &payload)) {
         return false;
     }
-    result_out->accepted = (payload[1] & 0x01U) != 0U;
-    result_out->busy = (payload[1] & 0x02U) != 0U;
-    result_out->committed_clients = (uint16_t)(((uint16_t)payload[2] << 8) | payload[3]);
-    result_out->client_count = payload[4] > CBM_DAEMON_CONTROL_CLIENT_CAP
-                                   ? (uint8_t)CBM_DAEMON_CONTROL_CLIENT_CAP
-                                   : payload[4];
+    result_out->accepted =
+        (payload[RUNTIME_CONTROL_STOP_FLAGS_OFFSET] & RUNTIME_CONTROL_FLAG_ACCEPTED) != 0U;
+    result_out->busy =
+        (payload[RUNTIME_CONTROL_STOP_FLAGS_OFFSET] & RUNTIME_CONTROL_FLAG_BUSY_OR_STOPPING) != 0U;
+    result_out->committed_clients =
+        (uint16_t)(((uint16_t)payload[RUNTIME_CONTROL_STOP_CLIENTS_HIGH_OFFSET]
+                    << RUNTIME_BYTE_BITS) |
+                   payload[RUNTIME_CONTROL_STOP_CLIENTS_LOW_OFFSET]);
+    result_out->client_count =
+        payload[RUNTIME_CONTROL_STOP_CLIENT_COUNT_OFFSET] > CBM_DAEMON_CONTROL_CLIENT_CAP
+            ? (uint8_t)CBM_DAEMON_CONTROL_CLIENT_CAP
+            : payload[RUNTIME_CONTROL_STOP_CLIENT_COUNT_OFFSET];
     for (size_t index = 0; index < CBM_DAEMON_CONTROL_CLIENT_CAP; index++) {
-        result_out->client_pids[index] = runtime_control_read_u32(payload + 8U + (index * 4U));
+        result_out->client_pids[index] = runtime_control_read_u32(
+            payload + RUNTIME_CONTROL_STOP_CLIENTS_OFFSET + (index * RUNTIME_U32_BYTES));
     }
     free(payload);
     return true;
@@ -2618,11 +2779,12 @@ cbm_daemon_runtime_client_t *cbm_daemon_runtime_client_connect(
         cbm_daemon_ipc_connection_close(connection);
         return NULL;
     }
-    cbm_daemon_frame_t frame = {0};
+    cbm_daemon_frame_t frame = {.type = CBM_DAEMON_FRAME_RESPONSE};
     uint8_t *payload = NULL;
     int received = cbm_daemon_ipc_receive_frame_bounded(
         connection, timeout_ms, CBM_DAEMON_RENDEZVOUS_RESPONSE_SIZE, &frame, &payload);
-    bool valid = received == 1 && frame.type == CBM_DAEMON_FRAME_RESPONSE &&
+    bool valid = received == RUNTIME_IPC_FRAME_RECEIVED &&
+                 frame.type == CBM_DAEMON_FRAME_RESPONSE &&
                  frame.flags == CBM_DAEMON_RUNTIME_OP_HELLO &&
                  frame.length == CBM_DAEMON_RENDEZVOUS_RESPONSE_SIZE &&
                  runtime_hello_response_decode(payload, result_out);
@@ -2632,7 +2794,8 @@ cbm_daemon_runtime_client_t *cbm_daemon_runtime_client_connect(
         return NULL;
     }
 
-    cbm_daemon_runtime_client_t *client = calloc(1, sizeof(*client));
+    cbm_daemon_runtime_client_t *client =
+        calloc(RUNTIME_SINGLE_ALLOCATION_ELEMENT, sizeof(*client));
     if (!client) {
         cbm_daemon_ipc_connection_close(connection);
         memset(result_out, 0, sizeof(*result_out));
@@ -2679,12 +2842,13 @@ static bool runtime_client_exchange(cbm_daemon_runtime_client_t *client,
     bool sent = cbm_daemon_ipc_send_frame(connection, CBM_DAEMON_FRAME_REQUEST, (uint16_t)operation,
                                           request, request_length);
     cbm_mutex_unlock(&client->send_mutex);
-    cbm_daemon_frame_t frame = {0};
+    cbm_daemon_frame_t frame = {.type = CBM_DAEMON_FRAME_RESPONSE};
     uint8_t *payload = NULL;
-    int received =
-        sent ? cbm_daemon_ipc_receive_frame(connection, timeout_ms, &frame, &payload) : -1;
-    bool valid = sent && received == 1 && frame.type == CBM_DAEMON_FRAME_RESPONSE &&
-                 frame.flags == (uint16_t)operation && frame.length == expected_response_length;
+    int received = sent ? cbm_daemon_ipc_receive_frame(connection, timeout_ms, &frame, &payload)
+                        : RUNTIME_FILE_DESCRIPTOR_INVALID;
+    bool valid = sent && received == RUNTIME_IPC_FRAME_RECEIVED &&
+                 frame.type == CBM_DAEMON_FRAME_RESPONSE && frame.flags == (uint16_t)operation &&
+                 frame.length == expected_response_length;
     cbm_mutex_lock(&client->state_mutex);
     client->exchange_active = false;
     if (!valid) {
@@ -2708,7 +2872,9 @@ cbm_daemon_subscription_result_t cbm_daemon_runtime_client_job_subscribe(
     }
     size_t key_length = 0;
     if (!client || !subscription_id_out ||
-        !runtime_bounded_length(project_key, CBM_DAEMON_RUNTIME_PROJECT_KEY_MAX + 1, &key_length) ||
+        !runtime_bounded_length(project_key,
+                                CBM_DAEMON_RUNTIME_PROJECT_KEY_MAX + RUNTIME_SIZE_TERMINATOR_BYTES,
+                                &key_length) ||
         key_length == 0 || key_length > CBM_DAEMON_RUNTIME_PROJECT_KEY_MAX) {
         return CBM_DAEMON_SUBSCRIPTION_REJECTED;
     }
@@ -2723,7 +2889,7 @@ cbm_daemon_subscription_result_t cbm_daemon_runtime_client_job_subscribe(
     }
     cbm_daemon_subscription_result_t result =
         (cbm_daemon_subscription_result_t)runtime_get_u32(response);
-    cbm_daemon_subscription_id_t subscription_id = runtime_get_u64(response + 4);
+    cbm_daemon_subscription_id_t subscription_id = runtime_get_u64(response + RUNTIME_U32_BYTES);
     free(response);
     if ((result != CBM_DAEMON_SUBSCRIPTION_STARTED && result != CBM_DAEMON_SUBSCRIPTION_JOINED) ||
         subscription_id == CBM_DAEMON_SUBSCRIPTION_ID_INVALID) {
@@ -2747,7 +2913,7 @@ bool cbm_daemon_runtime_client_job_unsubscribe(cbm_daemon_runtime_client_t *clie
                                  STATUS_RESPONSE_SIZE)) {
         return false;
     }
-    bool removed = runtime_get_u32(response) == 1;
+    bool removed = runtime_get_u32(response) == RUNTIME_WIRE_BOOL_TRUE;
     free(response);
     return removed;
 }
@@ -2761,7 +2927,7 @@ bool cbm_daemon_runtime_client_heartbeat(cbm_daemon_runtime_client_t *client, ui
                                  &response, STATUS_RESPONSE_SIZE)) {
         return false;
     }
-    bool valid = runtime_get_u32(response) == 1;
+    bool valid = runtime_get_u32(response) == RUNTIME_WIRE_BOOL_TRUE;
     free(response);
     return valid;
 }
@@ -2864,6 +3030,83 @@ cbm_daemon_runtime_cancel_result_t cbm_daemon_runtime_client_application_cancel(
     return CBM_DAEMON_RUNTIME_CANCEL_ACCEPTED;
 }
 
+static bool runtime_client_send_application_request(cbm_daemon_runtime_client_t *client,
+                                                    cbm_daemon_ipc_connection_t *connection,
+                                                    cbm_daemon_runtime_application_token_t token,
+                                                    const uint8_t *wire, uint32_t wire_length) {
+    uint8_t cancel_wire[APPLICATION_CANCEL_REQUEST_SIZE];
+    runtime_put_u64(cancel_wire, token);
+    cbm_mutex_lock(&client->send_mutex);
+    cbm_mutex_lock(&client->state_mutex);
+    bool request_can_send = client->usable && !client->closing &&
+                            client->connection == connection &&
+                            client->active_application_token == token;
+    cbm_mutex_unlock(&client->state_mutex);
+    bool sent =
+        request_can_send &&
+        cbm_daemon_ipc_send_frame(connection, CBM_DAEMON_FRAME_REQUEST,
+                                  CBM_DAEMON_RUNTIME_OP_APPLICATION_REQUEST, wire, wire_length);
+    cbm_mutex_lock(&client->state_mutex);
+    client->application_request_sent = sent;
+    bool send_cancel = sent && !client->closing && client->pending_cancel_token == token &&
+                       !client->application_cancel_sent;
+    if (send_cancel) {
+        client->application_cancel_sent = true;
+    }
+    cbm_mutex_unlock(&client->state_mutex);
+    if (send_cancel) {
+        sent = cbm_daemon_ipc_send_frame(connection, CBM_DAEMON_FRAME_REQUEST,
+                                         CBM_DAEMON_RUNTIME_OP_APPLICATION_CANCEL, cancel_wire,
+                                         (uint32_t)sizeof(cancel_wire));
+        if (!sent) {
+            cbm_mutex_lock(&client->state_mutex);
+            client->usable = false;
+            cbm_mutex_unlock(&client->state_mutex);
+        }
+    }
+    cbm_mutex_unlock(&client->send_mutex);
+    return sent;
+}
+
+static bool runtime_client_receive_application_response(
+    cbm_daemon_ipc_connection_t *connection, cbm_daemon_runtime_application_token_t token,
+    uint32_t timeout_ms, uint8_t **response_out, uint32_t *response_length_out,
+    cbm_daemon_runtime_application_status_t *status_out) {
+    cbm_daemon_frame_t frame = {.type = CBM_DAEMON_FRAME_RESPONSE};
+    uint8_t *payload = NULL;
+    int received = cbm_daemon_ipc_receive_frame(connection, timeout_ms, &frame, &payload);
+    bool valid = received == RUNTIME_IPC_FRAME_RECEIVED &&
+                 frame.type == CBM_DAEMON_FRAME_RESPONSE &&
+                 frame.flags == CBM_DAEMON_RUNTIME_OP_APPLICATION_REQUEST &&
+                 frame.length >= APPLICATION_RESPONSE_PREFIX_SIZE && payload;
+    uint32_t response_length = 0;
+    if (valid) {
+        valid = runtime_application_status_decode(runtime_get_u32(payload + RUNTIME_U64_BYTES),
+                                                  status_out);
+        response_length = runtime_get_u32(payload + APPLICATION_REQUEST_PREFIX_SIZE);
+        valid = valid && runtime_get_u64(payload) == token &&
+                response_length <= CBM_DAEMON_RUNTIME_APPLICATION_PAYLOAD_MAX &&
+                frame.length == APPLICATION_RESPONSE_PREFIX_SIZE + response_length &&
+                (*status_out == CBM_DAEMON_RUNTIME_APPLICATION_OK || response_length == 0);
+    }
+    uint8_t *response = NULL;
+    if (valid && response_length > 0) {
+        response = malloc(response_length);
+        valid = response != NULL;
+        if (valid) {
+            memcpy(response, payload + APPLICATION_RESPONSE_PREFIX_SIZE, response_length);
+        }
+    }
+    free(payload);
+    if (!valid) {
+        free(response);
+        return false;
+    }
+    *response_out = response;
+    *response_length_out = response_length;
+    return true;
+}
+
 cbm_daemon_runtime_application_status_t cbm_daemon_runtime_client_application_request_tagged(
     cbm_daemon_runtime_client_t *client, cbm_daemon_runtime_application_token_t request_token,
     const void *request, uint32_t request_length, uint8_t **response_out,
@@ -2890,7 +3133,7 @@ cbm_daemon_runtime_application_status_t cbm_daemon_runtime_client_application_re
         return CBM_DAEMON_RUNTIME_APPLICATION_TRANSPORT_ERROR;
     }
     runtime_put_u64(wire, request_token);
-    runtime_put_u32(wire + 8, request_length);
+    runtime_put_u32(wire + RUNTIME_U64_BYTES, request_length);
     if (request_length > 0) {
         memcpy(wire + APPLICATION_REQUEST_PREFIX_SIZE, request, request_length);
     }
@@ -2917,70 +3160,15 @@ cbm_daemon_runtime_application_status_t cbm_daemon_runtime_client_application_re
     }
     cbm_mutex_unlock(&client->state_mutex);
 
-    uint8_t cancel_wire[APPLICATION_CANCEL_REQUEST_SIZE];
-    runtime_put_u64(cancel_wire, request_token);
-    cbm_mutex_lock(&client->send_mutex);
-    cbm_mutex_lock(&client->state_mutex);
-    bool request_can_send = client->usable && !client->closing &&
-                            client->connection == connection &&
-                            client->active_application_token == request_token;
-    cbm_mutex_unlock(&client->state_mutex);
-    bool sent =
-        request_can_send && cbm_daemon_ipc_send_frame(connection, CBM_DAEMON_FRAME_REQUEST,
-                                                      CBM_DAEMON_RUNTIME_OP_APPLICATION_REQUEST,
-                                                      wire, (uint32_t)wire_length);
-    bool send_cancel = false;
-    cbm_mutex_lock(&client->state_mutex);
-    client->application_request_sent = sent;
-    send_cancel = sent && !client->closing && client->pending_cancel_token == request_token &&
-                  !client->application_cancel_sent;
-    if (send_cancel) {
-        client->application_cancel_sent = true;
-    }
-    cbm_mutex_unlock(&client->state_mutex);
-    if (send_cancel) {
-        sent = cbm_daemon_ipc_send_frame(connection, CBM_DAEMON_FRAME_REQUEST,
-                                         CBM_DAEMON_RUNTIME_OP_APPLICATION_CANCEL, cancel_wire,
-                                         (uint32_t)sizeof(cancel_wire));
-        if (!sent) {
-            cbm_mutex_lock(&client->state_mutex);
-            client->usable = false;
-            cbm_mutex_unlock(&client->state_mutex);
-        }
-    }
-    cbm_mutex_unlock(&client->send_mutex);
+    bool sent = runtime_client_send_application_request(client, connection, request_token, wire,
+                                                        (uint32_t)wire_length);
     free(wire);
-    cbm_daemon_frame_t frame = {0};
-    uint8_t *payload = NULL;
-    int received =
-        sent ? cbm_daemon_ipc_receive_frame(connection, timeout_ms, &frame, &payload) : -1;
-    bool protocol_valid = sent && received == 1 && frame.type == CBM_DAEMON_FRAME_RESPONSE &&
-                          frame.flags == CBM_DAEMON_RUNTIME_OP_APPLICATION_REQUEST &&
-                          frame.length >= APPLICATION_RESPONSE_PREFIX_SIZE && payload;
     cbm_daemon_runtime_application_status_t status = CBM_DAEMON_RUNTIME_APPLICATION_TRANSPORT_ERROR;
     uint32_t response_length = 0;
-    if (protocol_valid) {
-        cbm_daemon_runtime_application_token_t response_token = runtime_get_u64(payload);
-        status = (cbm_daemon_runtime_application_status_t)runtime_get_u32(payload + 8);
-        response_length = runtime_get_u32(payload + 12);
-        protocol_valid = response_token == request_token &&
-                         status >= CBM_DAEMON_RUNTIME_APPLICATION_OK &&
-                         status <= CBM_DAEMON_RUNTIME_APPLICATION_CANCELLED &&
-                         response_length <= CBM_DAEMON_RUNTIME_APPLICATION_PAYLOAD_MAX &&
-                         frame.length == APPLICATION_RESPONSE_PREFIX_SIZE + response_length &&
-                         (status == CBM_DAEMON_RUNTIME_APPLICATION_OK || response_length == 0);
-    }
-
     uint8_t *response_copy = NULL;
-    bool copied = true;
-    if (protocol_valid && response_length > 0) {
-        response_copy = malloc(response_length);
-        copied = response_copy != NULL;
-        if (copied) {
-            memcpy(response_copy, payload + APPLICATION_RESPONSE_PREFIX_SIZE, response_length);
-        }
-    }
-    free(payload);
+    bool protocol_valid = sent && runtime_client_receive_application_response(
+                                      connection, request_token, timeout_ms, &response_copy,
+                                      &response_length, &status);
 
     cbm_mutex_lock(&client->state_mutex);
     client->exchange_active = false;
@@ -2998,7 +3186,7 @@ cbm_daemon_runtime_application_status_t cbm_daemon_runtime_client_application_re
     cbm_mutex_unlock(&client->state_mutex);
     cbm_mutex_unlock(&client->exchange_mutex);
 
-    if (!protocol_valid || !copied) {
+    if (!protocol_valid) {
         free(response_copy);
         return CBM_DAEMON_RUNTIME_APPLICATION_TRANSPORT_ERROR;
     }
@@ -3106,13 +3294,14 @@ bool cbm_daemon_runtime_client_close_finish(cbm_daemon_runtime_client_t *client,
         cbm_mutex_unlock(&client->send_mutex);
     }
     if (disconnect_sent) {
-        cbm_daemon_frame_t frame = {0};
+        cbm_daemon_frame_t frame = {.type = CBM_DAEMON_FRAME_RESPONSE};
         uint8_t *response = NULL;
         int received = cbm_daemon_ipc_receive_frame(connection, timeout_ms, &frame, &response);
-        acknowledged = received == 1 && frame.type == CBM_DAEMON_FRAME_RESPONSE &&
+        acknowledged = received == RUNTIME_IPC_FRAME_RECEIVED &&
+                       frame.type == CBM_DAEMON_FRAME_RESPONSE &&
                        frame.flags == CBM_DAEMON_RUNTIME_OP_DISCONNECT &&
                        frame.length == STATUS_RESPONSE_SIZE && response &&
-                       runtime_get_u32(response) == 1;
+                       runtime_get_u32(response) == RUNTIME_WIRE_BOOL_TRUE;
         free(response);
     }
 

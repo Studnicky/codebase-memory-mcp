@@ -11,6 +11,25 @@
 #define MAX_CLASSES 64
 #define BUF_CAP ((size_t)1024U * 64U)
 
+enum {
+    IRIS_XML_TAG_CLOSE_WIDTH = 1,
+    IRIS_XML_NULL_TERMINATOR_WIDTH = 1,
+    IRIS_XML_ATTRIBUTE_ASSIGNMENT_WIDTH = 1,
+    IRIS_XML_CDATA_OPEN_WIDTH = 9,
+    IRIS_XML_CDATA_CLOSE_WIDTH = 3,
+    IRIS_XML_OPEN_TAG_FORMAT_EXTRA = 2,
+    IRIS_XML_CLOSE_TAG_FORMAT_EXTRA = 4,
+    IRIS_XML_BOOLEAN_VALUE_CAPACITY = 8,
+    IRIS_XML_PRAGMA_CAPACITY = 64,
+    IRIS_XML_SUPERTYPE_CAPACITY_MULTIPLIER = 4,
+    IRIS_XML_FORMAL_SPEC_CAPACITY = 1024,
+    IRIS_XML_DESCRIPTION_CAPACITY = 4096,
+    IRIS_XML_INLINE_CHARACTER_CAPACITY = 2,
+    IRIS_XML_IMPLEMENTATION_CAPACITY = 32768,
+    IRIS_XML_RESULT_TERMINATOR_SLOTS = 1,
+    IRIS_XML_TRAILING_COMMA_WIDTH = 1,
+};
+
 typedef struct {
     char param_name[MAX_NAME];
     char param_value[MAX_NAME];
@@ -46,10 +65,10 @@ static const char *skip_tag(const char *p, const char *end) {
     while (p < end && *p != '>') {
         p++;
     }
-    return p < end ? p + 1 : end;
+    return p < end ? p + IRIS_XML_TAG_CLOSE_WIDTH : end;
 }
 static bool is_self_closing(const char *start, const char *gt) {
-    const char *p = gt - 1;
+    const char *p = gt - IRIS_XML_TAG_CLOSE_WIDTH;
     while (p > start && (*p == ' ' || *p == '\t')) {
         p--;
     }
@@ -60,7 +79,7 @@ static void extract_attr(const char *ts, const char *te, const char *attr, char 
     size_t an = strlen(attr);
     for (const char *p = ts; p < te - an; p++) {
         if (memcmp(p, attr, an) == 0 && p[an] == '=') {
-            p += an + 1;
+            p += an + IRIS_XML_ATTRIBUTE_ASSIGNMENT_WIDTH;
             char q = *p;
             if (q != '"' && q != '\'') {
                 return;
@@ -72,7 +91,7 @@ static void extract_attr(const char *ts, const char *te, const char *attr, char 
             }
             size_t vl = (size_t)(p - v);
             if (vl >= sz) {
-                vl = sz - 1;
+                vl = sz - IRIS_XML_NULL_TERMINATOR_WIDTH;
             }
             memcpy(out, v, vl);
             out[vl] = '\0';
@@ -83,7 +102,7 @@ static void extract_attr(const char *ts, const char *te, const char *attr, char 
 static const char *elem_content(const char *p, const char *end, const char *tag, char *buf,
                                 size_t bufsz) {
     buf[0] = '\0';
-    char open[MAX_NAME + 2];
+    char open[MAX_NAME + IRIS_XML_OPEN_TAG_FORMAT_EXTRA];
     snprintf(open, sizeof(open), "<%s", tag);
     const char *start = find_s(p, end, open);
     if (!start) {
@@ -94,24 +113,24 @@ static const char *elem_content(const char *p, const char *end, const char *tag,
         return NULL;
     }
     if (is_self_closing(start, gt)) {
-        return gt + 1;
+        return gt + IRIS_XML_TAG_CLOSE_WIDTH;
     }
-    const char *cs = gt + 1;
+    const char *cs = gt + IRIS_XML_TAG_CLOSE_WIDTH;
     if (sw(cs, end, "<![CDATA[")) {
-        cs += 9;
+        cs += IRIS_XML_CDATA_OPEN_WIDTH;
         const char *ce = find_s(cs, end, "]]>");
         if (!ce) {
             return NULL;
         }
         size_t l = (size_t)(ce - cs);
         if (l >= bufsz) {
-            l = bufsz - 1;
+            l = bufsz - IRIS_XML_NULL_TERMINATOR_WIDTH;
         }
         memcpy(buf, cs, l);
         buf[l] = '\0';
-        return ce + 3;
+        return ce + IRIS_XML_CDATA_CLOSE_WIDTH;
     }
-    char close[MAX_NAME + 4];
+    char close[MAX_NAME + IRIS_XML_CLOSE_TAG_FORMAT_EXTRA];
     snprintf(close, sizeof(close), "</%s>", tag);
     const char *cl = find_s(cs, end, close);
     if (!cl) {
@@ -119,14 +138,14 @@ static const char *elem_content(const char *p, const char *end, const char *tag,
     }
     size_t l = (size_t)(cl - cs);
     if (l >= bufsz) {
-        l = bufsz - 1;
+        l = bufsz - IRIS_XML_NULL_TERMINATOR_WIDTH;
     }
     memcpy(buf, cs, l);
     buf[l] = '\0';
     return cl + strlen(close);
 }
 static bool tag_is_one(const char *p, const char *end, const char *tag) {
-    char buf[8];
+    char buf[IRIS_XML_BOOLEAN_VALUE_CAPACITY];
     return elem_content(p, end, tag, buf, sizeof(buf)) && strcmp(buf, "1") == 0;
 }
 
@@ -143,7 +162,7 @@ static void ub_app(UdlBuf *b, const char *s) {
         return;
     }
     size_t n = strlen(s);
-    if (b->pos + (int)n + 1 >= b->cap) {
+    if (b->pos + (int)n + IRIS_XML_NULL_TERMINATOR_WIDTH >= b->cap) {
         return;
     }
     memcpy(b->buf + b->pos, s, n);
@@ -159,7 +178,7 @@ static void emit_header(UdlBuf *b, const char *cs, const char *ce) {
     }
     ub_app(b, "Class ");
     ub_app(b, name);
-    char sup[MAX_NAME * 4] = "";
+    char sup[MAX_NAME * IRIS_XML_SUPERTYPE_CAPACITY_MULTIPLIER] = "";
     elem_content(cs, ce, "Super", sup, sizeof(sup));
     if (sup[0]) {
         if (strchr(sup, ',')) {
@@ -171,7 +190,7 @@ static void emit_header(UdlBuf *b, const char *cs, const char *ce) {
             ub_app(b, sup);
         }
     }
-    char pragma[64] = "";
+    char pragma[IRIS_XML_PRAGMA_CAPACITY] = "";
     if (tag_is_one(cs, ce, "Abstract")) {
         strncat(pragma, "Abstract,", sizeof(pragma) - strlen(pragma) - 1);
     }
@@ -179,7 +198,7 @@ static void emit_header(UdlBuf *b, const char *cs, const char *ce) {
         strncat(pragma, "Final,", sizeof(pragma) - strlen(pragma) - 1);
     }
     if (pragma[0]) {
-        pragma[strlen(pragma) - 1] = '\0';
+        pragma[strlen(pragma) - IRIS_XML_TRAILING_COMMA_WIDTH] = '\0';
         ub_app(b, " [ ");
         ub_app(b, pragma);
         ub_app(b, " ]");
@@ -194,11 +213,11 @@ static void emit_method(UdlBuf *b, const char *ms, const char *me) {
         return;
     }
     bool cm = tag_is_one(ms, me, "ClassMethod");
-    char formal[1024] = "";
+    char formal[IRIS_XML_FORMAL_SPEC_CAPACITY] = "";
     elem_content(ms, me, "FormalSpec", formal, sizeof(formal));
     char ret[MAX_NAME] = "";
     elem_content(ms, me, "ReturnType", ret, sizeof(ret));
-    char desc[4096] = "";
+    char desc[IRIS_XML_DESCRIPTION_CAPACITY] = "";
     elem_content(ms, me, "Description", desc, sizeof(desc));
     if (desc[0]) {
         ub_app(b, "/// ");
@@ -206,7 +225,7 @@ static void emit_method(UdlBuf *b, const char *ms, const char *me) {
             if (*c == '\n') {
                 ub_app(b, "\n/// ");
             } else {
-                char t[2] = {*c, 0};
+                char t[IRIS_XML_INLINE_CHARACTER_CAPACITY] = {*c, 0};
                 ub_app(b, t);
             }
         }
@@ -222,10 +241,58 @@ static void emit_method(UdlBuf *b, const char *ms, const char *me) {
         ub_app(b, ret);
     }
     ub_app(b, "\n{\n");
-    char impl[1024 * 32] = "";
+    char impl[IRIS_XML_IMPLEMENTATION_CAPACITY] = "";
     elem_content(ms, me, "Implementation", impl, sizeof(impl));
     ub_app(b, impl);
     ub_app(b, "}\n\n");
+}
+
+static int collect_property_params(const char *start, const char *end,
+                                   PropParam params[MAX_PARAMS]) {
+    int count = 0;
+    const char *cursor = start;
+    while (cursor < end && count < MAX_PARAMS) {
+        const char *parameter = find_s(cursor, end, "<Parameter ");
+        if (!parameter) {
+            break;
+        }
+        const char *tag_end = find_s(parameter, end, ">");
+        if (!tag_end) {
+            break;
+        }
+        extract_attr(parameter, tag_end, "name", params[count].param_name, MAX_NAME);
+        extract_attr(parameter, tag_end, "value", params[count].param_value, MAX_NAME);
+        if (!params[count].param_value[0]) {
+            char body[MAX_NAME];
+            const char *after = elem_content(parameter, end, "Parameter", body, sizeof(body));
+            if (after && body[0]) {
+                strncpy(params[count].param_value, body, MAX_NAME - IRIS_XML_NULL_TERMINATOR_WIDTH);
+            }
+        }
+        if (params[count].param_name[0]) {
+            count++;
+        }
+        cursor = tag_end + IRIS_XML_TAG_CLOSE_WIDTH;
+    }
+    return count;
+}
+
+static void emit_property_params(UdlBuf *b, const PropParam params[MAX_PARAMS], int count) {
+    if (count <= 0) {
+        return;
+    }
+    ub_app(b, "(");
+    for (int i = 0; i < count; i++) {
+        if (i > 0) {
+            ub_app(b, ", ");
+        }
+        ub_app(b, params[i].param_name);
+        if (params[i].param_value[0]) {
+            ub_app(b, " = ");
+            ub_app(b, params[i].param_value);
+        }
+    }
+    ub_app(b, ")");
 }
 
 static void emit_property(UdlBuf *b, const char *ps, const char *pe) {
@@ -237,51 +304,14 @@ static void emit_property(UdlBuf *b, const char *ps, const char *pe) {
     char pt[MAX_NAME] = "";
     elem_content(ps, pe, "Type", pt, sizeof(pt));
     PropParam params[MAX_PARAMS];
-    int np = 0;
-    const char *pp = ps;
-    while (pp < pe && np < MAX_PARAMS) {
-        const char *po = find_s(pp, pe, "<Parameter ");
-        if (!po) {
-            break;
-        }
-        const char *pg = find_s(po, pe, ">");
-        if (!pg) {
-            break;
-        }
-        extract_attr(po, pg, "name", params[np].param_name, MAX_NAME);
-        extract_attr(po, pg, "value", params[np].param_value, MAX_NAME);
-        if (!params[np].param_value[0]) {
-            char db[MAX_NAME];
-            const char *a = elem_content(po, pe, "Parameter", db, MAX_NAME);
-            if (a && db[0]) {
-                strncpy(params[np].param_value, db, MAX_NAME - 1);
-            }
-        }
-        if (params[np].param_name[0]) {
-            np++;
-        }
-        pp = pg + 1;
-    }
+    int np = collect_property_params(ps, pe, params);
     ub_app(b, "Property ");
     ub_app(b, pn);
     if (pt[0]) {
         ub_app(b, " As ");
         ub_app(b, pt);
     }
-    if (np > 0) {
-        ub_app(b, "(");
-        for (int i = 0; i < np; i++) {
-            if (i > 0) {
-                ub_app(b, ", ");
-            }
-            ub_app(b, params[i].param_name);
-            if (params[i].param_value[0]) {
-                ub_app(b, " = ");
-                ub_app(b, params[i].param_value);
-            }
-        }
-        ub_app(b, ")");
-    }
+    emit_property_params(b, params, np);
     ub_app(b, ";\n\n");
 }
 
@@ -309,7 +339,7 @@ static void emit_index(UdlBuf *b, const char *is_, const char *ie) {
     if (!in_[0]) {
         return;
     }
-    char props[MAX_NAME * 4] = "";
+    char props[MAX_NAME * IRIS_XML_SUPERTYPE_CAPACITY_MULTIPLIER] = "";
     elem_content(is_, ie, "Properties", props, sizeof(props));
     bool uniq = tag_is_one(is_, ie, "Unique");
     bool pkey = tag_is_one(is_, ie, "PrimaryKey");
@@ -338,13 +368,84 @@ static void emit_xdata(UdlBuf *b, const char *xs, const char *xe) {
     if (!xn[0]) {
         return;
     }
-    char data[1024 * 32] = "";
+    char data[IRIS_XML_IMPLEMENTATION_CAPACITY] = "";
     elem_content(xs, xe, "Data", data, sizeof(data));
     ub_app(b, "XData ");
     ub_app(b, xn);
     ub_app(b, "\n{\n");
     ub_app(b, data);
     ub_app(b, "\n}\n\n");
+}
+
+typedef void (*IrisXmlRecordEmitter)(UdlBuf *buffer, const char *start, const char *end);
+
+typedef struct {
+    const char *open_with_attributes;
+    const char *open_without_attributes;
+    const char *close;
+    bool ignore_self_closing;
+    IrisXmlRecordEmitter emit;
+} IrisXmlRecordRenderer;
+
+static const IrisXmlRecordRenderer IRIS_XML_RECORD_RENDERERS[] = {
+    {.open_with_attributes = "<Method ",
+     .open_without_attributes = "<Method>",
+     .close = "</Method>",
+     .ignore_self_closing = false,
+     .emit = emit_method},
+    {.open_with_attributes = "<Property ",
+     .open_without_attributes = NULL,
+     .close = "</Property>",
+     .ignore_self_closing = false,
+     .emit = emit_property},
+    {.open_with_attributes = "<Parameter ",
+     .open_without_attributes = NULL,
+     .close = "</Parameter>",
+     .ignore_self_closing = true,
+     .emit = emit_parameter},
+    {.open_with_attributes = "<Index ",
+     .open_without_attributes = "<Index>",
+     .close = "</Index>",
+     .ignore_self_closing = false,
+     .emit = emit_index},
+    {.open_with_attributes = "<XData ",
+     .open_without_attributes = "<XData>",
+     .close = "</XData>",
+     .ignore_self_closing = false,
+     .emit = emit_xdata},
+};
+
+static const IrisXmlRecordRenderer *xml_record_renderer(const char *cursor, const char *end) {
+    size_t renderer_count =
+        sizeof(IRIS_XML_RECORD_RENDERERS) / sizeof(IRIS_XML_RECORD_RENDERERS[0]);
+    for (size_t i = 0; i < renderer_count; i++) {
+        const IrisXmlRecordRenderer *renderer = &IRIS_XML_RECORD_RENDERERS[i];
+        if (sw(cursor, end, renderer->open_with_attributes) ||
+            (renderer->open_without_attributes &&
+             sw(cursor, end, renderer->open_without_attributes))) {
+            return renderer;
+        }
+    }
+    return NULL;
+}
+
+static bool xml_render_record(const IrisXmlRecordRenderer *renderer, UdlBuf *buffer,
+                              const char *start, const char *class_end, const char **next_out) {
+    const char *tag_end = find_s(start, class_end, ">");
+    if (!tag_end) {
+        return false;
+    }
+    *next_out = tag_end + IRIS_XML_TAG_CLOSE_WIDTH;
+    if (renderer->ignore_self_closing && is_self_closing(start, tag_end)) {
+        return true;
+    }
+    const char *record_end = find_s(*next_out, class_end, renderer->close);
+    if (!record_end) {
+        return true;
+    }
+    *next_out = record_end + strlen(renderer->close);
+    renderer->emit(buffer, start, *next_out);
+    return true;
 }
 
 static char *transcode_class(CBMArena *arena, const char *cs, const char *ce) {
@@ -363,78 +464,13 @@ static char *transcode_class(CBMArena *arena, const char *cs, const char *ce) {
             }
             continue;
         }
-        if (sw(p, ce, "<Method ") || sw(p, ce, "<Method>")) {
-            const char *gt = find_s(p, ce, ">");
-            if (!gt) {
+        const IrisXmlRecordRenderer *renderer = xml_record_renderer(p, ce);
+        if (renderer) {
+            const char *next = NULL;
+            if (!xml_render_record(renderer, &b, p, ce, &next)) {
                 break;
             }
-            const char *me = find_s(gt + 1, ce, "</Method>");
-            if (!me) {
-                p = gt + 1;
-                continue;
-            }
-            emit_method(&b, p, me + strlen("</Method>"));
-            p = me + strlen("</Method>");
-            continue;
-        }
-        if (sw(p, ce, "<Property ")) {
-            const char *gt = find_s(p, ce, ">");
-            if (!gt) {
-                break;
-            }
-            const char *pe = find_s(gt + 1, ce, "</Property>");
-            if (!pe) {
-                p = gt + 1;
-                continue;
-            }
-            emit_property(&b, p, pe + strlen("</Property>"));
-            p = pe + strlen("</Property>");
-            continue;
-        }
-        if (sw(p, ce, "<Parameter ")) {
-            const char *gt = find_s(p, ce, ">");
-            if (!gt) {
-                break;
-            }
-            if (is_self_closing(p, gt)) {
-                p = gt + 1;
-                continue;
-            }
-            const char *pe = find_s(gt + 1, ce, "</Parameter>");
-            if (!pe) {
-                p = gt + 1;
-                continue;
-            }
-            emit_parameter(&b, p, pe + strlen("</Parameter>"));
-            p = pe + strlen("</Parameter>");
-            continue;
-        }
-        if (sw(p, ce, "<Index ") || sw(p, ce, "<Index>")) {
-            const char *gt = find_s(p, ce, ">");
-            if (!gt) {
-                break;
-            }
-            const char *ie = find_s(gt + 1, ce, "</Index>");
-            if (!ie) {
-                p = gt + 1;
-                continue;
-            }
-            emit_index(&b, p, ie + strlen("</Index>"));
-            p = ie + strlen("</Index>");
-            continue;
-        }
-        if (sw(p, ce, "<XData ") || sw(p, ce, "<XData>")) {
-            const char *gt = find_s(p, ce, ">");
-            if (!gt) {
-                break;
-            }
-            const char *xe = find_s(gt + 1, ce, "</XData>");
-            if (!xe) {
-                p = gt + 1;
-                continue;
-            }
-            emit_xdata(&b, p, xe + strlen("</XData>"));
-            p = xe + strlen("</XData>");
+            p = next;
             continue;
         }
         p = skip_tag(p, ce);
@@ -466,7 +502,7 @@ char **cbm_iris_export_to_udl(CBMArena *arena, const char *xml, int xml_len, int
         if (!gt) {
             break;
         }
-        const char *cc = find_s(gt + 1, end, "</Class>");
+        const char *cc = find_s(gt + IRIS_XML_TAG_CLOSE_WIDTH, end, "</Class>");
         if (!cc) {
             break;
         }
@@ -479,7 +515,8 @@ char **cbm_iris_export_to_udl(CBMArena *arena, const char *xml, int xml_len, int
     if (!count) {
         return NULL;
     }
-    char **arr = (char **)cbm_arena_alloc(arena, (size_t)(count + 1) * sizeof(char *));
+    char **arr = (char **)cbm_arena_alloc(
+        arena, (size_t)(count + IRIS_XML_RESULT_TERMINATOR_SLOTS) * sizeof(char *));
     if (!arr) {
         return NULL;
     }

@@ -49,6 +49,13 @@ enum {
     DIAG_INTERVAL_MS = 5000,
     DIAG_WAIT_SLICE_MS = 10,
     DIAG_STOP_TIMEOUT_MS = 500,
+    DIAG_INVALID_DESCRIPTOR = -1,
+    DIAG_REQUIRED_LINK_COUNT = 1,
+    DIAG_MINIMUM_SLEEP_MS = 1,
+    DIAG_MILLISECONDS_PER_SECOND = 1000U,
+    DIAG_NANOSECONDS_PER_MILLISECOND = 1000000U,
+    DIAG_PERMISSION_BITS = 07777,
+    DIAG_FILE_MODE = 0600,
 };
 
 #define DIAG_NDJSON_CAP_BYTES ((size_t)8U * 1024U * 1024U)
@@ -68,7 +75,7 @@ static bool g_diag_abandoned = false;
 static time_t g_start_time = 0;
 static cbm_private_lock_directory_t *g_diag_directory = NULL;
 #ifndef _WIN32
-static int g_diag_directory_fd = -1;
+static int g_diag_directory_fd = DIAG_INVALID_DESCRIPTOR;
 #endif
 static char g_diag_directory_path[CBM_PATH_MAX] = "";
 static char g_diag_path[CBM_PATH_MAX] = "";
@@ -174,7 +181,7 @@ static FILE *diag_open_private_stats_file(const char *path) {
 #ifdef O_NOFOLLOW
     flags |= O_NOFOLLOW;
 #endif
-    int descriptor = open(path, flags, 0600);
+    int descriptor = open(path, flags, DIAG_FILE_MODE);
     if (descriptor < 0) {
         return NULL;
     }
@@ -234,7 +241,7 @@ static void diag_directory_close(bool remove_directory) {
 #ifndef _WIN32
     if (g_diag_directory_fd >= 0) {
         (void)close(g_diag_directory_fd);
-        g_diag_directory_fd = -1;
+        g_diag_directory_fd = DIAG_INVALID_DESCRIPTOR;
     }
 #endif
     cbm_private_lock_directory_close(g_diag_directory);
@@ -311,9 +318,9 @@ static bool diag_directory_prepare(void) {
         status = cbm_private_lock_directory_adopt_posix(validation_fd, g_diag_directory_path,
                                                         &g_diag_directory);
         if (status == CBM_PRIVATE_FILE_LOCK_OK) {
-            validation_fd = -1;
+            validation_fd = DIAG_INVALID_DESCRIPTOR;
             g_diag_directory_fd = output_fd;
-            output_fd = -1;
+            output_fd = DIAG_INVALID_DESCRIPTOR;
         }
     }
     if (validation_fd >= 0) {
@@ -407,19 +414,21 @@ static void diag_native_unlink(const char *base_name) {
 static bool diag_posix_file_valid(int descriptor) {
     struct stat state;
     return descriptor >= 0 && fstat(descriptor, &state) == 0 && S_ISREG(state.st_mode) &&
-           state.st_uid == geteuid() && state.st_nlink == 1 && (state.st_mode & 07777) == 0600 &&
+           state.st_uid == geteuid() && state.st_nlink == DIAG_REQUIRED_LINK_COUNT &&
+           (state.st_mode & DIAG_PERMISSION_BITS) == DIAG_FILE_MODE &&
            cbm_macos_extended_acl_fd_is_empty(descriptor);
 }
 
 static bool diag_write_file(const char *base_name, const char *data, size_t length, bool append) {
     int flags = O_WRONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK;
     flags |= append ? O_APPEND : O_TRUNC;
-    int descriptor = openat(g_diag_directory_fd, base_name, flags | O_CREAT | O_EXCL, 0600);
+    int descriptor =
+        openat(g_diag_directory_fd, base_name, flags | O_CREAT | O_EXCL, DIAG_FILE_MODE);
     bool created = descriptor >= 0;
     if (descriptor < 0 && errno == EEXIST) {
         descriptor = openat(g_diag_directory_fd, base_name, flags);
     }
-    if (created && fchmod(descriptor, 0600) != 0) {
+    if (created && fchmod(descriptor, DIAG_FILE_MODE) != 0) {
         (void)close(descriptor);
         return false;
     }
@@ -459,8 +468,9 @@ static void diag_native_unlink(const char *base_name) {
 
 static void diag_sleep_ms(unsigned int milliseconds) {
     struct timespec delay = {
-        .tv_sec = (time_t)(milliseconds / 1000U),
-        .tv_nsec = (long)((milliseconds % 1000U) * 1000000U),
+        .tv_sec = (time_t)(milliseconds / DIAG_MILLISECONDS_PER_SECOND),
+        .tv_nsec = (long)((milliseconds % DIAG_MILLISECONDS_PER_SECOND) *
+                          DIAG_NANOSECONDS_PER_MILLISECOND),
     };
     (void)cbm_nanosleep(&delay, NULL);
 }
@@ -475,7 +485,7 @@ static void diag_wait_for_interval(void) {
         uint64_t remaining = deadline - now;
         unsigned int slice =
             remaining < DIAG_WAIT_SLICE_MS ? (unsigned int)remaining : DIAG_WAIT_SLICE_MS;
-        diag_sleep_ms(slice > 0 ? slice : 1);
+        diag_sleep_ms(slice > 0 ? slice : DIAG_MINIMUM_SLEEP_MS);
     }
 }
 

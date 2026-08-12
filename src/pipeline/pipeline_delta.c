@@ -38,14 +38,63 @@
 #include "store/sql.h"
 #include "store/store.h"
 
-enum { DELTA_IN_CHUNK = 200 };
+enum {
+    DELTA_IN_CHUNK = 200,
+    DELTA_PLACEHOLDER_BYTES_PER_PATH = 2,
+    DELTA_C_STRING_TERMINATOR_BYTES = 1,
+    DELTA_SEQUENCE_NEXT_OFFSET = 1,
+    DELTA_SQL_BIND_FIRST_PARAMETER = 1,
+    DELTA_SQL_BIND_SECOND_PARAMETER = 2,
+    DELTA_SQL_BIND_SECOND_PATH_OFFSET = DELTA_SQL_BIND_SECOND_PARAMETER,
+    DELTA_SNAPSHOT_COLUMN_SOURCE_QN = 0,
+    DELTA_SNAPSHOT_COLUMN_TARGET_QN = 1,
+    DELTA_SNAPSHOT_COLUMN_TYPE = 2,
+    DELTA_SNAPSHOT_COLUMN_PROPERTIES = 3,
+    DELTA_CAPACITY_GROWTH_FACTOR = 2,
+    DELTA_SNAPSHOT_INITIAL_CAPACITY = 64,
+    DELTA_PRESEED_FAILED = -1,
+    DELTA_PRESEED_COLUMN_ID = 0,
+    DELTA_PRESEED_COLUMN_LABEL = 1,
+    DELTA_PRESEED_COLUMN_NAME = 2,
+    DELTA_PRESEED_COLUMN_QUALIFIED_NAME = 3,
+    DELTA_PRESEED_COLUMN_FILE_PATH = 4,
+    DELTA_NODE_ID_NEXT_INCREMENT = 1,
+    DELTA_LOG_COUNT_BUFFER_SIZE = 32,
+    DELTA_REMAP_INITIAL_CAPACITY = 256,
+    DELTA_BINARY_SEARCH_DIVISOR = 2,
+    DELTA_BINARY_SEARCH_STEP = 1,
+    DELTA_QN_LOOKUP_COLUMN_ID = 0,
+    DELTA_NODE_BIND_ID = 1,
+    DELTA_NODE_BIND_PROJECT = 2,
+    DELTA_NODE_BIND_LABEL = 3,
+    DELTA_NODE_BIND_NAME = 4,
+    DELTA_NODE_BIND_QUALIFIED_NAME = 5,
+    DELTA_NODE_BIND_FILE_PATH = 6,
+    DELTA_NODE_BIND_START_LINE = 7,
+    DELTA_NODE_BIND_END_LINE = 8,
+    DELTA_NODE_BIND_PROPERTIES = 9,
+    DELTA_OWNER_COLUMN_LABEL = 0,
+    DELTA_OWNER_COLUMN_QUALIFIED_NAME = 1,
+    DELTA_EDGE_BIND_PROJECT = 1,
+    DELTA_EDGE_BIND_SOURCE_ID = 2,
+    DELTA_EDGE_BIND_TARGET_ID = 3,
+    DELTA_EDGE_BIND_TYPE = 4,
+    DELTA_EDGE_BIND_PROPERTIES = 5,
+    DELTA_RELINK_BIND_PROJECT = 1,
+    DELTA_RELINK_BIND_TYPE = 2,
+    DELTA_RELINK_BIND_PROPERTIES = 3,
+    DELTA_RELINK_BIND_SOURCE_QN = 4,
+    DELTA_RELINK_BIND_TARGET_QN = 5,
+    DELTA_FTS_BIND_PROJECT = 1,
+    DELTA_FTS_BIND_MAX_DB_ID = 2,
+};
 
 /* Assemble "?,?,...,?" for a chunked IN list. buf must hold 2*count. */
 static void delta_placeholders(char *buf, int count) {
     int pos = 0;
     for (int i = 0; i < count; i++) {
         buf[pos++] = '?';
-        if (i + 1 < count) {
+        if (i + DELTA_SEQUENCE_NEXT_OFFSET < count) {
             buf[pos++] = ',';
         }
     }
@@ -77,6 +126,104 @@ static bool delta_edge_type_is_recomputed(const char *type) {
                     strcmp(type, "FILE_CHANGES_WITH") == 0 || strcmp(type, "DATA_FLOWS") == 0);
 }
 
+typedef struct {
+    cbm_delta_saved_edge_t *items;
+    int count;
+    int capacity;
+} delta_snapshot_t;
+
+static bool delta_snapshot_grow(delta_snapshot_t *snapshot) {
+    if (snapshot->count < snapshot->capacity) {
+        return true;
+    }
+    if (snapshot->capacity > INT_MAX / DELTA_CAPACITY_GROWTH_FACTOR) {
+        return false;
+    }
+    int capacity = snapshot->capacity ? snapshot->capacity * DELTA_CAPACITY_GROWTH_FACTOR
+                                      : DELTA_SNAPSHOT_INITIAL_CAPACITY;
+    cbm_delta_saved_edge_t *items = realloc(snapshot->items, (size_t)capacity * sizeof(*items));
+    if (!items) {
+        return false;
+    }
+    snapshot->items = items;
+    snapshot->capacity = capacity;
+    return true;
+}
+
+static bool delta_snapshot_add(delta_snapshot_t *snapshot, cbm_sql_stmt_t *stmt, const char *type) {
+    if (!delta_snapshot_grow(snapshot)) {
+        return false;
+    }
+    const char *source = cbm_sql_column_text(stmt, DELTA_SNAPSHOT_COLUMN_SOURCE_QN);
+    const char *target = cbm_sql_column_text(stmt, DELTA_SNAPSHOT_COLUMN_TARGET_QN);
+    const char *properties = cbm_sql_column_is_null(stmt, DELTA_SNAPSHOT_COLUMN_PROPERTIES)
+                                 ? NULL
+                                 : cbm_sql_column_text(stmt, DELTA_SNAPSHOT_COLUMN_PROPERTIES);
+    cbm_delta_saved_edge_t *edge = &snapshot->items[snapshot->count];
+    edge->source_qn = strdup(source ? source : "");
+    edge->target_qn = strdup(target ? target : "");
+    edge->type = strdup(type);
+    edge->props = strdup(properties ? properties : "{}");
+    if (!edge->source_qn || !edge->target_qn || !edge->type || !edge->props) {
+        free(edge->source_qn);
+        free(edge->target_qn);
+        free(edge->type);
+        free(edge->props);
+        return false;
+    }
+    snapshot->count++;
+    return true;
+}
+
+static bool delta_snapshot_prepare(cbm_sql_t *db, const char *placeholders, cbm_sql_stmt_t **stmt) {
+    char sql[CBM_SZ_4K];
+    int length = snprintf(sql, sizeof(sql),
+                          /* CROSS JOIN pins nodes-first: the planner otherwise walks
+                           * EVERY project edge through the url_path index prefix
+                           * (measured 14.6s vs 4ms at kernel scale). */
+                          "SELECT src.qualified_name, tgt.qualified_name, e.type, e.properties"
+                          " FROM nodes tgt"
+                          " CROSS JOIN edges e ON e.target_id = tgt.id"
+                          " CROSS JOIN nodes src ON e.source_id = src.id"
+                          " WHERE tgt.project = ?1 AND tgt.file_path IN (%s)"
+                          " AND src.file_path NOT IN (%s)"
+                          " AND src.file_path <> '' AND src.file_path IS NOT NULL",
+                          placeholders, placeholders);
+    return length >= 0 && (size_t)length < sizeof(sql) && cbm_sql_prepare(db, sql, stmt);
+}
+
+static void delta_snapshot_bind_paths(cbm_sql_stmt_t *stmt, const char *project,
+                                      const char *const *paths, int offset, int count) {
+    cbm_sql_bind_text(stmt, DELTA_SQL_BIND_FIRST_PARAMETER, project);
+    for (int index = 0; index < count; index++) {
+        cbm_sql_bind_text(stmt, DELTA_SQL_BIND_SECOND_PARAMETER + index, paths[offset + index]);
+        cbm_sql_bind_text(stmt, DELTA_SQL_BIND_SECOND_PATH_OFFSET + count + index,
+                          paths[offset + index]);
+    }
+}
+
+static bool delta_snapshot_chunk(cbm_sql_t *db, const char *project, const char *const *paths,
+                                 int offset, int count, delta_snapshot_t *snapshot) {
+    char placeholders[(DELTA_PLACEHOLDER_BYTES_PER_PATH * DELTA_IN_CHUNK) +
+                      DELTA_C_STRING_TERMINATOR_BYTES];
+    delta_placeholders(placeholders, count);
+    cbm_sql_stmt_t *stmt = NULL;
+    if (!delta_snapshot_prepare(db, placeholders, &stmt)) {
+        return false;
+    }
+    delta_snapshot_bind_paths(stmt, project, paths, offset, count);
+    cbm_sql_step_t step = CBM_SQL_DONE;
+    while ((step = cbm_sql_step(stmt)) == CBM_SQL_ROW) {
+        const char *type = cbm_sql_column_text(stmt, DELTA_SNAPSHOT_COLUMN_TYPE);
+        if (!delta_edge_type_is_recomputed(type) && !delta_snapshot_add(snapshot, stmt, type)) {
+            cbm_sql_finalize(stmt);
+            return false;
+        }
+    }
+    cbm_sql_finalize(stmt);
+    return step == CBM_SQL_DONE;
+}
+
 int cbm_delta_snapshot_inbound(cbm_store_t *store, const char *project, const char *const *paths,
                                int path_count, cbm_delta_saved_edge_t **out, int *out_count) {
     *out = NULL;
@@ -88,99 +235,19 @@ int cbm_delta_snapshot_inbound(cbm_store_t *store, const char *project, const ch
     if (!db) {
         return CBM_NOT_FOUND;
     }
-    cbm_delta_saved_edge_t *items = NULL;
-    int count = 0;
-    int cap = 0;
+    delta_snapshot_t snapshot = {0};
     for (int off = 0; off < path_count; off += DELTA_IN_CHUNK) {
         int chunk = path_count - off;
         if (chunk > DELTA_IN_CHUNK) {
             chunk = DELTA_IN_CHUNK;
         }
-        char ph[(2 * DELTA_IN_CHUNK) + 1];
-        delta_placeholders(ph, chunk);
-        char sql[CBM_SZ_4K];
-        int n = snprintf(sql, sizeof(sql),
-                         /* CROSS JOIN pins nodes-first: the planner otherwise walks
-                          * EVERY project edge through the url_path index prefix
-                          * (measured 14.6s vs 4ms at kernel scale). */
-                         "SELECT src.qualified_name, tgt.qualified_name, e.type, e.properties"
-                         " FROM nodes tgt"
-                         " CROSS JOIN edges e ON e.target_id = tgt.id"
-                         " CROSS JOIN nodes src ON e.source_id = src.id"
-                         " WHERE tgt.project = ?1 AND tgt.file_path IN (%s)"
-                         " AND src.file_path NOT IN (%s)"
-                         " AND src.file_path <> '' AND src.file_path IS NOT NULL",
-                         ph, ph);
-        if (n < 0 || (size_t)n >= sizeof(sql)) {
-            cbm_delta_free_snapshot(items, count);
-            return CBM_NOT_FOUND;
-        }
-        cbm_sql_stmt_t *stmt = NULL;
-        if (!cbm_sql_prepare(db, sql, &stmt)) {
-            cbm_delta_free_snapshot(items, count);
-            return CBM_NOT_FOUND;
-        }
-        cbm_sql_bind_text(stmt, 1, project);
-        for (int i = 0; i < chunk; i++) {
-            cbm_sql_bind_text(stmt, 2 + i, paths[off + i]);
-            cbm_sql_bind_text(stmt, 2 + chunk + i, paths[off + i]);
-        }
-        cbm_sql_step_t step_rc;
-        while ((step_rc = cbm_sql_step(stmt)) == CBM_SQL_ROW) {
-            const char *type = cbm_sql_column_text(stmt, 2);
-            if (delta_edge_type_is_recomputed(type)) {
-                continue;
-            }
-            if (count >= cap) {
-                /* Doubling an int overflows before the cast can widen it, so bound it
-                 * first and fail closed the same way this loop already does when the
-                 * allocation fails. */
-                if (cap > INT_MAX / 2) {
-                    cbm_sql_finalize(stmt);
-                    cbm_delta_free_snapshot(items, count);
-                    return CBM_NOT_FOUND;
-                }
-                int ncap = cap ? cap * 2 : 64;
-                cbm_delta_saved_edge_t *grown = realloc(items, (size_t)ncap * sizeof(*items));
-                if (!grown) {
-                    cbm_sql_finalize(stmt);
-                    cbm_delta_free_snapshot(items, count);
-                    return CBM_NOT_FOUND;
-                }
-                items = grown;
-                cap = ncap;
-            }
-            const char *sq = cbm_sql_column_text(stmt, 0);
-            const char *tq = cbm_sql_column_text(stmt, 1);
-            /* Absent properties must stay absent so the "{}" default below
-             * still applies; "" is not a JSON object and would be replayed as
-             * a malformed property set. */
-            const char *props =
-                cbm_sql_column_is_null(stmt, 3) ? NULL : cbm_sql_column_text(stmt, 3);
-            cbm_delta_saved_edge_t *e = &items[count];
-            e->source_qn = strdup(sq ? sq : "");
-            e->target_qn = strdup(tq ? tq : "");
-            e->type = strdup(type);
-            e->props = strdup(props ? props : "{}");
-            if (!e->source_qn || !e->target_qn || !e->type || !e->props) {
-                free(e->source_qn);
-                free(e->target_qn);
-                free(e->type);
-                free(e->props);
-                cbm_sql_finalize(stmt);
-                cbm_delta_free_snapshot(items, count);
-                return CBM_NOT_FOUND;
-            }
-            count++;
-        }
-        cbm_sql_finalize(stmt);
-        if (step_rc != CBM_SQL_DONE) {
-            cbm_delta_free_snapshot(items, count);
+        if (!delta_snapshot_chunk(db, project, paths, off, chunk, &snapshot)) {
+            cbm_delta_free_snapshot(snapshot.items, snapshot.count);
             return CBM_NOT_FOUND;
         }
     }
-    *out = items;
-    *out_count = count;
+    *out = snapshot.items;
+    *out_count = snapshot.count;
     return 0;
 }
 
@@ -211,7 +278,8 @@ int cbm_delta_purge(cbm_store_t *store, const char *project, const char *const *
         if (chunk > DELTA_IN_CHUNK) {
             chunk = DELTA_IN_CHUNK;
         }
-        char ph[(2 * DELTA_IN_CHUNK) + 1];
+        char ph[(DELTA_PLACEHOLDER_BYTES_PER_PATH * DELTA_IN_CHUNK) +
+                DELTA_C_STRING_TERMINATOR_BYTES];
         delta_placeholders(ph, chunk);
         char sql[CBM_SZ_1K];
         int n = snprintf(sql, sizeof(sql),
@@ -223,9 +291,9 @@ int cbm_delta_purge(cbm_store_t *store, const char *project, const char *const *
         if (!cbm_sql_prepare(db, sql, &stmt)) {
             return CBM_NOT_FOUND;
         }
-        cbm_sql_bind_text(stmt, 1, project);
+        cbm_sql_bind_text(stmt, DELTA_SQL_BIND_FIRST_PARAMETER, project);
         for (int i = 0; i < chunk; i++) {
-            cbm_sql_bind_text(stmt, 2 + i, paths[off + i]);
+            cbm_sql_bind_text(stmt, DELTA_SQL_BIND_SECOND_PARAMETER + i, paths[off + i]);
         }
         cbm_sql_step_t rc = cbm_sql_step(stmt);
         cbm_sql_finalize(stmt);
@@ -247,7 +315,7 @@ int cbm_delta_purge(cbm_store_t *store, const char *project, const char *const *
 int64_t cbm_delta_preseed(cbm_store_t *store, const char *project, cbm_gbuf_t *gbuf) {
     cbm_sql_t *db = cbm_store_sql(store);
     if (!db) {
-        return -1;
+        return DELTA_PRESEED_FAILED;
     }
     int64_t max_id = 0;
     {
@@ -255,7 +323,7 @@ int64_t cbm_delta_preseed(cbm_store_t *store, const char *project, cbm_gbuf_t *g
         /* Global MAX, not project-scoped: node ids are one keyspace for the
          * whole database, and the watermark must clear every row in it. */
         if (!cbm_sql_prepare(db, "SELECT COALESCE(MAX(id), 0) FROM nodes", &stmt)) {
-            return -1;
+            return DELTA_PRESEED_FAILED;
         }
         if (cbm_sql_step(stmt) == CBM_SQL_ROW) {
             max_id = cbm_sql_column_int64(stmt, 0);
@@ -283,17 +351,17 @@ int64_t cbm_delta_preseed(cbm_store_t *store, const char *project, cbm_gbuf_t *g
                          " ('Macro','Comment','Section','Branch','Commit','Tag')"
                          " ORDER BY id",
                          &stmt)) {
-        return -1;
+        return DELTA_PRESEED_FAILED;
     }
-    cbm_sql_bind_text(stmt, 1, project);
+    cbm_sql_bind_text(stmt, DELTA_SQL_BIND_FIRST_PARAMETER, project);
     cbm_sql_step_t step_rc;
     int64_t seeded = 0;
     while ((step_rc = cbm_sql_step(stmt)) == CBM_SQL_ROW) {
-        int64_t id = cbm_sql_column_int64(stmt, 0);
-        const char *label = cbm_sql_column_text(stmt, 1);
-        const char *name = cbm_sql_column_text(stmt, 2);
-        const char *qn = cbm_sql_column_text(stmt, 3);
-        const char *fp = cbm_sql_column_text(stmt, 4);
+        int64_t id = cbm_sql_column_int64(stmt, DELTA_PRESEED_COLUMN_ID);
+        const char *label = cbm_sql_column_text(stmt, DELTA_PRESEED_COLUMN_LABEL);
+        const char *name = cbm_sql_column_text(stmt, DELTA_PRESEED_COLUMN_NAME);
+        const char *qn = cbm_sql_column_text(stmt, DELTA_PRESEED_COLUMN_QUALIFIED_NAME);
+        const char *fp = cbm_sql_column_text(stmt, DELTA_PRESEED_COLUMN_FILE_PATH);
         /* Pin the gbuf id to the database id: proxies ARE their rows. */
         cbm_gbuf_set_next_id(gbuf, id);
         int64_t got = cbm_node_id_value(
@@ -303,16 +371,16 @@ int64_t cbm_delta_preseed(cbm_store_t *store, const char *project, cbm_gbuf_t *g
              * identity between RAM and disk; the run cannot be trusted. */
             cbm_sql_finalize(stmt);
             cbm_log_error("delta.preseed_id_mismatch", "qn", qn ? qn : "");
-            return -1;
+            return DELTA_PRESEED_FAILED;
         }
         seeded++;
     }
     cbm_sql_finalize(stmt);
     if (step_rc != CBM_SQL_DONE) {
-        return -1;
+        return DELTA_PRESEED_FAILED;
     }
-    cbm_gbuf_set_next_id(gbuf, max_id + 1);
-    char seeded_buf[32];
+    cbm_gbuf_set_next_id(gbuf, max_id + DELTA_NODE_ID_NEXT_INCREMENT);
+    char seeded_buf[DELTA_LOG_COUNT_BUFFER_SIZE];
     snprintf(seeded_buf, sizeof(seeded_buf), "%lld", (long long)seeded);
     cbm_log_info("delta.preseed", "proxies", seeded_buf);
     return max_id;
@@ -351,11 +419,12 @@ static void delta_remap_put(delta_patch_ctx_t *ctx, int64_t from, int64_t to) {
         /* Doubling an int overflows before the cast can widen it, so bound it
          * first and fail the same way this function already does when the
          * allocation fails. */
-        if (ctx->remap_cap > INT_MAX / 2) {
+        if (ctx->remap_cap > INT_MAX / DELTA_CAPACITY_GROWTH_FACTOR) {
             ctx->failed = true;
             return;
         }
-        int ncap = ctx->remap_cap ? ctx->remap_cap * 2 : 256;
+        int ncap = ctx->remap_cap ? ctx->remap_cap * DELTA_CAPACITY_GROWTH_FACTOR
+                                  : DELTA_REMAP_INITIAL_CAPACITY;
         void *grown = realloc(ctx->remap, (size_t)ncap * sizeof(*ctx->remap));
         if (!grown) {
             ctx->failed = true;
@@ -374,16 +443,16 @@ static int64_t delta_remap_get(const delta_patch_ctx_t *ctx, int64_t id) {
         return id;
     }
     int lo = 0;
-    int hi = ctx->remap_count - 1;
+    int hi = ctx->remap_count - DELTA_BINARY_SEARCH_STEP;
     while (lo <= hi) {
-        int mid = lo + ((hi - lo) / 2);
+        int mid = lo + ((hi - lo) / DELTA_BINARY_SEARCH_DIVISOR);
         if (ctx->remap[mid].from == id) {
             return ctx->remap[mid].to;
         }
         if (ctx->remap[mid].from < id) {
-            lo = mid + 1;
+            lo = mid + DELTA_BINARY_SEARCH_STEP;
         } else {
-            hi = mid - 1;
+            hi = mid - DELTA_BINARY_SEARCH_STEP;
         }
     }
     return id;
@@ -396,31 +465,31 @@ static void delta_patch_node(const cbm_gbuf_node_t *node, void *userdata) {
     }
     if (node->qualified_name) {
         cbm_sql_reset(ctx->qn_lookup);
-        cbm_sql_bind_text(ctx->qn_lookup, 1, ctx->project);
-        cbm_sql_bind_text(ctx->qn_lookup, 2, node->qualified_name);
+        cbm_sql_bind_text(ctx->qn_lookup, DELTA_SQL_BIND_FIRST_PARAMETER, ctx->project);
+        cbm_sql_bind_text(ctx->qn_lookup, DELTA_SQL_BIND_SECOND_PARAMETER, node->qualified_name);
         if (cbm_sql_step(ctx->qn_lookup) == CBM_SQL_ROW) {
             /* Already on disk: an unchanged file's symbol. A node from a
              * CHANGED file cannot appear here -- the purge removed it --
              * so repaired files still receive fresh rows. */
             delta_remap_put(ctx, cbm_node_id_value(node->id),
-                            cbm_sql_column_int64(ctx->qn_lookup, 0));
+                            cbm_sql_column_int64(ctx->qn_lookup, DELTA_QN_LOOKUP_COLUMN_ID));
             ctx->remapped++;
             return;
         }
     }
     cbm_sql_reset(ctx->node_stmt);
-    cbm_sql_bind_int64(ctx->node_stmt, 1, cbm_node_id_value(node->id));
-    cbm_sql_bind_text(ctx->node_stmt, 2, ctx->project);
-    cbm_sql_bind_text(ctx->node_stmt, 3, node->label);
-    cbm_sql_bind_text(ctx->node_stmt, 4, node->name);
-    cbm_sql_bind_text(ctx->node_stmt, 5, node->qualified_name);
-    cbm_sql_bind_text(ctx->node_stmt, 6, node->file_path);
-    cbm_sql_bind_int(ctx->node_stmt, 7, node->start_line);
-    cbm_sql_bind_int(ctx->node_stmt, 8, node->end_line);
-    cbm_sql_bind_text(ctx->node_stmt, 9, node->properties_json);
+    cbm_sql_bind_int64(ctx->node_stmt, DELTA_NODE_BIND_ID, cbm_node_id_value(node->id));
+    cbm_sql_bind_text(ctx->node_stmt, DELTA_NODE_BIND_PROJECT, ctx->project);
+    cbm_sql_bind_text(ctx->node_stmt, DELTA_NODE_BIND_LABEL, node->label);
+    cbm_sql_bind_text(ctx->node_stmt, DELTA_NODE_BIND_NAME, node->name);
+    cbm_sql_bind_text(ctx->node_stmt, DELTA_NODE_BIND_QUALIFIED_NAME, node->qualified_name);
+    cbm_sql_bind_text(ctx->node_stmt, DELTA_NODE_BIND_FILE_PATH, node->file_path);
+    cbm_sql_bind_int(ctx->node_stmt, DELTA_NODE_BIND_START_LINE, node->start_line);
+    cbm_sql_bind_int(ctx->node_stmt, DELTA_NODE_BIND_END_LINE, node->end_line);
+    cbm_sql_bind_text(ctx->node_stmt, DELTA_NODE_BIND_PROPERTIES, node->properties_json);
     if (cbm_sql_step(ctx->node_stmt) != CBM_SQL_DONE) {
         ctx->failed = true;
-        char id_buf[32];
+        char id_buf[DELTA_LOG_COUNT_BUFFER_SIZE];
         snprintf(id_buf, sizeof(id_buf), "%lld", (long long)cbm_node_id_value(node->id));
         cbm_log_error("delta.patch_node_failed", "qn", node->qualified_name, "err",
                       cbm_sql_errmsg(ctx->db));
@@ -428,10 +497,11 @@ static void delta_patch_node(const cbm_gbuf_node_t *node, void *userdata) {
         cbm_sql_stmt_t *who = NULL;
         if (cbm_sql_prepare(ctx->db, "SELECT label, qualified_name FROM nodes WHERE id = ?1",
                             &who)) {
-            cbm_sql_bind_int64(who, 1, cbm_node_id_value(node->id));
+            cbm_sql_bind_int64(who, DELTA_SQL_BIND_FIRST_PARAMETER, cbm_node_id_value(node->id));
             if (cbm_sql_step(who) == CBM_SQL_ROW) {
-                cbm_log_error("delta.patch_id_owner", "label", cbm_sql_column_text(who, 0), "qn",
-                              cbm_sql_column_text(who, 1));
+                cbm_log_error("delta.patch_id_owner", "label",
+                              cbm_sql_column_text(who, DELTA_OWNER_COLUMN_LABEL), "qn",
+                              cbm_sql_column_text(who, DELTA_OWNER_COLUMN_QUALIFIED_NAME));
             }
             cbm_sql_finalize(who);
         }
@@ -459,11 +529,11 @@ static void delta_patch_edge(const cbm_gbuf_edge_t *edge, void *userdata) {
     }
 
     cbm_sql_reset(ctx->edge_stmt);
-    cbm_sql_bind_text(ctx->edge_stmt, 1, ctx->project);
-    cbm_sql_bind_int64(ctx->edge_stmt, 2, src);
-    cbm_sql_bind_int64(ctx->edge_stmt, 3, tgt);
-    cbm_sql_bind_text(ctx->edge_stmt, 4, edge->type);
-    cbm_sql_bind_text(ctx->edge_stmt, 5, props_json);
+    cbm_sql_bind_text(ctx->edge_stmt, DELTA_EDGE_BIND_PROJECT, ctx->project);
+    cbm_sql_bind_int64(ctx->edge_stmt, DELTA_EDGE_BIND_SOURCE_ID, src);
+    cbm_sql_bind_int64(ctx->edge_stmt, DELTA_EDGE_BIND_TARGET_ID, tgt);
+    cbm_sql_bind_text(ctx->edge_stmt, DELTA_EDGE_BIND_TYPE, edge->type);
+    cbm_sql_bind_text(ctx->edge_stmt, DELTA_EDGE_BIND_PROPERTIES, props_json);
     cbm_sql_step_t step_rc = cbm_sql_step(ctx->edge_stmt);
     free(props_json);
     if (step_rc != CBM_SQL_DONE) {
@@ -472,6 +542,101 @@ static void delta_patch_edge(const cbm_gbuf_edge_t *edge, void *userdata) {
         return;
     }
     ctx->edges++;
+}
+
+static bool delta_prepare_patch_statements(cbm_sql_t *db, delta_patch_ctx_t *ctx) {
+    if (!cbm_sql_prepare(db,
+                         "SELECT id FROM nodes WHERE project = ?1"
+                         " AND qualified_name = ?2",
+                         &ctx->qn_lookup)) {
+        return false;
+    }
+    bool prepared =
+        cbm_sql_prepare(db,
+                        "INSERT INTO nodes (id, project, label, name, qualified_name,"
+                        " file_path, start_line, end_line, properties)"
+                        " VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                        &ctx->node_stmt) &&
+        cbm_sql_prepare(db,
+                        "INSERT OR IGNORE INTO edges (project, source_id, target_id, type,"
+                        " properties) VALUES (?1,?2,?3,?4,?5)",
+                        &ctx->edge_stmt);
+    if (!prepared) {
+        cbm_sql_finalize(ctx->node_stmt);
+        cbm_sql_finalize(ctx->edge_stmt);
+        cbm_sql_finalize(ctx->qn_lookup);
+    }
+    return prepared;
+}
+
+static void delta_finalize_patch_statements(delta_patch_ctx_t *ctx) {
+    cbm_sql_finalize(ctx->node_stmt);
+    cbm_sql_finalize(ctx->edge_stmt);
+    cbm_sql_finalize(ctx->qn_lookup);
+}
+
+static void delta_relink_snapshot(delta_patch_ctx_t *ctx, const cbm_delta_saved_edge_t *snapshot,
+                                  int snapshot_count) {
+    if (ctx->failed || snapshot_count <= 0) {
+        return;
+    }
+    cbm_sql_stmt_t *relink = NULL;
+    if (!cbm_sql_prepare(ctx->db,
+                         "INSERT OR IGNORE INTO edges (project, source_id, target_id,"
+                         " type, properties)"
+                         " SELECT ?1, s.id, t.id, ?2, ?3 FROM nodes s, nodes t"
+                         " WHERE s.project = ?1 AND s.qualified_name = ?4"
+                         " AND t.project = ?1 AND t.qualified_name = ?5",
+                         &relink)) {
+        ctx->failed = true;
+        return;
+    }
+    for (int index = 0; index < snapshot_count && !ctx->failed; index++) {
+        cbm_sql_reset(relink);
+        cbm_sql_bind_text(relink, DELTA_RELINK_BIND_PROJECT, ctx->project);
+        cbm_sql_bind_text(relink, DELTA_RELINK_BIND_TYPE, snapshot[index].type);
+        cbm_sql_bind_text(relink, DELTA_RELINK_BIND_PROPERTIES, snapshot[index].props);
+        cbm_sql_bind_text(relink, DELTA_RELINK_BIND_SOURCE_QN, snapshot[index].source_qn);
+        cbm_sql_bind_text(relink, DELTA_RELINK_BIND_TARGET_QN, snapshot[index].target_qn);
+        if (cbm_sql_step(relink) != CBM_SQL_DONE) {
+            ctx->failed = true;
+        }
+    }
+    cbm_sql_finalize(relink);
+}
+
+static void delta_patch_fts(delta_patch_ctx_t *ctx) {
+    if (ctx->failed) {
+        return;
+    }
+    cbm_sql_stmt_t *fts = NULL;
+    if (!cbm_sql_prepare(ctx->db,
+                         "INSERT INTO nodes_fts (rowid, name, qualified_name, label,"
+                         " file_path)"
+                         " SELECT id, cbm_camel_split(name), qualified_name, label,"
+                         " file_path FROM nodes WHERE project = ?1 AND id > ?2",
+                         &fts)) {
+        /* FTS5 may be compiled out; the table then never existed and
+         * search runs without it — matching the dump path's behavior. */
+        cbm_log_warn("delta.fts_insert_unavailable", "project", ctx->project);
+        return;
+    }
+    cbm_sql_bind_text(fts, DELTA_FTS_BIND_PROJECT, ctx->project);
+    cbm_sql_bind_int64(fts, DELTA_FTS_BIND_MAX_DB_ID, ctx->max_db_id);
+    if (cbm_sql_step(fts) != CBM_SQL_DONE) {
+        ctx->failed = true;
+    }
+    cbm_sql_finalize(fts);
+}
+
+static void delta_log_patch(const delta_patch_ctx_t *ctx) {
+    char nodes[DELTA_LOG_COUNT_BUFFER_SIZE];
+    char edges[DELTA_LOG_COUNT_BUFFER_SIZE];
+    char remapped[DELTA_LOG_COUNT_BUFFER_SIZE];
+    snprintf(nodes, sizeof(nodes), "%lld", (long long)ctx->nodes);
+    snprintf(edges, sizeof(edges), "%lld", (long long)ctx->edges);
+    snprintf(remapped, sizeof(remapped), "%lld", (long long)ctx->remapped);
+    cbm_log_info("delta.patch", "nodes", nodes, "edges", edges, "remapped", remapped);
 }
 
 int cbm_delta_patch(cbm_store_t *store, const char *project, cbm_gbuf_t *gbuf, int64_t max_db_id,
@@ -484,26 +649,7 @@ int cbm_delta_patch(cbm_store_t *store, const char *project, cbm_gbuf_t *gbuf, i
         return CBM_NOT_FOUND;
     }
     delta_patch_ctx_t ctx = {.db = db, .project = project, .max_db_id = max_db_id};
-    if (!cbm_sql_prepare(db,
-                         "SELECT id FROM nodes WHERE project = ?1"
-                         " AND qualified_name = ?2",
-                         &ctx.qn_lookup)) {
-        cbm_store_rollback(store);
-        return CBM_NOT_FOUND;
-    }
-    if (!cbm_sql_prepare(db,
-                         "INSERT INTO nodes (id, project, label, name, qualified_name,"
-                         " file_path, start_line, end_line, properties)"
-                         " VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
-                         &ctx.node_stmt) ||
-        !cbm_sql_prepare(db,
-                         "INSERT OR IGNORE INTO edges (project, source_id, target_id, type,"
-                         " properties) VALUES (?1,?2,?3,?4,?5)",
-                         &ctx.edge_stmt)) {
-        cbm_sql_finalize(ctx.node_stmt);
-        cbm_sql_finalize(ctx.edge_stmt);
-        cbm_sql_finalize(ctx.qn_lookup);
-        free(ctx.remap);
+    if (!delta_prepare_patch_statements(db, &ctx)) {
         cbm_store_rollback(store);
         return CBM_NOT_FOUND;
     }
@@ -511,61 +657,9 @@ int cbm_delta_patch(cbm_store_t *store, const char *project, cbm_gbuf_t *gbuf, i
     if (!ctx.failed) {
         cbm_gbuf_foreach_edge(gbuf, delta_patch_edge, &ctx);
     }
-    cbm_sql_finalize(ctx.node_stmt);
-    cbm_sql_finalize(ctx.edge_stmt);
-    cbm_sql_finalize(ctx.qn_lookup);
-
-    /* Re-link the snapshotted inbound edges by qualified name. A target
-     * whose QN no longer exists simply matches no row — full-reindex
-     * semantics for deleted symbols, dedup by the UNIQUE edge constraint. */
-    if (!ctx.failed && snapshot_count > 0) {
-        cbm_sql_stmt_t *relink = NULL;
-        if (!cbm_sql_prepare(db,
-                             "INSERT OR IGNORE INTO edges (project, source_id, target_id,"
-                             " type, properties)"
-                             " SELECT ?1, s.id, t.id, ?2, ?3 FROM nodes s, nodes t"
-                             " WHERE s.project = ?1 AND s.qualified_name = ?4"
-                             " AND t.project = ?1 AND t.qualified_name = ?5",
-                             &relink)) {
-            ctx.failed = true;
-        } else {
-            for (int i = 0; i < snapshot_count && !ctx.failed; i++) {
-                cbm_sql_reset(relink);
-                cbm_sql_bind_text(relink, 1, project);
-                cbm_sql_bind_text(relink, 2, snapshot[i].type);
-                cbm_sql_bind_text(relink, 3, snapshot[i].props);
-                cbm_sql_bind_text(relink, 4, snapshot[i].source_qn);
-                cbm_sql_bind_text(relink, 5, snapshot[i].target_qn);
-                if (cbm_sql_step(relink) != CBM_SQL_DONE) {
-                    ctx.failed = true;
-                }
-            }
-            cbm_sql_finalize(relink);
-        }
-    }
-
-    /* Row-level FTS for exactly the new nodes, through the same tokenizer
-     * function the wholesale rebuild uses. */
-    if (!ctx.failed) {
-        cbm_sql_stmt_t *fts = NULL;
-        if (cbm_sql_prepare(db,
-                            "INSERT INTO nodes_fts (rowid, name, qualified_name, label,"
-                            " file_path)"
-                            " SELECT id, cbm_camel_split(name), qualified_name, label,"
-                            " file_path FROM nodes WHERE project = ?1 AND id > ?2",
-                            &fts)) {
-            cbm_sql_bind_text(fts, 1, project);
-            cbm_sql_bind_int64(fts, 2, max_db_id);
-            if (cbm_sql_step(fts) != CBM_SQL_DONE) {
-                ctx.failed = true;
-            }
-            cbm_sql_finalize(fts);
-        } else {
-            /* FTS5 may be compiled out; the table then never existed and
-             * search runs without it — matching the dump path's behavior. */
-            cbm_log_warn("delta.fts_insert_unavailable", "project", project);
-        }
-    }
+    delta_finalize_patch_statements(&ctx);
+    delta_relink_snapshot(&ctx, snapshot, snapshot_count);
+    delta_patch_fts(&ctx);
 
     if (ctx.failed) {
         free(ctx.remap);
@@ -576,12 +670,6 @@ int cbm_delta_patch(cbm_store_t *store, const char *project, cbm_gbuf_t *gbuf, i
     if (cbm_store_commit(store) != CBM_STORE_OK) {
         return CBM_NOT_FOUND;
     }
-    char nodes_buf[32];
-    char edges_buf[32];
-    snprintf(nodes_buf, sizeof(nodes_buf), "%lld", (long long)ctx.nodes);
-    snprintf(edges_buf, sizeof(edges_buf), "%lld", (long long)ctx.edges);
-    char remap_buf[32];
-    snprintf(remap_buf, sizeof(remap_buf), "%lld", (long long)ctx.remapped);
-    cbm_log_info("delta.patch", "nodes", nodes_buf, "edges", edges_buf, "remapped", remap_buf);
+    delta_log_patch(&ctx);
     return 0;
 }

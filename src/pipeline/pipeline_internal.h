@@ -131,11 +131,11 @@ typedef struct {
 
     /* ObjectScript $$$macro table built from .inc files in the repo (NULL if
      * no ObjectScript include files were found). Owned by pipeline.c. */
-    const CBMMacroTable *macro_table;
+    CBMMacroTable *macro_table;
 
     /* ObjectScript method-return-type table built from extracted definitions
      * (NULL until pass_calls builds it). Owned by pipeline.c. */
-    const CBMReturnTypeTable *return_type_table;
+    CBMReturnTypeTable *return_type_table;
 } cbm_pipeline_ctx_t;
 
 /* Build the ObjectScript $$$macro table from .inc include files in the repo.

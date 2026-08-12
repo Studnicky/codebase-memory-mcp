@@ -48,10 +48,37 @@
 #endif
 
 enum {
+    APPLICATION_BYTE_INDEX_FIRST = 0,
+    APPLICATION_BYTE_INDEX_SECOND = 1,
+    APPLICATION_BYTE_INDEX_THIRD = 2,
+    APPLICATION_BYTE_INDEX_FOURTH = 3,
+    APPLICATION_U32_SHIFT_MOST_SIGNIFICANT = 24,
+    APPLICATION_U32_SHIFT_SECOND = 16,
+    APPLICATION_U32_SHIFT_THIRD = 8,
+    APPLICATION_TEXT_TERMINATOR_BYTES = 1,
+    APPLICATION_ALLOCATION_ELEMENTS_ONE = 1,
+    APPLICATION_COUNT_ONE = 1,
+    APPLICATION_PROTOCOL_TRUE = 1,
+    APPLICATION_RESULT_FAILURE = -1,
+    APPLICATION_RESULT_SUCCESS = 0,
+    APPLICATION_RESULT_SKIPPED = 1,
     APPLICATION_CONTEXT_HEADER_SIZE = 19,
+    APPLICATION_CONTEXT_ROOT_LENGTH_OFFSET = 1,
+    APPLICATION_CONTEXT_ALLOWED_PRESENT_OFFSET = 5,
+    APPLICATION_CONTEXT_ALLOWED_LENGTH_OFFSET = 6,
+    APPLICATION_CONTEXT_PROFILE_OFFSET = 10,
+    APPLICATION_CONTEXT_EVENT_LENGTH_OFFSET = 11,
+    APPLICATION_CONTEXT_DIALECT_LENGTH_OFFSET = 15,
     APPLICATION_TOOL_HEADER_SIZE = 5,
+    APPLICATION_TOOL_NAME_LENGTH_OFFSET = 1,
     APPLICATION_UI_CONFIG_REQUEST_SIZE = 7,
+    APPLICATION_UI_CONFIG_MASK_OFFSET = 1,
+    APPLICATION_UI_CONFIG_ENABLED_OFFSET = 2,
+    APPLICATION_UI_CONFIG_PORT_OFFSET = 3,
+    APPLICATION_UI_CONFIG_PORT_SECOND_BYTE_OFFSET = 4,
     APPLICATION_PATH_CAP = 4096,
+    APPLICATION_NUMERIC_TEXT_CAP = 32,
+    APPLICATION_ERROR_MESSAGE_CAP = 1024,
     APPLICATION_JOB_THREAD_STACK = 256 * 1024,
     APPLICATION_JOB_POLL_US = 10000,
     APPLICATION_COORDINATION_CLEANUP_MS = 500,
@@ -63,6 +90,17 @@ enum {
     APPLICATION_BACKGROUND_REAP_MS = 10000,
     APPLICATION_UPDATE_VERSION_CAP = 128,
     APPLICATION_UPDATE_NOTICE_CAP = 1024,
+    APPLICATION_FILE_MODE_OWNER_ONLY = 0700,
+    APPLICATION_CANCEL_CHECK_INTERVAL_MASK = 255,
+    APPLICATION_STATUS_LINE_MIN_LENGTH = 3,
+    APPLICATION_STATUS_LINE_RELATIVE_OFFSET = 2,
+    APPLICATION_OPEN_PATH_CAPACITY_INITIAL = 16,
+    APPLICATION_OPEN_PATH_CAPACITY_GROWTH = 2,
+    APPLICATION_DECIMAL_RADIX = 10,
+    APPLICATION_COORDINATION_RETRY_MS = 100,
+    APPLICATION_SHUTDOWN_TIMEOUT_MS = 3000,
+    APPLICATION_NETWORK_PORT_MAX = 65535,
+    APPLICATION_JSONRPC_INTERNAL_ERROR_CODE = -32603,
 };
 
 /* There is deliberately NO production update-check provider. The daemon used to
@@ -251,7 +289,7 @@ void cbm_daemon_application_hold_job_before_start_for_test(bool hold) {
 static int application_job_thread_create(cbm_thread_t *thread, void *context) {
     if (atomic_exchange_explicit(&g_application_fail_next_job_thread_start_for_test, false,
                                  memory_order_acq_rel)) {
-        return -1;
+        return APPLICATION_RESULT_FAILURE;
     }
     return cbm_thread_create(thread, APPLICATION_JOB_THREAD_STACK, application_job_thread, context);
 }
@@ -336,22 +374,26 @@ static void application_worker_destroy_default(void *context,
 }
 
 static uint32_t application_get_u32(const uint8_t *bytes) {
-    return ((uint32_t)bytes[0] << 24) | ((uint32_t)bytes[1] << 16) | ((uint32_t)bytes[2] << 8) |
-           (uint32_t)bytes[3];
+    return ((uint32_t)bytes[APPLICATION_BYTE_INDEX_FIRST]
+            << APPLICATION_U32_SHIFT_MOST_SIGNIFICANT) |
+           ((uint32_t)bytes[APPLICATION_BYTE_INDEX_SECOND] << APPLICATION_U32_SHIFT_SECOND) |
+           ((uint32_t)bytes[APPLICATION_BYTE_INDEX_THIRD] << APPLICATION_U32_SHIFT_THIRD) |
+           (uint32_t)bytes[APPLICATION_BYTE_INDEX_FOURTH];
 }
 
 static void application_put_u32(uint8_t *bytes, uint32_t value) {
-    bytes[0] = (uint8_t)(value >> 24);
-    bytes[1] = (uint8_t)(value >> 16);
-    bytes[2] = (uint8_t)(value >> 8);
-    bytes[3] = (uint8_t)value;
+    bytes[APPLICATION_BYTE_INDEX_FIRST] =
+        (uint8_t)(value >> APPLICATION_U32_SHIFT_MOST_SIGNIFICANT);
+    bytes[APPLICATION_BYTE_INDEX_SECOND] = (uint8_t)(value >> APPLICATION_U32_SHIFT_SECOND);
+    bytes[APPLICATION_BYTE_INDEX_THIRD] = (uint8_t)(value >> APPLICATION_U32_SHIFT_THIRD);
+    bytes[APPLICATION_BYTE_INDEX_FOURTH] = (uint8_t)value;
 }
 
 static char *application_text_copy(const uint8_t *bytes, uint32_t length) {
     if (!bytes || length == 0 || memchr(bytes, '\0', length) != NULL) {
         return NULL;
     }
-    char *copy = malloc((size_t)length + 1U);
+    char *copy = malloc((size_t)length + APPLICATION_TEXT_TERMINATOR_BYTES);
     if (copy) {
         memcpy(copy, bytes, length);
         copy[length] = '\0';
@@ -481,7 +523,7 @@ static void application_refresh_watch_locked(cbm_daemon_application_session_t *s
         return;
     }
 
-    watch = calloc(1, sizeof(*watch));
+    watch = calloc(APPLICATION_ALLOCATION_ELEMENTS_ONE, sizeof(*watch));
     if (watch) {
         watch->project = strdup(project);
         watch->root = strdup(root);
@@ -503,7 +545,7 @@ static void application_refresh_watch_locked(cbm_daemon_application_session_t *s
         free(watch);
         return;
     }
-    watch->subscribers = 1;
+    watch->subscribers = APPLICATION_COUNT_ONE;
     watch->next = application->watches;
     application->watches = watch;
     session->watch = watch;
@@ -613,7 +655,8 @@ static bool application_unique_recovery_file(char out[APPLICATION_PATH_CAP], con
     int written;
     if (application_cache_dir(cache)) {
         written = snprintf(directory, sizeof(directory), "%s/logs", cache);
-        if (written <= 0 || written >= (int)sizeof(directory) || !cbm_mkdir_p(directory, 0700)) {
+        if (written <= 0 || written >= (int)sizeof(directory) ||
+            !cbm_mkdir_p(directory, APPLICATION_FILE_MODE_OWNER_ONLY)) {
             return false;
         }
     } else {
@@ -667,6 +710,60 @@ static bool application_truncate_file(const char *path) {
 }
 
 static bool application_job_cancel_requested(cbm_daemon_application_job_t *job);
+static bool application_suspect_contains(char **suspects, int count, const char *relative);
+
+static bool application_suspect_line_is_valid(char *line, size_t *length_out) {
+    size_t length = strlen(line);
+    if (length == 0 || line[length - APPLICATION_TEXT_TERMINATOR_BYTES] != '\n') {
+        return false;
+    }
+    line[--length] = '\0';
+    if (length > 0 && line[length - APPLICATION_TEXT_TERMINATOR_BYTES] == '\r') {
+        line[--length] = '\0';
+    }
+    *length_out = length;
+    return length >= APPLICATION_STATUS_LINE_MIN_LENGTH &&
+           (line[APPLICATION_BYTE_INDEX_FIRST] == 'S' ||
+            line[APPLICATION_BYTE_INDEX_FIRST] == 'D') &&
+           line[APPLICATION_BYTE_INDEX_SECOND] == ' ';
+}
+
+static bool application_suspect_add(char ***paths, int *count, size_t *capacity,
+                                    const char *relative) {
+    if (application_suspect_contains(*paths, *count, relative)) {
+        return true;
+    }
+    if (*count >= APPLICATION_MAX_SUSPECTS) {
+        return false;
+    }
+    if ((size_t)*count == *capacity) {
+        size_t next_capacity = *capacity ? *capacity * APPLICATION_OPEN_PATH_CAPACITY_GROWTH
+                                         : APPLICATION_OPEN_PATH_CAPACITY_INITIAL;
+        char **next = realloc(*paths, next_capacity * sizeof(*next));
+        if (!next) {
+            return false;
+        }
+        *paths = next;
+        *capacity = next_capacity;
+    }
+    char *copy = cbm_strdup(relative);
+    if (!copy) {
+        return false;
+    }
+    (*paths)[(*count)++] = copy;
+    return true;
+}
+
+static void application_suspect_remove(char **paths, int *count, const char *relative) {
+    for (int i = 0; i < *count; i++) {
+        if (strcmp(paths[i], relative) == 0) {
+            free(paths[i]);
+            memmove(&paths[i], &paths[i + 1], (size_t)(*count - i - 1) * sizeof(*paths));
+            (*count)--;
+            return;
+        }
+    }
+}
 
 static char **application_read_suspects(cbm_daemon_application_job_t *job, const char *path,
                                         int *count_out, bool *cancelled_out) {
@@ -687,61 +784,28 @@ static char **application_read_suspects(cbm_daemon_application_job_t *job, const
     size_t lines_read = 0;
     char line[APPLICATION_PATH_CAP];
     while (fgets(line, sizeof(line), file)) {
-        if ((lines_read++ & 255U) == 0U && application_job_cancel_requested(job)) {
+        if ((lines_read++ & APPLICATION_CANCEL_CHECK_INTERVAL_MASK) == 0U &&
+            application_job_cancel_requested(job)) {
             *cancelled_out = true;
             allocation_failed = true;
             break;
         }
-        size_t length = strlen(line);
-        if (length == 0 || line[length - 1] != '\n') {
-            break;
-        }
-        line[--length] = '\0';
-        if (length > 0 && line[length - 1] == '\r') {
-            line[--length] = '\0';
-        }
-        if (length < 3 || (line[0] != 'S' && line[0] != 'D') || line[1] != ' ') {
+        size_t length = 0;
+        size_t raw_length = strlen(line);
+        if (!application_suspect_line_is_valid(line, &length)) {
+            if (raw_length == 0 || line[raw_length - APPLICATION_TEXT_TERMINATOR_BYTES] != '\n') {
+                break;
+            }
             continue;
         }
-        const char *relative = line + 2;
-        if (line[0] == 'S') {
-            if (open_count >= APPLICATION_MAX_SUSPECTS) {
+        const char *relative = line + APPLICATION_STATUS_LINE_RELATIVE_OFFSET;
+        if (line[APPLICATION_BYTE_INDEX_FIRST] == 'S') {
+            if (!application_suspect_add(&open_paths, &open_count, &open_capacity, relative)) {
                 allocation_failed = true;
                 break;
             }
-            bool already_open = false;
-            for (int i = 0; i < open_count && !already_open; i++) {
-                already_open = strcmp(open_paths[i], relative) == 0;
-            }
-            if (already_open) {
-                continue;
-            }
-            if ((size_t)open_count == open_capacity) {
-                size_t next_capacity = open_capacity ? open_capacity * 2 : 16;
-                char **next = realloc(open_paths, next_capacity * sizeof(*next));
-                if (!next) {
-                    allocation_failed = true;
-                    break;
-                }
-                open_paths = next;
-                open_capacity = next_capacity;
-            }
-            char *copy = cbm_strdup(relative);
-            if (!copy) {
-                allocation_failed = true;
-                break;
-            }
-            open_paths[open_count++] = copy;
         } else {
-            for (int i = 0; i < open_count; i++) {
-                if (strcmp(open_paths[i], relative) == 0) {
-                    free(open_paths[i]);
-                    memmove(&open_paths[i], &open_paths[i + 1],
-                            (size_t)(open_count - i - 1) * sizeof(*open_paths));
-                    open_count--;
-                    break;
-                }
-            }
+            application_suspect_remove(open_paths, &open_count, relative);
         }
     }
     (void)fclose(file);
@@ -793,12 +857,12 @@ static bool application_append_quarantine(const char *path, const char *relative
 }
 
 static int application_max_restarts(void) {
-    char value[32] = {0};
+    char value[APPLICATION_NUMERIC_TEXT_CAP] = {0};
     if (!cbm_safe_getenv("CBM_INDEX_MAX_RESTARTS", value, sizeof(value), NULL) || !value[0]) {
         return APPLICATION_DEFAULT_MAX_RESTARTS;
     }
     char *end = NULL;
-    long parsed = strtol(value, &end, 10);
+    long parsed = strtol(value, &end, APPLICATION_DECIMAL_RADIX);
     return end && *end == '\0' && parsed > 0 && parsed <= INT_MAX
                ? (int)parsed
                : APPLICATION_DEFAULT_MAX_RESTARTS;
@@ -807,7 +871,7 @@ static int application_max_restarts(void) {
 static void application_attempt_init(application_attempt_t *attempt) {
     memset(attempt, 0, sizeof(*attempt));
     attempt->result.outcome = CBM_PROC_SPAWN_FAILED;
-    attempt->result.exit_code = -1;
+    attempt->result.exit_code = APPLICATION_RESULT_FAILURE;
 }
 
 static void application_attempt_free(application_attempt_t *attempt) {
@@ -849,97 +913,118 @@ static bool application_job_reserves_project_locked(cbm_daemon_application_t *ap
     return false;
 }
 
-static bool application_mutation_begin_internal(cbm_daemon_application_t *application,
-                                                cbm_daemon_application_session_t *session,
-                                                const char *project_key, bool wait) {
-    if (!application || !project_key || !project_key[0]) {
-        return false;
+static bool application_mutation_cancelled_locked(cbm_daemon_application_t *application,
+                                                  cbm_daemon_application_session_t *session) {
+    return application->stopping || (session && application_request_cancelled_locked(session));
+}
+
+static cbm_daemon_application_mutation_t *application_mutation_reserve_locked(
+    cbm_daemon_application_t *application, const char *project_key) {
+    cbm_daemon_application_mutation_t *mutation =
+        calloc(APPLICATION_ALLOCATION_ELEMENTS_ONE, sizeof(*mutation));
+    if (!mutation) {
+        return NULL;
     }
-    cbm_daemon_application_mutation_t *reserved = NULL;
+    mutation->project_key = cbm_strdup(project_key);
+    if (!mutation->project_key) {
+        free(mutation);
+        return NULL;
+    }
+    mutation->next = application->mutations;
+    application->mutations = mutation;
+    application->active_mutations++;
+    return mutation;
+}
+
+static void application_mutation_release_reservation(cbm_daemon_application_t *application,
+                                                     cbm_daemon_application_mutation_t *reserved) {
+    cbm_mutex_lock(&application->mutex);
+    cbm_daemon_application_mutation_t **cursor = &application->mutations;
+    while (*cursor && *cursor != reserved) {
+        cursor = &(*cursor)->next;
+    }
+    if (*cursor == reserved) {
+        *cursor = reserved->next;
+        if (application->active_mutations > 0) {
+            application->active_mutations--;
+        }
+    }
+    cbm_mutex_unlock(&application->mutex);
+    free(reserved->project_key);
+    free(reserved);
+}
+
+static cbm_daemon_application_mutation_t *application_wait_for_mutation_reservation(
+    cbm_daemon_application_t *application, cbm_daemon_application_session_t *session,
+    const char *project_key, bool wait) {
     for (;;) {
         cbm_mutex_lock(&application->mutex);
-        bool cancelled =
-            application->stopping || (session && application_request_cancelled_locked(session));
+        bool cancelled = application_mutation_cancelled_locked(application, session);
         bool busy = application_mutation_conflicts_locked(application, project_key) ||
                     application_job_reserves_project_locked(application, project_key);
-        if (!cancelled && !busy) {
-            cbm_daemon_application_mutation_t *mutation = calloc(1, sizeof(*mutation));
-            if (mutation) {
-                mutation->project_key = cbm_strdup(project_key);
-            }
-            if (!mutation || !mutation->project_key) {
-                if (mutation) {
-                    free(mutation->project_key);
-                    free(mutation);
-                }
-                cbm_mutex_unlock(&application->mutex);
-                return false;
-            }
-            mutation->next = application->mutations;
-            application->mutations = mutation;
-            application->active_mutations++;
-            cbm_mutex_unlock(&application->mutex);
-            reserved = mutation;
-            break;
-        }
+        cbm_daemon_application_mutation_t *reserved =
+            !cancelled && !busy ? application_mutation_reserve_locked(application, project_key)
+                                : NULL;
         cbm_mutex_unlock(&application->mutex);
-        if (cancelled || !wait) {
-            return false;
+        if (reserved || cancelled || !wait) {
+            return reserved;
         }
         cbm_usleep(APPLICATION_JOB_POLL_US);
     }
+}
 
+static bool application_mutation_acquire_project_lock(cbm_daemon_application_t *application,
+                                                      cbm_daemon_application_session_t *session,
+                                                      cbm_daemon_application_mutation_t *reserved,
+                                                      const char *project_key, bool wait) {
     if (!application->project_locks) {
         return true;
     }
     for (;;) {
         uint64_t now = cbm_now_ms();
-        uint64_t deadline = now > UINT64_MAX - 100U ? UINT64_MAX : now + 100U;
+        uint64_t deadline = now > UINT64_MAX - APPLICATION_COORDINATION_RETRY_MS
+                                ? UINT64_MAX
+                                : now + APPLICATION_COORDINATION_RETRY_MS;
         cbm_project_lock_lease_t *lease = NULL;
         cbm_private_file_lock_status_t status =
             wait ? cbm_project_lock_acquire(application->project_locks, project_key, deadline, NULL,
                                             &lease)
                  : cbm_project_lock_try_acquire(application->project_locks, project_key, &lease);
-        if (status == CBM_PRIVATE_FILE_LOCK_OK && lease) {
-            cbm_mutex_lock(&application->mutex);
-            bool cancelled =
-                application->stopping || (session && application_request_cancelled_locked(session));
-            cbm_mutex_unlock(&application->mutex);
-            if (cancelled) {
-                application_project_lock_release_fully(&lease);
-                status = CBM_PRIVATE_FILE_LOCK_BUSY;
-            } else {
-                reserved->project_lock_lease = lease;
-                return true;
-            }
+        cbm_mutex_lock(&application->mutex);
+        bool cancelled = application_mutation_cancelled_locked(application, session);
+        cbm_mutex_unlock(&application->mutex);
+        if (status == CBM_PRIVATE_FILE_LOCK_OK && lease && !cancelled) {
+            reserved->project_lock_lease = lease;
+            return true;
         }
         application_project_lock_release_fully(&lease);
-
-        cbm_mutex_lock(&application->mutex);
-        bool cancelled =
-            application->stopping || (session && application_request_cancelled_locked(session));
         if (status != CBM_PRIVATE_FILE_LOCK_BUSY || cancelled || !wait) {
-            cbm_daemon_application_mutation_t **cursor = &application->mutations;
-            while (*cursor && *cursor != reserved) {
-                cursor = &(*cursor)->next;
-            }
-            if (*cursor == reserved) {
-                *cursor = reserved->next;
-                if (application->active_mutations > 0) {
-                    application->active_mutations--;
-                }
-            }
-            cbm_mutex_unlock(&application->mutex);
-            free(reserved->project_key);
-            free(reserved);
             if (status != CBM_PRIVATE_FILE_LOCK_BUSY) {
                 cbm_log_error("daemon.project_lock_failed", "project", project_key, "action",
                               "refuse_mutation");
             }
             return false;
         }
-        cbm_mutex_unlock(&application->mutex);
     }
+}
+
+static bool application_mutation_begin_internal(cbm_daemon_application_t *application,
+                                                cbm_daemon_application_session_t *session,
+                                                const char *project_key, bool wait) {
+    if (!application || !project_key || !project_key[0]) {
+        return false;
+    }
+    cbm_daemon_application_mutation_t *reserved =
+        application_wait_for_mutation_reservation(application, session, project_key, wait);
+    if (!reserved) {
+        return false;
+    }
+    if (application_mutation_acquire_project_lock(application, session, reserved, project_key,
+                                                  wait)) {
+        return true;
+    }
+    application_mutation_release_reservation(application, reserved);
+    return false;
 }
 
 bool cbm_daemon_application_project_mutation_try_begin(cbm_daemon_application_t *application,
@@ -1047,9 +1132,30 @@ static bool application_job_wait_for_mutations(cbm_daemon_application_job_t *job
 static void application_cancelled_result(cbm_index_worker_result_t *result) {
     memset(result, 0, sizeof(*result));
     result->outcome = CBM_PROC_KILLED;
-    result->exit_code = -1;
+    result->exit_code = APPLICATION_RESULT_FAILURE;
     result->cancellation_requested = true;
     result->tree_quiesced = true;
+}
+
+static const cbm_index_worker_result_t *application_wait_for_worker(
+    cbm_daemon_application_job_t *job, cbm_daemon_application_worker_t worker) {
+    cbm_daemon_application_t *application = job->application;
+    const cbm_index_worker_result_t *result = NULL;
+    for (;;) {
+        cbm_index_worker_poll_t state =
+            application->worker_ops.poll(application->worker_ops.context, worker, &result);
+        if (state == CBM_INDEX_WORKER_POLL_TERMINAL) {
+            return result;
+        }
+        cbm_mutex_lock(&application->mutex);
+        bool cancel_pending =
+            (job->cancel_requested || application->stopping) && job->worker == worker;
+        cbm_mutex_unlock(&application->mutex);
+        if (cancel_pending || state == CBM_INDEX_WORKER_POLL_ERROR) {
+            (void)application->worker_ops.cancel(application->worker_ops.context, worker);
+        }
+        cbm_usleep(APPLICATION_JOB_POLL_US);
+    }
 }
 
 static application_attempt_status_t application_job_run_attempt(cbm_daemon_application_job_t *job,
@@ -1083,22 +1189,7 @@ static application_attempt_status_t application_job_run_attempt(cbm_daemon_appli
         (void)application->worker_ops.cancel(application->worker_ops.context, worker);
     }
 
-    const cbm_index_worker_result_t *borrowed = NULL;
-    for (;;) {
-        cbm_index_worker_poll_t state =
-            application->worker_ops.poll(application->worker_ops.context, worker, &borrowed);
-        if (state == CBM_INDEX_WORKER_POLL_TERMINAL) {
-            break;
-        }
-        cbm_mutex_lock(&application->mutex);
-        bool cancel_pending =
-            (job->cancel_requested || application->stopping) && job->worker == worker;
-        cbm_mutex_unlock(&application->mutex);
-        if (cancel_pending || state == CBM_INDEX_WORKER_POLL_ERROR) {
-            (void)application->worker_ops.cancel(application->worker_ops.context, worker);
-        }
-        cbm_usleep(APPLICATION_JOB_POLL_US);
-    }
+    const cbm_index_worker_result_t *borrowed = application_wait_for_worker(job, worker);
 
     if (borrowed) {
         attempt->result = *borrowed;
@@ -1132,7 +1223,7 @@ static application_attempt_status_t application_job_run_attempt(cbm_daemon_appli
 
 static char *application_job_failure_response(const cbm_index_worker_result_t *result,
                                               const char *log_path) {
-    char message[1024];
+    char message[APPLICATION_ERROR_MESSAGE_CAP];
     if (result && result->cancellation_requested) {
         (void)snprintf(message, sizeof(message),
                        "index operation cancelled after its final owning session disconnected");
@@ -1285,7 +1376,7 @@ static bool application_recovery_record_suspects(
             return false;
         }
         (*quarantined)++;
-        char attempt_text[32];
+        char attempt_text[APPLICATION_NUMERIC_TEXT_CAP];
         (void)snprintf(attempt_text, sizeof(attempt_text), "%d", recovery_index + 1);
         cbm_log_warn("daemon.index.file_quarantined", "path", pick, "outcome", phase, "attempt",
                      attempt_text);
@@ -1317,7 +1408,7 @@ static void application_job_try_partial(cbm_daemon_application_job_t *job,
     application_attempt_decision_t decision =
         application_consume_attempt(job, &attempt, execution, &failure_outcome);
     if (decision == APPLICATION_ATTEMPT_DECISION_SUCCESS) {
-        char quarantined_text[32];
+        char quarantined_text[APPLICATION_NUMERIC_TEXT_CAP];
         (void)snprintf(quarantined_text, sizeof(quarantined_text), "%d", quarantined);
         cbm_log_warn("daemon.index.recovery_partial", "quarantined", quarantined_text);
     }
@@ -1603,14 +1694,14 @@ static cbm_daemon_application_job_t *application_job_subscribe_locked(
     }
 
     if (application_active_job_count_locked(application) >= application->physical_job_limit) {
-        char limit[32];
+        char limit[APPLICATION_NUMERIC_TEXT_CAP];
         (void)snprintf(limit, sizeof(limit), "%zu", application->physical_job_limit);
         cbm_log_warn("daemon.index.admission_busy", "limit", limit, "project", project_key);
         *status_out = APPLICATION_JOB_SUBSCRIBE_BUSY;
         return NULL;
     }
 
-    job = calloc(1, sizeof(*job));
+    job = calloc(APPLICATION_ALLOCATION_ELEMENTS_ONE, sizeof(*job));
     if (job) {
         job->project_key = strdup(project_key);
         job->root_path = strdup(root_path);
@@ -1622,7 +1713,7 @@ static cbm_daemon_application_job_t *application_job_subscribe_locked(
         return NULL;
     }
     job->application = application;
-    job->subscribers = 1;
+    job->subscribers = APPLICATION_COUNT_ONE;
     job->next = application->jobs;
     application->jobs = job;
     if (application_job_thread_create(&job->thread, job) == 0) {
@@ -1674,7 +1765,7 @@ static cbm_daemon_application_job_t *application_auto_index_release_locked(
     cbm_daemon_application_job_t *job = session->auto_index_job;
     session->auto_index_job = NULL;
     session->auto_index_subscribed = false;
-    if (!job->terminal && job->subscribers == 1) {
+    if (!job->terminal && job->subscribers == APPLICATION_COUNT_ONE) {
         job->cancel_requested = true;
         return job;
     }
@@ -1852,7 +1943,7 @@ static void application_update_subscribe_locked(cbm_daemon_application_session_t
     application->update_thread_done = false;
     application->update_cancel_requested = false;
     session->update_owner = true;
-    application->update_owners = 1;
+    application->update_owners = APPLICATION_COUNT_ONE;
     if (cbm_thread_create(&application->update_thread, APPLICATION_JOB_THREAD_STACK,
                           application_update_thread, application) == 0) {
         application->update_thread_started = true;
@@ -1915,6 +2006,31 @@ static char *application_auto_index_args(const char *root_path) {
     return args;
 }
 
+static char *application_auto_index_prepare(cbm_daemon_application_t *application,
+                                            const char *project, const char *root_path,
+                                            bool *args_required) {
+    bool database_exists = application_regular_db_exists(project);
+    bool enabled = application->config &&
+                   cbm_config_get_bool(application->config, CBM_CONFIG_AUTO_INDEX, false);
+    int limit = application->config
+                    ? cbm_config_get_int(application->config, CBM_CONFIG_AUTO_INDEX_LIMIT,
+                                         CBM_MCP_DEFAULT_AUTO_INDEX_LIMIT)
+                    : CBM_MCP_DEFAULT_AUTO_INDEX_LIMIT;
+    bool candidate = enabled && !database_exists;
+    int tracked_files = APPLICATION_RESULT_FAILURE;
+    bool within_limit =
+        !candidate || cbm_mcp_auto_index_within_file_limit(root_path, limit, &tracked_files);
+    if (candidate && !within_limit) {
+        char files[APPLICATION_NUMERIC_TEXT_CAP];
+        (void)snprintf(files, sizeof(files), "%d", tracked_files);
+        cbm_log_warn("daemon.autoindex.skipped", "project", project, "reason",
+                     tracked_files >= 0 ? "too_many_files" : "unsafe_or_unavailable_path", "files",
+                     files);
+    }
+    *args_required = candidate && within_limit;
+    return *args_required ? application_auto_index_args(root_path) : NULL;
+}
+
 static void application_background_initialize_impl(cbm_daemon_application_session_t *session) {
     if (!session || !session->application || !session->context_set ||
         session->tool_profile != CBM_MCP_TOOL_PROFILE_ALL || session->hook_event ||
@@ -1931,27 +2047,8 @@ static void application_background_initialize_impl(cbm_daemon_application_sessio
      * thread slot. This is non-blocking unless the thread already published
      * terminal state. */
     (void)application_update_reap(application, false, 0);
-    bool db_exists = application_regular_db_exists(project);
-    bool auto_index = application->config &&
-                      cbm_config_get_bool(application->config, CBM_CONFIG_AUTO_INDEX, false);
-    int auto_index_limit =
-        application->config ? cbm_config_get_int(application->config, CBM_CONFIG_AUTO_INDEX_LIMIT,
-                                                 CBM_MCP_DEFAULT_AUTO_INDEX_LIMIT)
-                            : CBM_MCP_DEFAULT_AUTO_INDEX_LIMIT;
-    int tracked_files = -1;
-    bool auto_index_candidate = auto_index && !db_exists;
-    bool within_auto_index_limit =
-        !auto_index_candidate ||
-        cbm_mcp_auto_index_within_file_limit(root_path, auto_index_limit, &tracked_files);
-    if (auto_index_candidate && !within_auto_index_limit) {
-        char files[32];
-        (void)snprintf(files, sizeof(files), "%d", tracked_files);
-        cbm_log_warn("daemon.autoindex.skipped", "project", project, "reason",
-                     tracked_files >= 0 ? "too_many_files" : "unsafe_or_unavailable_path", "files",
-                     files);
-    }
-    bool args_required = auto_index_candidate && within_auto_index_limit;
-    char *args = args_required ? application_auto_index_args(root_path) : NULL;
+    bool args_required = false;
+    char *args = application_auto_index_prepare(application, project, root_path, &args_required);
     application_jobs_reap_completed(application);
     cbm_mutex_lock(&application->mutex);
     if (application->stopping || application_request_cancelled_locked(session)) {
@@ -1996,7 +2093,7 @@ static void application_background_initialize_impl(cbm_daemon_application_sessio
 
 static void application_background_initialize(cbm_daemon_application_session_t *session) {
     application_background_initialize_impl(session);
-    atomic_fetch_add_explicit(&g_application_background_initializes_for_test, 1,
+    atomic_fetch_add_explicit(&g_application_background_initializes_for_test, APPLICATION_COUNT_ONE,
                               memory_order_release);
 }
 
@@ -2052,7 +2149,7 @@ static bool application_watch_job_subscribe_late_session_locked(
         return true;
     }
     cbm_daemon_application_watch_job_subscription_t *subscription =
-        calloc(1, sizeof(*subscription));
+        calloc(APPLICATION_ALLOCATION_ELEMENTS_ONE, sizeof(*subscription));
     if (!subscription) {
         return false;
     }
@@ -2088,7 +2185,7 @@ static bool application_watch_job_subscribe_sessions_locked(cbm_daemon_applicati
             continue;
         }
         cbm_daemon_application_watch_job_subscription_t *subscription =
-            calloc(1, sizeof(*subscription));
+            calloc(APPLICATION_ALLOCATION_ELEMENTS_ONE, sizeof(*subscription));
         if (!subscription) {
             while (pending) {
                 cbm_daemon_application_watch_job_subscription_t *next = pending->next;
@@ -2197,7 +2294,7 @@ static char *application_index_execute(void *context, const char *root_path,
          * a slot is the same contract — and the wait stays cancellable and
          * shutdown-aware (a stopping coordinator answers UNAVAILABLE, which
          * exits this loop with the error below). */
-        atomic_fetch_add_explicit(&g_application_busy_queue_waits_for_test, 1,
+        atomic_fetch_add_explicit(&g_application_busy_queue_waits_for_test, APPLICATION_COUNT_ONE,
                                   memory_order_release);
         cbm_mutex_lock(&session->application->mutex);
         bool queued_cancelled = application_request_cancelled_locked(session);
@@ -2242,7 +2339,8 @@ static cbm_daemon_runtime_application_session_t *application_session_open(
         authenticated_process_id == 0) {
         return NULL;
     }
-    cbm_daemon_application_session_t *session = calloc(1, sizeof(*session));
+    cbm_daemon_application_session_t *session =
+        calloc(APPLICATION_ALLOCATION_ELEMENTS_ONE, sizeof(*session));
     if (!session) {
         return NULL;
     }
@@ -2282,15 +2380,19 @@ static cbm_daemon_runtime_application_status_t application_set_context(
     if (session->context_set || request_length < APPLICATION_CONTEXT_HEADER_SIZE) {
         return CBM_DAEMON_RUNTIME_APPLICATION_REJECTED;
     }
-    uint32_t root_length = application_get_u32(request + 1);
-    bool allowed_present = request[5] == 1;
-    uint32_t allowed_length = application_get_u32(request + 6);
-    uint8_t profile_value = request[10];
-    uint32_t event_length = application_get_u32(request + 11);
-    uint32_t dialect_length = application_get_u32(request + 15);
+    uint32_t root_length = application_get_u32(request + APPLICATION_CONTEXT_ROOT_LENGTH_OFFSET);
+    bool allowed_present =
+        request[APPLICATION_CONTEXT_ALLOWED_PRESENT_OFFSET] == APPLICATION_PROTOCOL_TRUE;
+    uint32_t allowed_length =
+        application_get_u32(request + APPLICATION_CONTEXT_ALLOWED_LENGTH_OFFSET);
+    uint8_t profile_value = request[APPLICATION_CONTEXT_PROFILE_OFFSET];
+    uint32_t event_length = application_get_u32(request + APPLICATION_CONTEXT_EVENT_LENGTH_OFFSET);
+    uint32_t dialect_length =
+        application_get_u32(request + APPLICATION_CONTEXT_DIALECT_LENGTH_OFFSET);
     uint64_t expected = (uint64_t)APPLICATION_CONTEXT_HEADER_SIZE + root_length + allowed_length +
                         event_length + dialect_length;
-    if (request[5] > 1 || root_length == 0 || expected != request_length ||
+    if (request[APPLICATION_CONTEXT_ALLOWED_PRESENT_OFFSET] > APPLICATION_PROTOCOL_TRUE ||
+        root_length == 0 || expected != request_length ||
         (!allowed_present && allowed_length != 0) ||
         profile_value > (uint8_t)CBM_MCP_TOOL_PROFILE_SCOUT ||
         (profile_value != (uint8_t)CBM_MCP_TOOL_PROFILE_ALL &&
@@ -2370,7 +2472,7 @@ static char *application_oversized_response_error(const cbm_jsonrpc_request_t *r
     yyjson_mut_doc_set_root(doc, err);
     /* -32603 (internal error) is the closest standard code: the request was
      * well-formed and the failure is server-side. */
-    yyjson_mut_obj_add_int(doc, err, "code", -32603);
+    yyjson_mut_obj_add_int(doc, err, "code", APPLICATION_JSONRPC_INTERNAL_ERROR_CODE);
     yyjson_mut_obj_add_str(doc, err, "message", message);
     char *error_json = yyjson_mut_write(doc, 0, NULL);
     yyjson_mut_doc_free(doc);
@@ -2382,7 +2484,7 @@ static char *application_oversized_response_error(const cbm_jsonrpc_request_t *r
         .id = request && request->has_id ? request->id : 0,
         .id_str = request ? request->id_str : NULL,
         .error_json = error_json,
-        .error_code = -32603,
+        .error_code = APPLICATION_JSONRPC_INTERNAL_ERROR_CODE,
     };
     char *encoded = cbm_jsonrpc_format_response(&response);
     free(error_json);
@@ -2412,10 +2514,11 @@ char *cbm_daemon_application_framable_response_for_test(char *response,
 static cbm_daemon_runtime_application_status_t application_mcp_request(
     cbm_daemon_application_session_t *session, const uint8_t *request, uint32_t request_length,
     uint8_t **response_out, uint32_t *response_length_out) {
-    if (!session->context_set || request_length <= 1) {
+    if (!session->context_set || request_length <= APPLICATION_TEXT_TERMINATOR_BYTES) {
         return CBM_DAEMON_RUNTIME_APPLICATION_REJECTED;
     }
-    char *message = application_text_copy(request + 1, request_length - 1);
+    char *message = application_text_copy(request + APPLICATION_TEXT_TERMINATOR_BYTES,
+                                          request_length - APPLICATION_TEXT_TERMINATOR_BYTES);
     if (!message) {
         return CBM_DAEMON_RUNTIME_APPLICATION_REJECTED;
     }
@@ -2475,7 +2578,7 @@ static cbm_daemon_runtime_application_status_t application_tool_request(
     if (!session->context_set || request_length <= APPLICATION_TOOL_HEADER_SIZE) {
         return CBM_DAEMON_RUNTIME_APPLICATION_REJECTED;
     }
-    uint32_t tool_length = application_get_u32(request + 1);
+    uint32_t tool_length = application_get_u32(request + APPLICATION_TOOL_NAME_LENGTH_OFFSET);
     if (tool_length == 0 || tool_length >= request_length - APPLICATION_TOOL_HEADER_SIZE) {
         return CBM_DAEMON_RUNTIME_APPLICATION_REJECTED;
     }
@@ -2514,14 +2617,16 @@ static cbm_daemon_runtime_application_status_t application_set_ui_config(
         request_length != APPLICATION_UI_CONFIG_REQUEST_SIZE) {
         return CBM_DAEMON_RUNTIME_APPLICATION_REJECTED;
     }
-    uint8_t update_mask = request[1];
-    uint8_t enabled = request[2];
-    uint32_t port = application_get_u32(request + 3);
+    uint8_t update_mask = request[APPLICATION_UI_CONFIG_MASK_OFFSET];
+    uint8_t enabled = request[APPLICATION_UI_CONFIG_ENABLED_OFFSET];
+    uint32_t port = application_get_u32(request + APPLICATION_UI_CONFIG_PORT_OFFSET);
     bool enabled_present = (update_mask & CBM_DAEMON_APPLICATION_UI_CONFIG_ENABLED) != 0;
     bool port_present = (update_mask & CBM_DAEMON_APPLICATION_UI_CONFIG_PORT) != 0;
     if (update_mask == 0 || (update_mask & (uint8_t)~valid_mask) != 0 ||
-        (enabled_present ? enabled > 1U : enabled != 0U) ||
-        (port_present ? port == 0 || request[3] != 0 || request[4] != 0 : port != 0U)) {
+        (enabled_present ? enabled > APPLICATION_PROTOCOL_TRUE : enabled != 0U) ||
+        (port_present ? port == 0 || request[APPLICATION_UI_CONFIG_PORT_OFFSET] != 0 ||
+                            request[APPLICATION_UI_CONFIG_PORT_SECOND_BYTE_OFFSET] != 0
+                      : port != 0U)) {
         return CBM_DAEMON_RUNTIME_APPLICATION_REJECTED;
     }
 
@@ -2559,10 +2664,11 @@ static cbm_daemon_runtime_application_status_t application_request_dispatch(
     case CBM_DAEMON_APPLICATION_REQUEST_SET_UI_CONFIG:
         return application_set_ui_config(application, session, request, request_length);
     case CBM_DAEMON_APPLICATION_REQUEST_HOOK_AUGMENT: {
-        if (!session->context_set || request_length <= 1) {
+        if (!session->context_set || request_length <= APPLICATION_TEXT_TERMINATOR_BYTES) {
             return CBM_DAEMON_RUNTIME_APPLICATION_REJECTED;
         }
-        char *input = application_text_copy(request + 1, request_length - 1);
+        char *input = application_text_copy(request + APPLICATION_TEXT_TERMINATOR_BYTES,
+                                            request_length - APPLICATION_TEXT_TERMINATOR_BYTES);
         if (!input) {
             return CBM_DAEMON_RUNTIME_APPLICATION_REJECTED;
         }
@@ -2822,7 +2928,8 @@ void cbm_daemon_application_set_permanent(cbm_daemon_application_t *application,
 
 cbm_daemon_application_t *cbm_daemon_application_new(
     const cbm_daemon_application_config_t *config) {
-    cbm_daemon_application_t *application = calloc(1, sizeof(*application));
+    cbm_daemon_application_t *application =
+        calloc(APPLICATION_ALLOCATION_ELEMENTS_ONE, sizeof(*application));
     if (!application) {
         return NULL;
     }
@@ -2893,12 +3000,7 @@ cbm_daemon_application_t *cbm_daemon_application_new(
     return application;
 }
 
-bool cbm_daemon_application_shutdown(cbm_daemon_application_t *application, uint32_t timeout_ms) {
-    if (!application) {
-        return false;
-    }
-    uint64_t deadline = application_deadline_after(timeout_ms);
-    cbm_mutex_lock(&application->mutex);
+static void application_shutdown_signal_locked(cbm_daemon_application_t *application) {
     application->stopping = true;
     for (cbm_daemon_application_session_t *session = application->sessions; session;
          session = session->next) {
@@ -2912,38 +3014,52 @@ bool cbm_daemon_application_shutdown(cbm_daemon_application_t *application, uint
     }
     application_cancel_jobs_locked(application);
     application_update_cancel_locked(application);
+}
+
+static bool application_shutdown_complete_locked(cbm_daemon_application_t *application) {
+    if (application->active_mutations != 0 ||
+        (application->update_thread_started && !application->update_thread_done)) {
+        return false;
+    }
+    for (cbm_daemon_application_session_t *session = application->sessions; session;
+         session = session->next) {
+        if (session->request_active) {
+            return false;
+        }
+    }
+    for (cbm_daemon_application_job_t *job = application->jobs; job; job = job->next) {
+        if (!job->thread_done || job->subscribers != 0 || job->watcher_waiters != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static uint32_t application_shutdown_remaining(uint64_t deadline) {
+    uint64_t now = cbm_now_ms();
+    if (now >= deadline) {
+        return 0;
+    }
+    uint64_t remaining = deadline - now;
+    return remaining > UINT32_MAX ? UINT32_MAX : (uint32_t)remaining;
+}
+
+bool cbm_daemon_application_shutdown(cbm_daemon_application_t *application, uint32_t timeout_ms) {
+    if (!application) {
+        return false;
+    }
+    uint64_t deadline = application_deadline_after(timeout_ms);
+    cbm_mutex_lock(&application->mutex);
+    application_shutdown_signal_locked(application);
     cbm_mutex_unlock(&application->mutex);
     for (;;) {
-        bool all_done = true;
         cbm_mutex_lock(&application->mutex);
-        if (application->active_mutations != 0) {
-            all_done = false;
-        }
-        if (application->update_thread_started && !application->update_thread_done) {
-            all_done = false;
-        }
-        for (cbm_daemon_application_session_t *session = application->sessions; all_done && session;
-             session = session->next) {
-            if (session->request_active) {
-                all_done = false;
-            }
-        }
-        for (cbm_daemon_application_job_t *job = application->jobs; job; job = job->next) {
-            if (!job->thread_done || job->subscribers != 0 || job->watcher_waiters != 0) {
-                all_done = false;
-                break;
-            }
-        }
+        bool all_done = application_shutdown_complete_locked(application);
         cbm_mutex_unlock(&application->mutex);
         if (all_done) {
             application_jobs_reap_completed(application);
-            uint64_t now = cbm_now_ms();
-            uint32_t remaining = 0;
-            if (now < deadline) {
-                uint64_t time_left = deadline - now;
-                remaining = time_left > UINT32_MAX ? UINT32_MAX : (uint32_t)time_left;
-            }
-            return application_update_reap(application, true, remaining);
+            return application_update_reap(application, true,
+                                           application_shutdown_remaining(deadline));
         }
         if (cbm_now_ms() >= deadline) {
             return false;
@@ -3023,7 +3139,7 @@ bool cbm_daemon_application_free_with_timeout(cbm_daemon_application_t *applicat
 }
 
 bool cbm_daemon_application_free(cbm_daemon_application_t *application) {
-    return cbm_daemon_application_free_with_timeout(application, 3000);
+    return cbm_daemon_application_free_with_timeout(application, APPLICATION_SHUTDOWN_TIMEOUT_MS);
 }
 
 cbm_daemon_runtime_application_callbacks_t cbm_daemon_application_runtime_callbacks(
@@ -3067,7 +3183,8 @@ static cbm_daemon_runtime_application_status_t application_client_exchange_tagge
         return status;
     }
     if (response) {
-        uint8_t *terminated = realloc(response, (size_t)response_length + 1U);
+        uint8_t *terminated =
+            realloc(response, (size_t)response_length + APPLICATION_TEXT_TERMINATOR_BYTES);
         if (!terminated) {
             free(response);
             return CBM_DAEMON_RUNTIME_APPLICATION_TRANSPORT_ERROR;
@@ -3114,17 +3231,20 @@ cbm_daemon_runtime_application_status_t cbm_daemon_application_client_set_contex
         dialect_length > UINT32_MAX || total > CBM_DAEMON_RUNTIME_APPLICATION_PAYLOAD_MAX) {
         return CBM_DAEMON_RUNTIME_APPLICATION_REJECTED;
     }
-    uint8_t *request = calloc(1, (size_t)total);
+    uint8_t *request = calloc(APPLICATION_ALLOCATION_ELEMENTS_ONE, (size_t)total);
     if (!request) {
         return CBM_DAEMON_RUNTIME_APPLICATION_TRANSPORT_ERROR;
     }
     request[0] = CBM_DAEMON_APPLICATION_REQUEST_SET_CONTEXT;
-    application_put_u32(request + 1, (uint32_t)root_length);
-    request[5] = allowed_root ? 1U : 0U;
-    application_put_u32(request + 6, (uint32_t)allowed_length);
-    request[10] = (uint8_t)tool_profile;
-    application_put_u32(request + 11, (uint32_t)event_length);
-    application_put_u32(request + 15, (uint32_t)dialect_length);
+    application_put_u32(request + APPLICATION_CONTEXT_ROOT_LENGTH_OFFSET, (uint32_t)root_length);
+    request[APPLICATION_CONTEXT_ALLOWED_PRESENT_OFFSET] =
+        allowed_root ? APPLICATION_PROTOCOL_TRUE : 0U;
+    application_put_u32(request + APPLICATION_CONTEXT_ALLOWED_LENGTH_OFFSET,
+                        (uint32_t)allowed_length);
+    request[APPLICATION_CONTEXT_PROFILE_OFFSET] = (uint8_t)tool_profile;
+    application_put_u32(request + APPLICATION_CONTEXT_EVENT_LENGTH_OFFSET, (uint32_t)event_length);
+    application_put_u32(request + APPLICATION_CONTEXT_DIALECT_LENGTH_OFFSET,
+                        (uint32_t)dialect_length);
     memcpy(request + APPLICATION_CONTEXT_HEADER_SIZE, session_root, root_length);
     if (allowed_root) {
         memcpy(request + APPLICATION_CONTEXT_HEADER_SIZE + root_length, allowed_root,
@@ -3159,18 +3279,20 @@ cbm_daemon_runtime_application_status_t cbm_daemon_application_client_set_ui_con
     bool port_present = (update_mask & CBM_DAEMON_APPLICATION_UI_CONFIG_PORT) != 0;
     if (!client || update_mask == 0 || (update_mask & (uint8_t)~valid_mask) != 0 ||
         (!enabled_present && ui_enabled) || (!port_present && ui_port != 0) ||
-        (port_present && (ui_port <= 0 || ui_port > 65535))) {
+        (port_present && (ui_port <= 0 || ui_port > APPLICATION_NETWORK_PORT_MAX))) {
         return CBM_DAEMON_RUNTIME_APPLICATION_REJECTED;
     }
-    uint8_t *request = calloc(1, APPLICATION_UI_CONFIG_REQUEST_SIZE);
+    uint8_t *request =
+        calloc(APPLICATION_ALLOCATION_ELEMENTS_ONE, APPLICATION_UI_CONFIG_REQUEST_SIZE);
     if (!request) {
         return CBM_DAEMON_RUNTIME_APPLICATION_TRANSPORT_ERROR;
     }
     request[0] = CBM_DAEMON_APPLICATION_REQUEST_SET_UI_CONFIG;
-    request[1] = update_mask;
-    request[2] = enabled_present && ui_enabled ? 1U : 0U;
+    request[APPLICATION_UI_CONFIG_MASK_OFFSET] = update_mask;
+    request[APPLICATION_UI_CONFIG_ENABLED_OFFSET] =
+        enabled_present && ui_enabled ? APPLICATION_PROTOCOL_TRUE : 0U;
     if (port_present) {
-        application_put_u32(request + 3, (uint32_t)ui_port);
+        application_put_u32(request + APPLICATION_UI_CONFIG_PORT_OFFSET, (uint32_t)ui_port);
     }
     uint8_t *unexpected = NULL;
     uint32_t unexpected_length = 0;
@@ -3192,18 +3314,19 @@ static cbm_daemon_runtime_application_status_t application_client_text_request_t
         return CBM_DAEMON_RUNTIME_APPLICATION_REJECTED;
     }
     size_t text_length = strlen(text);
-    if (text_length + 1U > CBM_DAEMON_RUNTIME_APPLICATION_PAYLOAD_MAX) {
+    if (text_length + APPLICATION_TEXT_TERMINATOR_BYTES >
+        CBM_DAEMON_RUNTIME_APPLICATION_PAYLOAD_MAX) {
         return CBM_DAEMON_RUNTIME_APPLICATION_REJECTED;
     }
-    uint8_t *request = malloc(text_length + 1U);
+    uint8_t *request = malloc(text_length + APPLICATION_TEXT_TERMINATOR_BYTES);
     if (!request) {
         return CBM_DAEMON_RUNTIME_APPLICATION_TRANSPORT_ERROR;
     }
     request[0] = (uint8_t)kind;
-    memcpy(request + 1, text, text_length);
-    return application_client_exchange_tagged(client, request_token, request,
-                                              (uint32_t)text_length + 1U, response_out,
-                                              response_length_out, timeout_ms);
+    memcpy(request + APPLICATION_TEXT_TERMINATOR_BYTES, text, text_length);
+    return application_client_exchange_tagged(
+        client, request_token, request, (uint32_t)text_length + APPLICATION_TEXT_TERMINATOR_BYTES,
+        response_out, response_length_out, timeout_ms);
 }
 
 static cbm_daemon_runtime_application_status_t application_client_text_request(
@@ -3247,7 +3370,7 @@ cbm_daemon_runtime_application_status_t cbm_daemon_application_client_tool(
         return CBM_DAEMON_RUNTIME_APPLICATION_TRANSPORT_ERROR;
     }
     request[0] = CBM_DAEMON_APPLICATION_REQUEST_TOOL;
-    application_put_u32(request + 1, (uint32_t)tool_length);
+    application_put_u32(request + APPLICATION_TOOL_NAME_LENGTH_OFFSET, (uint32_t)tool_length);
     memcpy(request + APPLICATION_TOOL_HEADER_SIZE, tool_name, tool_length);
     memcpy(request + APPLICATION_TOOL_HEADER_SIZE + tool_length, args_json, args_length);
     return application_client_exchange(client, request, (uint32_t)total, response_out,
@@ -3262,42 +3385,99 @@ cbm_daemon_runtime_application_status_t cbm_daemon_application_client_hook_augme
                                            timeout_ms);
 }
 
-static int application_background_index(cbm_daemon_application_t *application,
-                                        const char *project_name, const char *root_path,
-                                        bool require_live_watch) {
-    if (!application || !project_name || !root_path) {
-        return -1;
-    }
+typedef struct {
     char canonical_root[APPLICATION_PATH_CAP];
+    char *args;
+    char *project_key;
+} application_background_request_t;
+
+static void application_background_request_free(application_background_request_t *request) {
+    free(request->project_key);
+    free(request->args);
+}
+
+static bool application_background_request_build(application_background_request_t *request,
+                                                 const char *project_name, const char *root_path) {
     struct stat root_status;
-    if (!cbm_canonical_path(root_path, canonical_root, sizeof(canonical_root)) ||
-        stat(canonical_root, &root_status) != 0 || !S_ISDIR(root_status.st_mode)) {
-        return -1;
+    if (!cbm_canonical_path(root_path, request->canonical_root, sizeof(request->canonical_root)) ||
+        stat(request->canonical_root, &root_status) != 0 || !S_ISDIR(root_status.st_mode)) {
+        return false;
     }
     yyjson_mut_doc *document = yyjson_mut_doc_new(NULL);
     yyjson_mut_val *root = document ? yyjson_mut_obj(document) : NULL;
     if (!document || !root) {
         yyjson_mut_doc_free(document);
-        return -1;
+        return false;
     }
     yyjson_mut_doc_set_root(document, root);
-    bool encoded = yyjson_mut_obj_add_strcpy(document, root, "repo_path", canonical_root);
-    char *default_project = cbm_project_name_from_path(canonical_root);
+    bool encoded = yyjson_mut_obj_add_strcpy(document, root, "repo_path", request->canonical_root);
+    char *default_project = cbm_project_name_from_path(request->canonical_root);
     bool custom_project =
         project_name[0] && (!default_project || strcmp(default_project, project_name) != 0);
     if (encoded && custom_project) {
         encoded = yyjson_mut_obj_add_strcpy(document, root, "name", project_name);
     }
     free(default_project);
-    char *args = encoded ? yyjson_mut_write(document, 0, NULL) : NULL;
+    request->args = encoded ? yyjson_mut_write(document, 0, NULL) : NULL;
     yyjson_mut_doc_free(document);
-    if (!args) {
-        return -1;
+    request->project_key =
+        request->args ? application_index_project_key(request->canonical_root, request->args)
+                      : NULL;
+    if (request->project_key) {
+        return true;
     }
-    char *project_key = application_index_project_key(canonical_root, args);
-    if (!project_key) {
-        free(args);
-        return -1;
+    application_background_request_free(request);
+    return false;
+}
+
+static bool application_background_job_success(cbm_daemon_application_t *application,
+                                               cbm_daemon_application_job_t *job,
+                                               bool require_live_watch, bool *cancelled) {
+    for (;;) {
+        cbm_mutex_lock(&application->mutex);
+        if (!job->terminal) {
+            cbm_mutex_unlock(&application->mutex);
+            cbm_usleep(APPLICATION_JOB_POLL_US);
+            continue;
+        }
+        bool successful = job->successful;
+        *cancelled = job->cancelled;
+        if (require_live_watch) {
+            application_watch_job_unsubscribe_job_locked(application, job);
+            if (job->watcher_waiters > 0) {
+                job->watcher_waiters--;
+            }
+        } else {
+            application_job_unsubscribe_locked(job);
+        }
+        cbm_mutex_unlock(&application->mutex);
+        return successful;
+    }
+}
+
+static int application_background_admission_result(application_job_subscribe_status_t status,
+                                                   bool require_live_watch, bool watch_live,
+                                                   bool subscriptions_ok,
+                                                   size_t watch_owner_count) {
+    if (require_live_watch && (!watch_live || (subscriptions_ok && watch_owner_count == 0))) {
+        return APPLICATION_RESULT_SKIPPED;
+    }
+    return status == APPLICATION_JOB_SUBSCRIBE_OPTIONS_CONFLICT ||
+                   status == APPLICATION_JOB_SUBSCRIBE_BUSY ||
+                   status == APPLICATION_JOB_SUBSCRIBE_CANCELLING
+               ? APPLICATION_RESULT_SKIPPED
+               : APPLICATION_RESULT_FAILURE;
+}
+
+static int application_background_index(cbm_daemon_application_t *application,
+                                        const char *project_name, const char *root_path,
+                                        bool require_live_watch) {
+    if (!application || !project_name || !root_path) {
+        return APPLICATION_RESULT_FAILURE;
+    }
+    application_background_request_t request = {0};
+    if (!application_background_request_build(&request, project_name, root_path)) {
+        return APPLICATION_RESULT_FAILURE;
     }
 
     application_job_subscribe_status_t subscribe_status = APPLICATION_JOB_SUBSCRIBE_UNAVAILABLE;
@@ -3305,13 +3485,14 @@ static int application_background_index(cbm_daemon_application_t *application,
     cbm_mutex_lock(&application->mutex);
     cbm_daemon_application_watch_t *watch =
         require_live_watch ? application_find_watch_locked(application, project_name) : NULL;
-    bool watch_live = !require_live_watch ||
-                      (watch && watch->subscribers > 0 && strcmp(watch->root, canonical_root) == 0);
+    bool watch_live = !require_live_watch || (watch && watch->subscribers > 0 &&
+                                              strcmp(watch->root, request.canonical_root) == 0);
     size_t watch_owner_count = 0;
     bool watch_subscriptions_ok = true;
     cbm_daemon_application_job_t *job =
-        watch_live ? application_job_subscribe_locked(application, project_key, canonical_root,
-                                                      args, &subscribe_status)
+        watch_live ? application_job_subscribe_locked(application, request.project_key,
+                                                      request.canonical_root, request.args,
+                                                      &subscribe_status)
                    : NULL;
     if (job && require_live_watch) {
         watch_subscriptions_ok = application_watch_job_subscribe_sessions_locked(
@@ -3330,51 +3511,23 @@ static int application_background_index(cbm_daemon_application_t *application,
         }
     }
     cbm_mutex_unlock(&application->mutex);
-    free(project_key);
-    free(args);
+    application_background_request_free(&request);
     if (!job) {
-        if (require_live_watch &&
-            (!watch_live || (watch_subscriptions_ok && watch_owner_count == 0))) {
-            /* The physical watcher can retain a poll snapshot after the last
-             * owning session unwatches it. Treat that stale callback as a
-             * harmless skip; no job was admitted. */
-            return 1;
-        }
-        return subscribe_status == APPLICATION_JOB_SUBSCRIBE_OPTIONS_CONFLICT ||
-                       subscribe_status == APPLICATION_JOB_SUBSCRIBE_BUSY ||
-                       subscribe_status == APPLICATION_JOB_SUBSCRIBE_CANCELLING
-                   ? 1
-                   : -1;
+        return application_background_admission_result(subscribe_status, require_live_watch,
+                                                       watch_live, watch_subscriptions_ok,
+                                                       watch_owner_count);
     }
-    bool successful = false;
     bool cancelled = false;
-    for (;;) {
-        cbm_mutex_lock(&application->mutex);
-        if (job->terminal) {
-            successful = job->successful;
-            cancelled = job->cancelled;
-            if (require_live_watch) {
-                application_watch_job_unsubscribe_job_locked(application, job);
-                if (job->watcher_waiters > 0) {
-                    job->watcher_waiters--;
-                }
-            } else {
-                application_job_unsubscribe_locked(job);
-            }
-            cbm_mutex_unlock(&application->mutex);
-            break;
-        }
-        cbm_mutex_unlock(&application->mutex);
-        cbm_usleep(APPLICATION_JOB_POLL_US);
-    }
+    bool successful =
+        application_background_job_success(application, job, require_live_watch, &cancelled);
     application_jobs_reap_completed(application);
     if (successful) {
-        return 0;
+        return APPLICATION_RESULT_SUCCESS;
     }
     if (cancelled) {
-        return 1;
+        return APPLICATION_RESULT_SKIPPED;
     }
-    return -1;
+    return APPLICATION_RESULT_FAILURE;
 }
 
 int cbm_daemon_application_index(cbm_daemon_application_t *application, const char *project_name,

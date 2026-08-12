@@ -416,6 +416,33 @@ static int jl_parse_string(jl_parser_t *parser, size_t *start_out, size_t *end_o
     return JL_STATUS_FAILURE;
 }
 
+static bool jl_is_identifier_codepoint(uint32_t codepoint, bool first) {
+    if (codepoint >= JL_UTF16_SURROGATE_MIN && codepoint <= JL_UTF16_SURROGATE_MAX) {
+        return false;
+    }
+    return codepoint >= JL_UTF8_CONTINUATION_BYTE ||
+           (first ? jl_is_identifier_start((unsigned char)codepoint)
+                  : jl_is_identifier_continue((unsigned char)codepoint));
+}
+
+static bool jl_parse_identifier_escape(jl_parser_t *parser, bool first) {
+    if (parser->length - parser->pos < JL_UNICODE_ESCAPE_BYTES ||
+        parser->text[parser->pos] != '\\' || parser->text[parser->pos + JL_BYTE_WIDTH] != 'u') {
+        return false;
+    }
+    const char *digits = parser->text + parser->pos + JL_TWO_BYTES;
+    for (size_t i = 0; i < JL_FOUR_BYTES; i++) {
+        if (!jl_is_hex((unsigned char)digits[i])) {
+            return false;
+        }
+    }
+    if (!jl_is_identifier_codepoint(jl_decode_hex4(digits), first)) {
+        return false;
+    }
+    parser->pos += JL_UNICODE_ESCAPE_BYTES;
+    return true;
+}
+
 static int jl_parse_identifier(jl_parser_t *parser, size_t *start_out, size_t *end_out) {
     size_t start = parser->pos;
     bool first = true;
@@ -424,34 +451,10 @@ static int jl_parse_identifier(jl_parser_t *parser, size_t *start_out, size_t *e
         bool accepted = first ? jl_is_identifier_start(c) : jl_is_identifier_continue(c);
         if (accepted) {
             parser->pos++;
-            first = false;
-            continue;
+        } else if (!jl_parse_identifier_escape(parser, first)) {
+            break;
         }
-        if (c == '\\' && parser->length - parser->pos >= JL_UNICODE_ESCAPE_BYTES &&
-            parser->text[parser->pos + JL_BYTE_WIDTH] == 'u') {
-            bool valid_escape = true;
-            for (size_t i = 0; i < JL_FOUR_BYTES; i++) {
-                if (!jl_is_hex((unsigned char)parser->text[parser->pos + JL_TWO_BYTES + i])) {
-                    valid_escape = false;
-                    break;
-                }
-            }
-            if (valid_escape) {
-                uint32_t codepoint = jl_decode_hex4(parser->text + parser->pos + JL_TWO_BYTES);
-                valid_escape = codepoint >= JL_UTF8_CONTINUATION_BYTE ||
-                               (first ? jl_is_identifier_start((unsigned char)codepoint)
-                                      : jl_is_identifier_continue((unsigned char)codepoint));
-                if (codepoint >= JL_UTF16_SURROGATE_MIN && codepoint <= JL_UTF16_SURROGATE_MAX) {
-                    valid_escape = false;
-                }
-            }
-            if (valid_escape) {
-                parser->pos += JL_UNICODE_ESCAPE_BYTES;
-                first = false;
-                continue;
-            }
-        }
-        break;
+        first = false;
     }
     if (first) {
         return JL_STATUS_FAILURE;
@@ -485,173 +488,188 @@ static bool jl_has_prefix(const jl_parser_t *parser, const char *word) {
            memcmp(parser->text + parser->pos, word, word_length) == 0;
 }
 
+static bool jl_is_digit(unsigned char c) {
+    return c >= '0' && c <= '9';
+}
+
+static size_t jl_consume_digits(const jl_parser_t *parser, size_t pos) {
+    while (pos < parser->length && jl_is_digit((unsigned char)parser->text[pos])) {
+        pos++;
+    }
+    return pos;
+}
+
+static int jl_parse_number_special(jl_parser_t *parser, size_t pos) {
+    if (parser->strict) {
+        return JL_STATUS_NO_MATCH;
+    }
+    if (parser->length - pos >= JL_INFINITY_LITERAL_BYTES &&
+        memcmp(parser->text + pos, "Infinity", JL_INFINITY_LITERAL_BYTES) == 0) {
+        parser->pos = pos + JL_INFINITY_LITERAL_BYTES;
+        return 0;
+    }
+    if (parser->length - pos >= JL_THREE_BYTES &&
+        memcmp(parser->text + pos, "NaN", JL_THREE_BYTES) == 0) {
+        parser->pos = pos + JL_THREE_BYTES;
+        return 0;
+    }
+    if (parser->length - pos >= JL_TWO_BYTES && parser->text[pos] == '0' &&
+        (parser->text[pos + JL_BYTE_WIDTH] == 'x' || parser->text[pos + JL_BYTE_WIDTH] == 'X')) {
+        size_t digits = pos + JL_TWO_BYTES;
+        size_t end = digits;
+        while (end < parser->length && jl_is_hex((unsigned char)parser->text[end])) {
+            end++;
+        }
+        if (end == digits) {
+            return JL_STATUS_FAILURE;
+        }
+        parser->pos = end;
+        return 0;
+    }
+    return JL_STATUS_NO_MATCH;
+}
+
+static int jl_parse_number_integer(const jl_parser_t *parser, size_t *pos, bool *has_digits) {
+    if (*pos < parser->length && parser->text[*pos] == '0') {
+        *has_digits = true;
+        (*pos)++;
+        if (parser->strict && *pos < parser->length &&
+            jl_is_digit((unsigned char)parser->text[*pos])) {
+            return JL_STATUS_FAILURE;
+        }
+        return 0;
+    }
+    size_t end = jl_consume_digits(parser, *pos);
+    *has_digits = end != *pos;
+    *pos = end;
+    return 0;
+}
+
+static int jl_parse_number_fraction(const jl_parser_t *parser, size_t *pos, bool *has_digits) {
+    if (*pos >= parser->length || parser->text[*pos] != '.') {
+        return 0;
+    }
+    size_t digits = jl_consume_digits(parser, *pos + JL_BYTE_WIDTH);
+    *has_digits = digits != *pos + JL_BYTE_WIDTH;
+    *pos = digits;
+    return parser->strict && !*has_digits ? JL_STATUS_FAILURE : 0;
+}
+
+static int jl_parse_number_exponent(const jl_parser_t *parser, size_t *pos) {
+    if (*pos >= parser->length || (parser->text[*pos] != 'e' && parser->text[*pos] != 'E')) {
+        return 0;
+    }
+    (*pos)++;
+    if (*pos < parser->length && (parser->text[*pos] == '+' || parser->text[*pos] == '-')) {
+        (*pos)++;
+    }
+    size_t digits = jl_consume_digits(parser, *pos);
+    if (digits == *pos) {
+        return JL_STATUS_FAILURE;
+    }
+    *pos = digits;
+    return 0;
+}
+
 static int jl_parse_number(jl_parser_t *parser) {
     size_t pos = parser->pos;
     if (pos < parser->length &&
         (parser->text[pos] == '-' || (!parser->strict && parser->text[pos] == '+'))) {
         pos++;
     }
-    if (!parser->strict && parser->length - pos >= JL_INFINITY_LITERAL_BYTES &&
-        memcmp(parser->text + pos, "Infinity", JL_INFINITY_LITERAL_BYTES) == 0) {
-        parser->pos = pos + JL_INFINITY_LITERAL_BYTES;
-        return 0;
+    int special = jl_parse_number_special(parser, pos);
+    if (special != JL_STATUS_NO_MATCH) {
+        return special;
     }
-    if (!parser->strict && parser->length - pos >= JL_THREE_BYTES &&
-        memcmp(parser->text + pos, "NaN", JL_THREE_BYTES) == 0) {
-        parser->pos = pos + JL_THREE_BYTES;
-        return 0;
-    }
-    if (!parser->strict && parser->length - pos >= JL_THREE_BYTES && parser->text[pos] == '0' &&
-        (parser->text[pos + JL_BYTE_WIDTH] == 'x' || parser->text[pos + JL_BYTE_WIDTH] == 'X')) {
-        pos += JL_TWO_BYTES;
-        size_t digits = pos;
-        while (pos < parser->length && jl_is_hex((unsigned char)parser->text[pos])) {
-            pos++;
-        }
-        if (pos == digits) {
-            return JL_STATUS_FAILURE;
-        }
-        parser->pos = pos;
-        return 0;
-    }
-
     bool integer_digits = false;
-    if (pos < parser->length && parser->text[pos] == '0') {
-        integer_digits = true;
-        pos++;
-        if (parser->strict && pos < parser->length && parser->text[pos] >= '0' &&
-            parser->text[pos] <= '9') {
-            return JL_STATUS_FAILURE;
-        }
-    } else {
-        while (pos < parser->length && parser->text[pos] >= '0' && parser->text[pos] <= '9') {
-            pos++;
-            integer_digits = true;
-        }
-    }
-    if (parser->strict && !integer_digits) {
-        return JL_STATUS_FAILURE;
-    }
-
     bool fraction_digits = false;
-    if (pos < parser->length && parser->text[pos] == '.') {
-        pos++;
-        while (pos < parser->length && parser->text[pos] >= '0' && parser->text[pos] <= '9') {
-            pos++;
-            fraction_digits = true;
-        }
-        if (parser->strict && !fraction_digits) {
-            return JL_STATUS_FAILURE;
-        }
-    }
-    if (!integer_digits && !fraction_digits) {
+    if (jl_parse_number_integer(parser, &pos, &integer_digits) != 0 ||
+        (parser->strict && !integer_digits) ||
+        jl_parse_number_fraction(parser, &pos, &fraction_digits) != 0 ||
+        (!integer_digits && !fraction_digits) || jl_parse_number_exponent(parser, &pos) != 0) {
         return JL_STATUS_FAILURE;
-    }
-
-    if (pos < parser->length && (parser->text[pos] == 'e' || parser->text[pos] == 'E')) {
-        pos++;
-        if (pos < parser->length && (parser->text[pos] == '+' || parser->text[pos] == '-')) {
-            pos++;
-        }
-        size_t exponent_start = pos;
-        while (pos < parser->length && parser->text[pos] >= '0' && parser->text[pos] <= '9') {
-            pos++;
-        }
-        if (pos == exponent_start) {
-            return JL_STATUS_FAILURE;
-        }
     }
     parser->pos = pos;
     return 0;
 }
 
-static int jl_parse_value(jl_parser_t *parser, unsigned depth, size_t *start_out, size_t *end_out);
+typedef struct {
+    unsigned char close;
+    bool object;
+    bool needs_item;
+    bool after_comma;
+} jl_parse_frame_t;
 
-static int jl_parse_object(jl_parser_t *parser, unsigned depth) {
-    if (depth >= JL_MAX_DEPTH || parser->pos >= parser->length ||
-        parser->text[parser->pos] != '{') {
-        return JL_STATUS_FAILURE;
-    }
-    parser->pos++;
-    if (jl_skip_trivia(parser) != 0) {
-        return JL_STATUS_FAILURE;
-    }
-    if (parser->pos < parser->length && parser->text[parser->pos] == '}') {
-        parser->pos++;
-        return 0;
-    }
-
-    while (parser->pos < parser->length) {
-        if (jl_parse_key(parser, NULL, NULL) != 0 || jl_skip_trivia(parser) != 0 ||
-            parser->pos >= parser->length || parser->text[parser->pos] != ':') {
-            return JL_STATUS_FAILURE;
-        }
-        parser->pos++;
-        if (jl_skip_trivia(parser) != 0 ||
-            jl_parse_value(parser, depth + JL_BYTE_WIDTH, NULL, NULL) != 0 ||
-            jl_skip_trivia(parser) != 0 || parser->pos >= parser->length) {
-            return JL_STATUS_FAILURE;
-        }
-        if (parser->text[parser->pos] == '}') {
-            parser->pos++;
-            return 0;
-        }
-        if (parser->text[parser->pos] != ',') {
-            return JL_STATUS_FAILURE;
-        }
-        parser->pos++;
-        if (jl_skip_trivia(parser) != 0 || parser->pos >= parser->length) {
-            return JL_STATUS_FAILURE;
-        }
-        if (parser->text[parser->pos] == '}') {
-            if (parser->strict) {
-                return JL_STATUS_FAILURE;
-            }
-            parser->pos++;
+static int jl_parse_literal(jl_parser_t *parser) {
+    static const struct {
+        const char *text;
+        size_t length;
+    } literals[] = {{"true", JL_TRUE_LITERAL_BYTES},
+                    {"false", JL_FALSE_LITERAL_BYTES},
+                    {"null", JL_TRUE_LITERAL_BYTES}};
+    for (size_t i = 0; i < sizeof(literals) / sizeof(literals[0]); i++) {
+        if (jl_has_prefix(parser, literals[i].text)) {
+            parser->pos += literals[i].length;
             return 0;
         }
     }
     return JL_STATUS_FAILURE;
 }
 
-static int jl_parse_array(jl_parser_t *parser, unsigned depth) {
-    if (depth >= JL_MAX_DEPTH || parser->pos >= parser->length ||
-        parser->text[parser->pos] != '[') {
+static int jl_parse_scalar(jl_parser_t *parser) {
+    unsigned char c = (unsigned char)parser->text[parser->pos];
+    if (c == '"' || (!parser->strict && c == '\'')) {
+        return jl_parse_string(parser, NULL, NULL);
+    }
+    return jl_parse_literal(parser) == 0 ? 0 : jl_parse_number(parser);
+}
+
+static int jl_push_container(jl_parser_t *parser, jl_parse_frame_t *frames, size_t *count,
+                             unsigned depth) {
+    if (*count + depth >= JL_MAX_DEPTH || parser->pos >= parser->length) {
         return JL_STATUS_FAILURE;
     }
+    unsigned char open = (unsigned char)parser->text[parser->pos];
+    if (open != '{' && open != '[') {
+        return JL_STATUS_FAILURE;
+    }
+    frames[*count] = (jl_parse_frame_t){.close = open == '{' ? '}' : ']',
+                                        .object = open == '{',
+                                        .needs_item = true,
+                                        .after_comma = false};
+    (*count)++;
     parser->pos++;
-    if (jl_skip_trivia(parser) != 0) {
+    return jl_skip_trivia(parser);
+}
+
+static int jl_parse_container_item(jl_parser_t *parser, jl_parse_frame_t *frame,
+                                   jl_parse_frame_t *frames, size_t *count, unsigned depth) {
+    if (parser->pos >= parser->length) {
         return JL_STATUS_FAILURE;
     }
-    if (parser->pos < parser->length && parser->text[parser->pos] == ']') {
-        parser->pos++;
-        return 0;
-    }
-    while (parser->pos < parser->length) {
-        if (jl_parse_value(parser, depth + JL_BYTE_WIDTH, NULL, NULL) != 0 ||
-            jl_skip_trivia(parser) != 0 || parser->pos >= parser->length) {
+    if ((unsigned char)parser->text[parser->pos] == frame->close) {
+        if (frame->after_comma && parser->strict) {
             return JL_STATUS_FAILURE;
         }
-        if (parser->text[parser->pos] == ']') {
-            parser->pos++;
-            return 0;
-        }
-        if (parser->text[parser->pos] != ',') {
+        parser->pos++;
+        (*count)--;
+        return 0;
+    }
+    if (frame->object) {
+        if (jl_parse_key(parser, NULL, NULL) != 0 || jl_skip_trivia(parser) != 0 ||
+            parser->pos >= parser->length || parser->text[parser->pos] != ':') {
             return JL_STATUS_FAILURE;
         }
         parser->pos++;
         if (jl_skip_trivia(parser) != 0 || parser->pos >= parser->length) {
             return JL_STATUS_FAILURE;
         }
-        if (parser->text[parser->pos] == ']') {
-            if (parser->strict) {
-                return JL_STATUS_FAILURE;
-            }
-            parser->pos++;
-            return 0;
-        }
     }
-    return JL_STATUS_FAILURE;
+    frame->needs_item = false;
+    frame->after_comma = false;
+    unsigned char c = (unsigned char)parser->text[parser->pos];
+    return (c == '{' || c == '[') ? jl_push_container(parser, frames, count, depth)
+                                  : jl_parse_scalar(parser);
 }
 
 static int jl_parse_value(jl_parser_t *parser, unsigned depth, size_t *start_out, size_t *end_out) {
@@ -659,28 +677,41 @@ static int jl_parse_value(jl_parser_t *parser, unsigned depth, size_t *start_out
         return JL_STATUS_FAILURE;
     }
     size_t start = parser->pos;
-    unsigned char c = (unsigned char)parser->text[parser->pos];
-    int result = JL_STATUS_FAILURE;
-    if (c == '{') {
-        result = jl_parse_object(parser, depth);
-    } else if (c == '[') {
-        result = jl_parse_array(parser, depth);
-    } else if (c == '"' || (!parser->strict && c == '\'')) {
-        result = jl_parse_string(parser, NULL, NULL);
-    } else if (jl_has_prefix(parser, "true")) {
-        parser->pos += JL_TRUE_LITERAL_BYTES;
-        result = 0;
-    } else if (jl_has_prefix(parser, "false")) {
-        parser->pos += JL_FALSE_LITERAL_BYTES;
-        result = 0;
-    } else if (jl_has_prefix(parser, "null")) {
-        parser->pos += JL_TRUE_LITERAL_BYTES;
-        result = 0;
-    } else {
-        result = jl_parse_number(parser);
-    }
-    if (result != 0) {
+    jl_parse_frame_t frames[JL_MAX_DEPTH];
+    size_t frame_count = 0;
+    unsigned char first = (unsigned char)parser->text[parser->pos];
+    if (first == '{' || first == '[') {
+        if (jl_push_container(parser, frames, &frame_count, depth) != 0) {
+            return JL_STATUS_FAILURE;
+        }
+    } else if (jl_parse_scalar(parser) != 0) {
         return JL_STATUS_FAILURE;
+    }
+    while (frame_count > 0) {
+        jl_parse_frame_t *frame = &frames[frame_count - JL_BYTE_WIDTH];
+        if (frame->needs_item) {
+            if (jl_parse_container_item(parser, frame, frames, &frame_count, depth) != 0) {
+                return JL_STATUS_FAILURE;
+            }
+            continue;
+        }
+        if (jl_skip_trivia(parser) != 0 || parser->pos >= parser->length) {
+            return JL_STATUS_FAILURE;
+        }
+        if ((unsigned char)parser->text[parser->pos] == frame->close) {
+            parser->pos++;
+            frame_count--;
+            continue;
+        }
+        if (parser->text[parser->pos] != ',') {
+            return JL_STATUS_FAILURE;
+        }
+        parser->pos++;
+        if (jl_skip_trivia(parser) != 0) {
+            return JL_STATUS_FAILURE;
+        }
+        frame->needs_item = true;
+        frame->after_comma = true;
     }
     if (start_out) {
         *start_out = start;
@@ -786,6 +817,61 @@ static bool jl_match_output(const unsigned char *bytes, size_t byte_count, const
     return true;
 }
 
+static bool jl_decode_key_escape(const char *text, size_t *pos, size_t limit,
+                                 uint32_t *codepoint_out, bool *skip_out) {
+    *skip_out = false;
+    if (*pos >= limit) {
+        return false;
+    }
+    unsigned char escaped = (unsigned char)text[(*pos)++];
+    if (escaped == '\n' || escaped == '\r') {
+        if (escaped == '\r' && *pos < limit && text[*pos] == '\n') {
+            (*pos)++;
+        }
+        *skip_out = true;
+        return true;
+    }
+    static const struct {
+        unsigned char escaped;
+        uint32_t codepoint;
+    } mapped[] = {{'b', '\b'}, {'f', '\f'}, {'n', '\n'}, {'r', '\r'},
+                  {'t', '\t'}, {'v', '\v'}, {'0', 0U}};
+    for (size_t i = 0; i < sizeof(mapped) / sizeof(mapped[0]); i++) {
+        if (escaped == mapped[i].escaped) {
+            *codepoint_out = mapped[i].codepoint;
+            return true;
+        }
+    }
+    if (escaped == 'x') {
+        if (limit - *pos < JL_TWO_BYTES) {
+            return false;
+        }
+        *codepoint_out = (jl_hex_value((unsigned char)text[*pos]) << JL_FOUR_BYTES) |
+                         jl_hex_value((unsigned char)text[*pos + JL_BYTE_WIDTH]);
+        *pos += JL_TWO_BYTES;
+        return true;
+    }
+    if (escaped != 'u' || limit - *pos < JL_FOUR_BYTES) {
+        *codepoint_out = escaped;
+        return escaped != 'u';
+    }
+    *codepoint_out = jl_decode_hex4(text + *pos);
+    *pos += JL_FOUR_BYTES;
+    if (*codepoint_out >= JL_UTF16_SURROGATE_MIN && *codepoint_out <= JL_UTF16_HIGH_SURROGATE_MAX &&
+        limit - *pos >= JL_UNICODE_ESCAPE_BYTES && text[*pos] == '\\' &&
+        text[*pos + JL_BYTE_WIDTH] == 'u') {
+        uint32_t low = jl_decode_hex4(text + *pos + JL_TWO_BYTES);
+        if (low >= JL_UTF16_LOW_SURROGATE_MIN && low <= JL_UTF16_SURROGATE_MAX) {
+            *codepoint_out =
+                JL_UNICODE_SUPPLEMENTARY_BASE +
+                ((*codepoint_out - JL_UTF16_SURROGATE_MIN) << JL_UTF16_SURROGATE_PAIR_SHIFT) +
+                (low - JL_UTF16_LOW_SURROGATE_MIN);
+            *pos += JL_UNICODE_ESCAPE_BYTES;
+        }
+    }
+    return true;
+}
+
 static bool jl_key_equals(const char *text, size_t start, size_t end, const char *target) {
     size_t target_length = strlen(target);
     size_t target_pos = 0;
@@ -801,69 +887,13 @@ static bool jl_key_equals(const char *text, size_t start, size_t end, const char
             }
             continue;
         }
-        if (pos >= limit) {
+        uint32_t codepoint = 0;
+        bool skip = false;
+        if (!jl_decode_key_escape(text, &pos, limit, &codepoint, &skip)) {
             return false;
         }
-        unsigned char escaped = (unsigned char)text[pos++];
-        if (escaped == '\n' || escaped == '\r') {
-            if (escaped == '\r' && pos < limit && text[pos] == '\n') {
-                pos++;
-            }
+        if (skip) {
             continue;
-        }
-
-        uint32_t codepoint = escaped;
-        switch (escaped) {
-        case 'b':
-            codepoint = '\b';
-            break;
-        case 'f':
-            codepoint = '\f';
-            break;
-        case 'n':
-            codepoint = '\n';
-            break;
-        case 'r':
-            codepoint = '\r';
-            break;
-        case 't':
-            codepoint = '\t';
-            break;
-        case 'v':
-            codepoint = '\v';
-            break;
-        case '0':
-            codepoint = 0;
-            break;
-        case 'x':
-            if (limit - pos < JL_TWO_BYTES) {
-                return false;
-            }
-            codepoint = (jl_hex_value((unsigned char)text[pos]) << JL_FOUR_BYTES) |
-                        jl_hex_value((unsigned char)text[pos + JL_BYTE_WIDTH]);
-            pos += JL_TWO_BYTES;
-            break;
-        case 'u':
-            if (limit - pos < JL_FOUR_BYTES) {
-                return false;
-            }
-            codepoint = jl_decode_hex4(text + pos);
-            pos += JL_FOUR_BYTES;
-            if (codepoint >= JL_UTF16_SURROGATE_MIN && codepoint <= JL_UTF16_HIGH_SURROGATE_MAX &&
-                limit - pos >= JL_UNICODE_ESCAPE_BYTES && text[pos] == '\\' &&
-                text[pos + JL_BYTE_WIDTH] == 'u') {
-                uint32_t low = jl_decode_hex4(text + pos + JL_TWO_BYTES);
-                if (low >= JL_UTF16_LOW_SURROGATE_MIN && low <= JL_UTF16_SURROGATE_MAX) {
-                    codepoint =
-                        JL_UNICODE_SUPPLEMENTARY_BASE +
-                        ((codepoint - JL_UTF16_SURROGATE_MIN) << JL_UTF16_SURROGATE_PAIR_SHIFT) +
-                        (low - JL_UTF16_LOW_SURROGATE_MIN);
-                    pos += JL_UNICODE_ESCAPE_BYTES;
-                }
-            }
-            break;
-        default:
-            break;
         }
         unsigned char encoded[JL_FOUR_BYTES];
         size_t encoded_length = jl_encode_utf8(codepoint, encoded);
@@ -872,6 +902,74 @@ static bool jl_key_equals(const char *text, size_t start, size_t end, const char
         }
     }
     return target_pos == target_length;
+}
+
+static int jl_scan_object_member(jl_parser_t *parser, const char *lookup_key, jl_object_t *object,
+                                 size_t previous_comma, bool *matches_out) {
+    size_t key_start = 0;
+    size_t key_end = 0;
+    if (jl_parse_key(parser, &key_start, &key_end) != 0) {
+        return JL_STATUS_FAILURE;
+    }
+    if (object->first_key_start == SIZE_MAX) {
+        object->first_key_start = key_start;
+    }
+    if (jl_skip_trivia(parser) != 0 || parser->pos >= parser->length ||
+        parser->text[parser->pos] != ':') {
+        return JL_STATUS_FAILURE;
+    }
+    parser->pos++;
+    if (jl_skip_trivia(parser) != 0 || parser->pos >= parser->length) {
+        return JL_STATUS_FAILURE;
+    }
+    size_t value_start = 0;
+    size_t value_end = 0;
+    if (jl_parse_value(parser, JL_BYTE_WIDTH, &value_start, &value_end) != 0 ||
+        jl_skip_trivia(parser) != 0 || parser->pos >= parser->length) {
+        return JL_STATUS_FAILURE;
+    }
+    bool matches = jl_key_equals(parser->text, key_start, key_end, lookup_key);
+    if (matches) {
+        object->match_count++;
+        if (object->match_count == JL_BYTE_WIDTH) {
+            object->match = (jl_member_t){.key_start = key_start,
+                                          .key_end = key_end,
+                                          .value_start = value_start,
+                                          .value_end = value_end,
+                                          .comma_pos = SIZE_MAX,
+                                          .previous_comma_pos = previous_comma};
+        }
+    }
+    object->member_count++;
+    object->last_value_end = value_end;
+    *matches_out = matches;
+    return 0;
+}
+
+static int jl_scan_object_delimiter(jl_parser_t *parser, jl_object_t *object, bool matches,
+                                    size_t *previous_comma) {
+    if (parser->text[parser->pos] == '}') {
+        object->close_pos = parser->pos;
+        return 0;
+    }
+    if (parser->text[parser->pos] != ',') {
+        return JL_STATUS_FAILURE;
+    }
+    size_t comma = parser->pos++;
+    object->last_comma_pos = comma;
+    if (matches && object->match_count == JL_BYTE_WIDTH) {
+        object->match.comma_pos = comma;
+    }
+    *previous_comma = comma;
+    if (jl_skip_trivia(parser) != 0 || parser->pos >= parser->length) {
+        return JL_STATUS_FAILURE;
+    }
+    if (parser->text[parser->pos] == '}') {
+        object->close_pos = parser->pos;
+        object->trailing_comma = true;
+        return 0;
+    }
+    return JL_STATUS_NO_MATCH;
 }
 
 static int jl_scan_object(const char *text, size_t length, size_t object_start,
@@ -898,66 +996,76 @@ static int jl_scan_object(const char *text, size_t length, size_t object_start,
 
     size_t previous_comma = SIZE_MAX;
     while (parser.pos < parser.length) {
-        size_t key_start = 0;
-        size_t key_end = 0;
-        if (jl_parse_key(&parser, &key_start, &key_end) != 0) {
+        bool matches = false;
+        if (jl_scan_object_member(&parser, lookup_key, object, previous_comma, &matches) != 0) {
             return JL_STATUS_FAILURE;
         }
-        if (object->first_key_start == SIZE_MAX) {
-            object->first_key_start = key_start;
-        }
-        if (jl_skip_trivia(&parser) != 0 || parser.pos >= parser.length ||
-            text[parser.pos] != ':') {
-            return JL_STATUS_FAILURE;
-        }
-        parser.pos++;
-        if (jl_skip_trivia(&parser) != 0 || parser.pos >= parser.length) {
-            return JL_STATUS_FAILURE;
-        }
-        size_t value_start = 0;
-        size_t value_end = 0;
-        if (jl_parse_value(&parser, JL_BYTE_WIDTH, &value_start, &value_end) != 0 ||
-            jl_skip_trivia(&parser) != 0 || parser.pos >= parser.length) {
-            return JL_STATUS_FAILURE;
-        }
-
-        bool matches = jl_key_equals(text, key_start, key_end, lookup_key);
-        if (matches) {
-            object->match_count++;
-            if (object->match_count == JL_BYTE_WIDTH) {
-                object->match.key_start = key_start;
-                object->match.key_end = key_end;
-                object->match.value_start = value_start;
-                object->match.value_end = value_end;
-                object->match.previous_comma_pos = previous_comma;
-            }
-        }
-
-        object->member_count++;
-        object->last_value_end = value_end;
-        if (text[parser.pos] == '}') {
-            object->close_pos = parser.pos;
+        int delimiter = jl_scan_object_delimiter(&parser, object, matches, &previous_comma);
+        if (delimiter == 0) {
             return 0;
         }
-        if (text[parser.pos] != ',') {
+        if (delimiter != JL_STATUS_NO_MATCH) {
             return JL_STATUS_FAILURE;
-        }
-        size_t comma_pos = parser.pos++;
-        object->last_comma_pos = comma_pos;
-        if (matches && object->match_count == JL_BYTE_WIDTH) {
-            object->match.comma_pos = comma_pos;
-        }
-        previous_comma = comma_pos;
-        if (jl_skip_trivia(&parser) != 0 || parser.pos >= parser.length) {
-            return JL_STATUS_FAILURE;
-        }
-        if (text[parser.pos] == '}') {
-            object->close_pos = parser.pos;
-            object->trailing_comma = true;
-            return 0;
         }
     }
     return JL_STATUS_FAILURE;
+}
+
+static int jl_scan_array_value(jl_parser_t *parser, const char *lookup_string, jl_array_t *array,
+                               size_t previous_comma, bool *matches_out) {
+    size_t value_start = 0;
+    size_t value_end = 0;
+    if (jl_parse_value(parser, JL_BYTE_WIDTH, &value_start, &value_end) != 0) {
+        return JL_STATUS_FAILURE;
+    }
+    if (array->first_value_start == SIZE_MAX) {
+        array->first_value_start = value_start;
+    }
+    bool string_value = parser->text[value_start] == '"' || parser->text[value_start] == '\'';
+    bool matches =
+        string_value && jl_key_equals(parser->text, value_start, value_end, lookup_string);
+    if (matches) {
+        array->match_count++;
+        if (array->match_count == JL_BYTE_WIDTH) {
+            array->match = (jl_member_t){.value_start = value_start,
+                                         .value_end = value_end,
+                                         .comma_pos = SIZE_MAX,
+                                         .previous_comma_pos = previous_comma};
+        }
+    }
+    array->element_count++;
+    array->last_value_end = value_end;
+    *matches_out = matches;
+    return jl_skip_trivia(parser);
+}
+
+static int jl_scan_array_delimiter(jl_parser_t *parser, jl_array_t *array, bool matches,
+                                   size_t *previous_comma) {
+    if (parser->pos >= parser->length) {
+        return JL_STATUS_FAILURE;
+    }
+    if (parser->text[parser->pos] == ']') {
+        array->close_pos = parser->pos;
+        return 0;
+    }
+    if (parser->text[parser->pos] != ',') {
+        return JL_STATUS_FAILURE;
+    }
+    size_t comma = parser->pos++;
+    array->last_comma_pos = comma;
+    if (matches && array->match_count == JL_BYTE_WIDTH) {
+        array->match.comma_pos = comma;
+    }
+    *previous_comma = comma;
+    if (jl_skip_trivia(parser) != 0 || parser->pos >= parser->length) {
+        return JL_STATUS_FAILURE;
+    }
+    if (parser->text[parser->pos] == ']') {
+        array->close_pos = parser->pos;
+        array->trailing_comma = true;
+        return 0;
+    }
+    return JL_STATUS_NO_MATCH;
 }
 
 static int jl_scan_array(const char *text, size_t length, size_t array_start,
@@ -988,50 +1096,16 @@ static int jl_scan_array(const char *text, size_t length, size_t array_start,
 
     size_t previous_comma = SIZE_MAX;
     while (parser.pos < parser.length) {
-        size_t value_start = 0;
-        size_t value_end = 0;
-        if (jl_parse_value(&parser, JL_BYTE_WIDTH, &value_start, &value_end) != 0) {
+        bool matches = false;
+        if (jl_scan_array_value(&parser, lookup_string, array, previous_comma, &matches) != 0) {
             return JL_STATUS_FAILURE;
         }
-        if (array->first_value_start == SIZE_MAX) {
-            array->first_value_start = value_start;
-        }
-        bool is_string = text[value_start] == '"' || text[value_start] == '\'';
-        bool matches = is_string && jl_key_equals(text, value_start, value_end, lookup_string);
-        if (matches) {
-            array->match_count++;
-            if (array->match_count == JL_BYTE_WIDTH) {
-                array->match.value_start = value_start;
-                array->match.value_end = value_end;
-                array->match.previous_comma_pos = previous_comma;
-            }
-        }
-
-        array->element_count++;
-        array->last_value_end = value_end;
-        if (jl_skip_trivia(&parser) != 0 || parser.pos >= parser.length) {
-            return JL_STATUS_FAILURE;
-        }
-        if (text[parser.pos] == ']') {
-            array->close_pos = parser.pos;
+        int delimiter = jl_scan_array_delimiter(&parser, array, matches, &previous_comma);
+        if (delimiter == 0) {
             return 0;
         }
-        if (text[parser.pos] != ',') {
+        if (delimiter != JL_STATUS_NO_MATCH) {
             return JL_STATUS_FAILURE;
-        }
-        size_t comma_pos = parser.pos++;
-        array->last_comma_pos = comma_pos;
-        if (matches && array->match_count == JL_BYTE_WIDTH) {
-            array->match.comma_pos = comma_pos;
-        }
-        previous_comma = comma_pos;
-        if (jl_skip_trivia(&parser) != 0 || parser.pos >= parser.length) {
-            return JL_STATUS_FAILURE;
-        }
-        if (text[parser.pos] == ']') {
-            array->close_pos = parser.pos;
-            array->trailing_comma = true;
-            return 0;
         }
     }
     return JL_STATUS_FAILURE;
@@ -1082,40 +1156,50 @@ static int jl_buffer_string(jl_buffer_t *buffer, const char *text) {
     return jl_buffer_append(buffer, text, strlen(text));
 }
 
-static int jl_append_quoted_string(jl_buffer_t *buffer, const char *value) {
+static char jl_simple_escape(unsigned char value) {
+    static const struct {
+        unsigned char value;
+        char escaped;
+    } escapes[] = {{'\b', 'b'}, {'\f', 'f'}, {'\n', 'n'}, {'\r', 'r'}, {'\t', 't'}};
+    for (size_t i = 0; i < sizeof(escapes) / sizeof(escapes[0]); i++) {
+        if (value == escapes[i].value) {
+            return escapes[i].escaped;
+        }
+    }
+    return '\0';
+}
+
+static int jl_append_control_escape(jl_buffer_t *buffer, unsigned char value) {
     static const char hex[] = "0123456789abcdef";
+    char escaped = jl_simple_escape(value);
+    if (escaped) {
+        return jl_buffer_char(buffer, '\\') == 0 && jl_buffer_char(buffer, escaped) == 0
+                   ? 0
+                   : JL_STATUS_FAILURE;
+    }
+    char unicode[JL_UNICODE_ESCAPE_BYTES] = {
+        '\\', 'u', '0', '0', hex[value >> JL_FOUR_BYTES], hex[value & JL_HEX_NIBBLE_MASK]};
+    return jl_buffer_append(buffer, unicode, sizeof(unicode));
+}
+
+static int jl_append_quoted_byte(jl_buffer_t *buffer, unsigned char value) {
+    if (value == '"' || value == '\\') {
+        return jl_buffer_char(buffer, '\\') == 0 && jl_buffer_char(buffer, (char)value) == 0
+                   ? 0
+                   : JL_STATUS_FAILURE;
+    }
+    if (value < JL_JSON_CONTROL_CODEPOINT_LIMIT) {
+        return jl_append_control_escape(buffer, value);
+    }
+    return jl_buffer_char(buffer, (char)value);
+}
+
+static int jl_append_quoted_string(jl_buffer_t *buffer, const char *value) {
     if (jl_buffer_char(buffer, '"') != 0) {
         return JL_STATUS_FAILURE;
     }
     for (const unsigned char *pos = (const unsigned char *)value; *pos; pos++) {
-        if (*pos == '"' || *pos == '\\') {
-            if (jl_buffer_char(buffer, '\\') != 0) {
-                return JL_STATUS_FAILURE;
-            }
-        } else if (*pos == '\b' || *pos == '\f' || *pos == '\n' || *pos == '\r' || *pos == '\t') {
-            char escaped = 'b';
-            if (*pos == '\f') {
-                escaped = 'f';
-            } else if (*pos == '\n') {
-                escaped = 'n';
-            } else if (*pos == '\r') {
-                escaped = 'r';
-            } else if (*pos == '\t') {
-                escaped = 't';
-            }
-            if (jl_buffer_char(buffer, '\\') != 0 || jl_buffer_char(buffer, escaped) != 0) {
-                return JL_STATUS_FAILURE;
-            }
-            continue;
-        } else if (*pos < JL_JSON_CONTROL_CODEPOINT_LIMIT) {
-            char escaped[JL_UNICODE_ESCAPE_BYTES] = {
-                '\\', 'u', '0', '0', hex[*pos >> JL_FOUR_BYTES], hex[*pos & JL_HEX_NIBBLE_MASK]};
-            if (jl_buffer_append(buffer, escaped, sizeof(escaped)) != 0) {
-                return JL_STATUS_FAILURE;
-            }
-            continue;
-        }
-        if (jl_buffer_char(buffer, (char)*pos) != 0) {
+        if (jl_append_quoted_byte(buffer, *pos) != 0) {
             return JL_STATUS_FAILURE;
         }
     }
@@ -1276,6 +1360,37 @@ static void jl_detect_indent(const char *text, const jl_object_t *object, jl_sli
     }
 }
 
+static int jl_make_tight_insertion(jl_buffer_t *insertion, const jl_buffer_t *member,
+                                   const char *newline, jl_slice_t base, jl_slice_t unit) {
+    if (jl_buffer_string(insertion, newline) != 0 ||
+        jl_append_styled_indent(insertion, base, unit, JL_BYTE_WIDTH) != 0 ||
+        jl_buffer_append(insertion, member->data, member->length) != 0 ||
+        jl_buffer_string(insertion, newline) != 0 ||
+        jl_buffer_append(insertion, base.data, base.length) != 0) {
+        return JL_STATUS_FAILURE;
+    }
+    return 0;
+}
+
+static int jl_make_multiline_insertion(jl_buffer_t *insertion, const jl_object_t *object,
+                                       const jl_buffer_t *member, const char *newline,
+                                       jl_slice_t base, jl_slice_t unit, bool close_indent_only) {
+    if (!close_indent_only && jl_buffer_string(insertion, newline) != 0) {
+        return JL_STATUS_FAILURE;
+    }
+    if (jl_buffer_append(insertion, unit.data, unit.length) != 0 ||
+        jl_buffer_append(insertion, member->data, member->length) != 0) {
+        return JL_STATUS_FAILURE;
+    }
+    if (object->trailing_comma && jl_buffer_char(insertion, ',') != 0) {
+        return JL_STATUS_FAILURE;
+    }
+    return jl_buffer_string(insertion, newline) == 0 &&
+                   jl_buffer_append(insertion, base.data, base.length) == 0
+               ? 0
+               : JL_STATUS_FAILURE;
+}
+
 static int jl_make_insertion(const char *text, size_t length, size_t object_start,
                              const jl_object_t *object, const jl_buffer_t *member,
                              jl_buffer_t *insertion) {
@@ -1294,32 +1409,12 @@ static int jl_make_insertion(const char *text, size_t length, size_t object_star
     bool empty_tight = object->member_count == 0U && gap_start == object->close_pos;
 
     if (empty_tight) {
-        if (jl_buffer_string(insertion, newline) != 0 ||
-            jl_append_styled_indent(insertion, base, unit, JL_BYTE_WIDTH) != 0 ||
-            jl_buffer_append(insertion, member->data, member->length) != 0 ||
-            jl_buffer_string(insertion, newline) != 0 ||
-            jl_buffer_append(insertion, base.data, base.length) != 0) {
-            return JL_STATUS_FAILURE;
-        }
-        return 0;
+        return jl_make_tight_insertion(insertion, member, newline, base, unit);
     }
 
     if (multiline) {
-        if (!close_indent_only && jl_buffer_string(insertion, newline) != 0) {
-            return JL_STATUS_FAILURE;
-        }
-        if (jl_buffer_append(insertion, unit.data, unit.length) != 0 ||
-            jl_buffer_append(insertion, member->data, member->length) != 0) {
-            return JL_STATUS_FAILURE;
-        }
-        if (object->trailing_comma && jl_buffer_char(insertion, ',') != 0) {
-            return JL_STATUS_FAILURE;
-        }
-        if (jl_buffer_string(insertion, newline) != 0 ||
-            jl_buffer_append(insertion, base.data, base.length) != 0) {
-            return JL_STATUS_FAILURE;
-        }
-        return 0;
+        return jl_make_multiline_insertion(insertion, object, member, newline, base, unit,
+                                           close_indent_only);
     }
 
     if (object->close_pos == gap_start ||
@@ -1558,7 +1653,9 @@ static int jl_read_file(const char *path, char **content_out, size_t *length_out
     size_t length = (size_t)before.size;
     char *content = malloc(length + JL_BYTE_WIDTH);
     if (!content) {
-        fclose(file);
+        if (fclose(file) != 0) {
+            return JL_STATUS_FAILURE;
+        }
         return JL_STATUS_FAILURE;
     }
     size_t read_count = fread(content, JL_BYTE_WIDTH, length, file);
@@ -1698,6 +1795,77 @@ static int jl_replace_atomic(const char *temp_path, const char *path, bool desti
 #endif
 }
 
+static FILE *jl_open_temp_file(const char *path, char *temp_path, size_t temp_capacity) {
+    for (unsigned attempt = 0; attempt < JL_TEMP_WRITE_ATTEMPTS; attempt++) {
+        unsigned sequence =
+            atomic_fetch_add_explicit(&jl_temp_sequence, JL_BYTE_WIDTH, memory_order_relaxed);
+        int written = snprintf(temp_path, temp_capacity, "%s.cbm.tmp.%ld.%u", path,
+                               (long)JL_PROCESS_ID(), sequence);
+        if (written < 0 || (size_t)written >= temp_capacity) {
+            return NULL;
+        }
+        errno = 0;
+#ifdef _WIN32
+        FILE *file = cbm_fopen(temp_path, "wbx");
+#else
+#ifndef O_NOFOLLOW
+        return NULL;
+#else
+        int flags = O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW;
+#ifdef O_CLOEXEC
+        flags |= O_CLOEXEC;
+#endif
+        int descriptor = open(temp_path, flags, JL_TEMP_FILE_MODE);
+        FILE *file = descriptor >= 0 ? fdopen(descriptor, "wb") : NULL;
+        if (descriptor >= 0 && !file) {
+            int saved_error = errno;
+            close(descriptor);
+            (void)cbm_unlink(temp_path);
+            errno = saved_error;
+        }
+#endif
+#endif
+        if (file || errno != EEXIST) {
+            return file;
+        }
+    }
+    return NULL;
+}
+
+static int jl_write_temp_file(FILE *file, const char *content, size_t length,
+                              const jl_file_snapshot_t *snapshot) {
+    bool failed = fwrite(content, JL_BYTE_WIDTH, length, file) != length || fflush(file) != 0;
+#ifndef _WIN32
+    mode_t mode = snapshot->exists ? snapshot->mode & JL_PERMISSION_MASK : JL_TEMP_FILE_MODE;
+    if (!failed && snapshot->exists &&
+        fchown(cbm_fileno(file), snapshot->owner, snapshot->group) != 0) {
+        failed = true;
+    }
+    if (!failed && fchmod(cbm_fileno(file), mode) != 0) {
+        failed = true;
+    }
+#endif
+    if (!failed && JL_SYNC(cbm_fileno(file)) != 0) {
+        failed = true;
+    }
+    if (fclose(file) != 0) {
+        failed = true;
+    }
+    return failed ? JL_STATUS_FAILURE : 0;
+}
+
+static int jl_verify_temp_file(const char *temp_path, const char *content, size_t length,
+                               jl_file_snapshot_t *snapshot) {
+    char *temp_content = NULL;
+    size_t temp_length = 0U;
+    bool temp_missing = false;
+    int result = jl_read_file(temp_path, &temp_content, &temp_length, &temp_missing, snapshot);
+    bool valid = result == 0 && !temp_missing && temp_length == length &&
+                 (length == 0U || memcmp(temp_content, content, length) == 0);
+    free(temp_content);
+    return valid ? 0 : JL_STATUS_FAILURE;
+}
+
 static int jl_write_atomic(const char *path, const char *content, size_t length,
                            const char *expected_content, size_t expected_length,
                            const jl_file_snapshot_t *expected_snapshot) {
@@ -1714,95 +1882,22 @@ static int jl_write_atomic(const char *path, const char *content, size_t length,
         return JL_STATUS_FAILURE;
     }
 
-    FILE *file = NULL;
-    for (unsigned attempt = 0; attempt < JL_TEMP_WRITE_ATTEMPTS; attempt++) {
-        unsigned sequence =
-            atomic_fetch_add_explicit(&jl_temp_sequence, JL_BYTE_WIDTH, memory_order_relaxed);
-        int written = snprintf(temp_path, temp_capacity, "%s.cbm.tmp.%ld.%u", path,
-                               (long)JL_PROCESS_ID(), sequence);
-        if (written < 0 || (size_t)written >= temp_capacity) {
-            free(temp_path);
-            return JL_STATUS_FAILURE;
-        }
-        errno = 0;
-#ifdef _WIN32
-        file = cbm_fopen(temp_path, "wbx");
-#else
-#ifndef O_NOFOLLOW
-        free(temp_path);
-        return JL_STATUS_FAILURE;
-#else
-        int flags = O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW;
-#ifdef O_CLOEXEC
-        flags |= O_CLOEXEC;
-#endif
-        int descriptor = open(temp_path, flags, JL_TEMP_FILE_MODE);
-        if (descriptor >= 0) {
-            file = fdopen(descriptor, "wb");
-            if (!file) {
-                int saved_error = errno;
-                close(descriptor);
-                (void)cbm_unlink(temp_path);
-                errno = saved_error;
-            }
-        }
-#endif
-#endif
-        if (file) {
-            break;
-        }
-        if (errno != EEXIST) {
-            free(temp_path);
-            return JL_STATUS_FAILURE;
-        }
-    }
+    FILE *file = jl_open_temp_file(path, temp_path, temp_capacity);
     if (!file) {
         free(temp_path);
         return JL_STATUS_FAILURE;
     }
-
-    bool failed = false;
-    if (fwrite(content, JL_BYTE_WIDTH, length, file) != length) {
-        failed = true;
-    }
-    if (!failed && fflush(file) != 0) {
-        failed = true;
-    }
-#ifndef _WIN32
-    if (!failed && expected_snapshot->exists &&
-        fchown(cbm_fileno(file), expected_snapshot->owner, expected_snapshot->group) != 0) {
-        failed = true;
-    }
-    mode_t mode = expected_snapshot->exists ? expected_snapshot->mode & JL_PERMISSION_MASK
-                                            : JL_TEMP_FILE_MODE;
-    if (!failed && fchmod(cbm_fileno(file), mode) != 0) {
-        failed = true;
-    }
-#endif
-    if (!failed && JL_SYNC(cbm_fileno(file)) != 0) {
-        failed = true;
-    }
-    if (fclose(file) != 0) {
-        failed = true;
-    }
-    if (failed) {
+    if (jl_write_temp_file(file, content, length, expected_snapshot) != 0) {
         cbm_unlink(temp_path);
         free(temp_path);
         return JL_STATUS_FAILURE;
     }
-    char *temp_content = NULL;
-    size_t temp_length = 0U;
-    bool temp_missing = false;
     jl_file_snapshot_t temp_snapshot;
-    if (jl_read_file(temp_path, &temp_content, &temp_length, &temp_missing, &temp_snapshot) != 0 ||
-        temp_missing || temp_length != length ||
-        (length != 0U && memcmp(temp_content, content, length) != 0)) {
-        free(temp_content);
+    if (jl_verify_temp_file(temp_path, content, length, &temp_snapshot) != 0) {
         cbm_unlink(temp_path);
         free(temp_path);
         return JL_STATUS_FAILURE;
     }
-    free(temp_content);
 #ifdef CBM_JSON_LIKE_ENABLE_TEST_API
     if (jl_precommit_test_hook) {
         jl_precommit_test_hook(path, jl_precommit_test_context);
@@ -2184,6 +2279,48 @@ int cbm_json_like_get_raw_entry(const char *file_path, const char *const *object
     return 0;
 }
 
+static int jl_insert_and_write(const char *file_path, const char *source, size_t source_length,
+                               const jl_file_snapshot_t *snapshot, size_t object_start,
+                               const jl_object_t *object, const char *const *object_path,
+                               size_t path_len, size_t missing_path_index, const char *entry_key,
+                               const char *entry_value, size_t entry_length) {
+    char *updated = NULL;
+    size_t updated_length = 0;
+    int result = jl_insert_member(source, source_length, object_start, object, object_path,
+                                  path_len, missing_path_index, entry_key, entry_value,
+                                  entry_length, &updated, &updated_length);
+    if (result == 0) {
+        result =
+            jl_write_document(file_path, updated, updated_length, source, source_length, snapshot);
+    }
+    free(updated);
+    return result;
+}
+
+static bool jl_expected_content_matches(bool missing, const char *source, size_t source_length,
+                                        const char *expected, size_t expected_length) {
+    if (!expected) {
+        return missing;
+    }
+    return !missing && source_length == expected_length &&
+           (expected_length == 0U || memcmp(source, expected, expected_length) == 0);
+}
+
+static int jl_write_fresh_entry(const char *file_path, const char *const *object_path,
+                                size_t path_len, const char *entry_key, const char *entry_value,
+                                size_t entry_length, const char *source, size_t source_length,
+                                const jl_file_snapshot_t *snapshot) {
+    char *fresh = NULL;
+    size_t fresh_length = 0;
+    int result = jl_build_fresh(object_path, path_len, entry_key, entry_value, entry_length, &fresh,
+                                &fresh_length);
+    if (result == 0) {
+        result = jl_write_document(file_path, fresh, fresh_length, source, source_length, snapshot);
+    }
+    free(fresh);
+    return result;
+}
+
 static int jl_upsert_entry(const char *file_path, const char *const *object_path, size_t path_len,
                            const char *entry_key, const char *entry_json, bool enforce_expected,
                            const char *expected_content, size_t expected_length) {
@@ -2204,28 +2341,14 @@ static int jl_upsert_entry(const char *file_path, const char *const *object_path
     if (jl_read_file(file_path, &source, &source_length, &missing, &snapshot) != 0) {
         return JL_STATUS_FAILURE;
     }
-    if (enforce_expected) {
-        bool expected_missing = expected_content == NULL;
-        bool content_matches = expected_missing
-                                   ? missing
-                                   : !missing && source_length == expected_length &&
-                                         (expected_length == 0U ||
-                                          memcmp(source, expected_content, expected_length) == 0);
-        if (!content_matches) {
-            free(source);
-            return JL_STATUS_FAILURE;
-        }
+    if (enforce_expected && !jl_expected_content_matches(missing, source, source_length,
+                                                         expected_content, expected_length)) {
+        free(source);
+        return JL_STATUS_FAILURE;
     }
     if (missing || source_length == 0U) {
-        char *fresh = NULL;
-        size_t fresh_length = 0;
-        int result = jl_build_fresh(object_path, path_len, entry_key, entry_value, entry_length,
-                                    &fresh, &fresh_length);
-        if (result == 0) {
-            result =
-                jl_write_document(file_path, fresh, fresh_length, source, source_length, &snapshot);
-        }
-        free(fresh);
+        int result = jl_write_fresh_entry(file_path, object_path, path_len, entry_key, entry_value,
+                                          entry_length, source, source_length, &snapshot);
         free(source);
         return result;
     }
@@ -2243,16 +2366,9 @@ static int jl_upsert_entry(const char *file_path, const char *const *object_path
             return JL_STATUS_FAILURE;
         }
         if (object.match_count == 0U) {
-            char *updated = NULL;
-            size_t updated_length = 0;
-            int result = jl_insert_member(source, source_length, object_start, &object, object_path,
-                                          path_len, i, entry_key, entry_value, entry_length,
-                                          &updated, &updated_length);
-            if (result == 0) {
-                result = jl_write_document(file_path, updated, updated_length, source,
-                                           source_length, &snapshot);
-            }
-            free(updated);
+            int result = jl_insert_and_write(file_path, source, source_length, &snapshot,
+                                             object_start, &object, object_path, path_len, i,
+                                             entry_key, entry_value, entry_length);
             free(source);
             return result;
         }
@@ -2270,16 +2386,9 @@ static int jl_upsert_entry(const char *file_path, const char *const *object_path
         return JL_STATUS_FAILURE;
     }
     if (object.match_count == 0U) {
-        char *updated = NULL;
-        size_t updated_length = 0;
-        int result = jl_insert_member(source, source_length, object_start, &object, object_path,
-                                      path_len, SIZE_MAX, entry_key, entry_value, entry_length,
-                                      &updated, &updated_length);
-        if (result == 0) {
-            result = jl_write_document(file_path, updated, updated_length, source, source_length,
-                                       &snapshot);
-        }
-        free(updated);
+        int result = jl_insert_and_write(file_path, source, source_length, &snapshot, object_start,
+                                         &object, object_path, path_len, SIZE_MAX, entry_key,
+                                         entry_value, entry_length);
         free(source);
         return result;
     }
@@ -2323,6 +2432,29 @@ int cbm_json_like_upsert_entry_if_unchanged(const char *file_path, const char *c
                            expected_content, expected_length);
 }
 
+static int jl_resolve_object_path(const char *source, size_t source_length,
+                                  const char *const *object_path, size_t path_len,
+                                  size_t *object_start) {
+    if (jl_validate_document(source, source_length, object_start) != 0) {
+        return JL_STATUS_FAILURE;
+    }
+    for (size_t i = 0; i < path_len; i++) {
+        jl_object_t object;
+        if (jl_scan_object(source, source_length, *object_start, object_path[i], &object) != 0 ||
+            object.match_count > JL_BYTE_WIDTH) {
+            return JL_STATUS_FAILURE;
+        }
+        if (object.match_count == 0U) {
+            return JL_STATUS_NO_MATCH;
+        }
+        if (source[object.match.value_start] != '{') {
+            return JL_STATUS_FAILURE;
+        }
+        *object_start = object.match.value_start;
+    }
+    return 0;
+}
+
 static int jl_remove_entry(const char *file_path, const char *const *object_path, size_t path_len,
                            const char *entry_key, bool enforce_expected,
                            const char *expected_content, size_t expected_length) {
@@ -2354,26 +2486,11 @@ static int jl_remove_entry(const char *file_path, const char *const *object_path
     }
 
     size_t object_start = 0;
-    if (jl_validate_document(source, source_length, &object_start) != 0) {
+    int path_result =
+        jl_resolve_object_path(source, source_length, object_path, path_len, &object_start);
+    if (path_result != 0) {
         free(source);
-        return JL_STATUS_FAILURE;
-    }
-    for (size_t i = 0; i < path_len; i++) {
-        jl_object_t object;
-        if (jl_scan_object(source, source_length, object_start, object_path[i], &object) != 0 ||
-            object.match_count > JL_BYTE_WIDTH) {
-            free(source);
-            return JL_STATUS_FAILURE;
-        }
-        if (object.match_count == 0U) {
-            free(source);
-            return 0;
-        }
-        if (source[object.match.value_start] != '{') {
-            free(source);
-            return JL_STATUS_FAILURE;
-        }
-        object_start = object.match.value_start;
+        return path_result == JL_STATUS_NO_MATCH ? 0 : JL_STATUS_FAILURE;
     }
 
     jl_object_t object;
@@ -2436,6 +2553,74 @@ int cbm_json_like_remove_entry_if_unchanged(const char *file_path, const char *c
                            expected_length);
 }
 
+static int jl_build_single_string_array(const char *string_value, jl_buffer_t *array_json) {
+    jl_buffer_t built = {0};
+    if (jl_buffer_char(&built, '[') == 0 && jl_append_quoted_string(&built, string_value) == 0 &&
+        jl_buffer_char(&built, ']') == 0) {
+        *array_json = built;
+        return 0;
+    }
+    free(built.data);
+    return JL_STATUS_FAILURE;
+}
+
+static int jl_add_unique_existing(const char *file_path, const char *const *object_path,
+                                  size_t path_len, const char *array_key, const char *string_value,
+                                  const jl_buffer_t *array_json, char *source, size_t source_length,
+                                  const jl_file_snapshot_t *snapshot) {
+    size_t object_start = 0;
+    if (jl_validate_document(source, source_length, &object_start) != 0) {
+        return JL_STATUS_FAILURE;
+    }
+    for (size_t i = 0; i < path_len; i++) {
+        jl_object_t parent;
+        if (jl_scan_object(source, source_length, object_start, object_path[i], &parent) != 0 ||
+            parent.match_count > JL_BYTE_WIDTH) {
+            return JL_STATUS_FAILURE;
+        }
+        if (parent.match_count == 0U) {
+            return jl_insert_and_write(file_path, source, source_length, snapshot, object_start,
+                                       &parent, object_path, path_len, i, array_key,
+                                       array_json->data, array_json->length);
+        }
+        if (source[parent.match.value_start] != '{') {
+            return JL_STATUS_FAILURE;
+        }
+        object_start = parent.match.value_start;
+    }
+    jl_object_t object;
+    if (jl_scan_object(source, source_length, object_start, array_key, &object) != 0 ||
+        object.match_count > JL_BYTE_WIDTH) {
+        return JL_STATUS_FAILURE;
+    }
+    if (object.match_count == 0U) {
+        return jl_insert_and_write(file_path, source, source_length, snapshot, object_start,
+                                   &object, object_path, path_len, SIZE_MAX, array_key,
+                                   array_json->data, array_json->length);
+    }
+    if (source[object.match.value_start] != '[') {
+        return JL_STATUS_FAILURE;
+    }
+    jl_array_t array;
+    if (jl_scan_array(source, source_length, object.match.value_start, string_value, &array) != 0 ||
+        array.match_count > JL_BYTE_WIDTH) {
+        return JL_STATUS_FAILURE;
+    }
+    if (array.match_count == JL_BYTE_WIDTH) {
+        return 0;
+    }
+    char *updated = NULL;
+    size_t updated_length = 0;
+    int result = jl_insert_array_string(source, source_length, object.match.value_start, &array,
+                                        string_value, &updated, &updated_length);
+    if (result == 0) {
+        result =
+            jl_write_document(file_path, updated, updated_length, source, source_length, snapshot);
+    }
+    free(updated);
+    return result;
+}
+
 int cbm_json_like_add_unique_string_at_path(const char *file_path, const char *const *object_path,
                                             size_t path_len, const char *array_key,
                                             const char *string_value) {
@@ -2443,12 +2628,8 @@ int cbm_json_like_add_unique_string_at_path(const char *file_path, const char *c
         jl_validate_string_value(string_value) != 0) {
         return JL_STATUS_FAILURE;
     }
-
     jl_buffer_t array_json = {0};
-    if (jl_buffer_char(&array_json, '[') != 0 ||
-        jl_append_quoted_string(&array_json, string_value) != 0 ||
-        jl_buffer_char(&array_json, ']') != 0) {
-        free(array_json.data);
+    if (jl_build_single_string_array(string_value, &array_json) != 0) {
         return JL_STATUS_FAILURE;
     }
 
@@ -2461,94 +2642,15 @@ int cbm_json_like_add_unique_string_at_path(const char *file_path, const char *c
         return JL_STATUS_FAILURE;
     }
     if (missing || source_length == 0U) {
-        char *fresh = NULL;
-        size_t fresh_length = 0;
-        int result = jl_build_fresh(object_path, path_len, array_key, array_json.data,
-                                    array_json.length, &fresh, &fresh_length);
-        if (result == 0) {
-            result =
-                jl_write_document(file_path, fresh, fresh_length, source, source_length, &snapshot);
-        }
-        free(fresh);
+        int result =
+            jl_write_fresh_entry(file_path, object_path, path_len, array_key, array_json.data,
+                                 array_json.length, source, source_length, &snapshot);
         free(source);
         free(array_json.data);
         return result;
     }
-
-    size_t object_start = 0;
-    if (jl_validate_document(source, source_length, &object_start) != 0) {
-        free(source);
-        free(array_json.data);
-        return JL_STATUS_FAILURE;
-    }
-    for (size_t i = 0; i < path_len; i++) {
-        jl_object_t parent;
-        if (jl_scan_object(source, source_length, object_start, object_path[i], &parent) != 0 ||
-            parent.match_count > JL_BYTE_WIDTH) {
-            free(source);
-            free(array_json.data);
-            return JL_STATUS_FAILURE;
-        }
-        if (parent.match_count == 0U) {
-            char *updated = NULL;
-            size_t updated_length = 0U;
-            int result = jl_insert_member(source, source_length, object_start, &parent, object_path,
-                                          path_len, i, array_key, array_json.data,
-                                          array_json.length, &updated, &updated_length);
-            if (result == 0) {
-                result = jl_write_document(file_path, updated, updated_length, source,
-                                           source_length, &snapshot);
-            }
-            free(updated);
-            free(source);
-            free(array_json.data);
-            return result;
-        }
-        if (source[parent.match.value_start] != '{') {
-            free(source);
-            free(array_json.data);
-            return JL_STATUS_FAILURE;
-        }
-        object_start = parent.match.value_start;
-    }
-
-    jl_object_t object;
-    if (jl_scan_object(source, source_length, object_start, array_key, &object) != 0 ||
-        object.match_count > JL_BYTE_WIDTH) {
-        free(source);
-        free(array_json.data);
-        return JL_STATUS_FAILURE;
-    }
-
-    char *updated = NULL;
-    size_t updated_length = 0;
-    int result = 0;
-    if (object.match_count == 0U) {
-        result = jl_insert_member(source, source_length, object_start, &object, object_path,
-                                  path_len, SIZE_MAX, array_key, array_json.data, array_json.length,
-                                  &updated, &updated_length);
-    } else if (source[object.match.value_start] != '[') {
-        result = JL_STATUS_FAILURE;
-    } else {
-        jl_array_t array;
-        if (jl_scan_array(source, source_length, object.match.value_start, string_value, &array) !=
-                0 ||
-            array.match_count > JL_BYTE_WIDTH) {
-            result = JL_STATUS_FAILURE;
-        } else if (array.match_count == JL_BYTE_WIDTH) {
-            free(source);
-            free(array_json.data);
-            return 0;
-        } else {
-            result = jl_insert_array_string(source, source_length, object.match.value_start, &array,
-                                            string_value, &updated, &updated_length);
-        }
-    }
-    if (result == 0) {
-        result =
-            jl_write_document(file_path, updated, updated_length, source, source_length, &snapshot);
-    }
-    free(updated);
+    int result = jl_add_unique_existing(file_path, object_path, path_len, array_key, string_value,
+                                        &array_json, source, source_length, &snapshot);
     free(source);
     free(array_json.data);
     return result;
@@ -2688,86 +2790,22 @@ static int jl_decode_string_value(const char *text, size_t start, size_t end, ch
             }
             continue;
         }
-        if (pos >= limit) {
+        if (pos < limit && (unsigned char)text[pos] == JL_UTF8_LINE_SEPARATOR_LEAD &&
+            limit - pos >= JL_THREE_BYTES &&
+            (unsigned char)text[pos + JL_BYTE_WIDTH] == JL_UTF8_CONTINUATION_BYTE &&
+            ((unsigned char)text[pos + JL_TWO_BYTES] == JL_UTF8_LINE_SEPARATOR_TAIL ||
+             (unsigned char)text[pos + JL_TWO_BYTES] == JL_UTF8_PARAGRAPH_SEPARATOR_TAIL)) {
+            pos += JL_THREE_BYTES;
+            continue;
+        }
+        uint32_t codepoint = 0;
+        bool skip = false;
+        if (!jl_decode_key_escape(text, &pos, limit, &codepoint, &skip)) {
             free(decoded.data);
             return JL_STATUS_FAILURE;
         }
-
-        unsigned char escaped = (unsigned char)text[pos++];
-        if (escaped == '\n' || escaped == '\r') {
-            if (escaped == '\r' && pos < limit && text[pos] == '\n') {
-                pos++;
-            }
+        if (skip) {
             continue;
-        }
-        if (escaped == JL_UTF8_LINE_SEPARATOR_LEAD && limit - pos >= JL_TWO_BYTES &&
-            (unsigned char)text[pos] == JL_UTF8_CONTINUATION_BYTE &&
-            ((unsigned char)text[pos + JL_BYTE_WIDTH] == JL_UTF8_LINE_SEPARATOR_TAIL ||
-             (unsigned char)text[pos + JL_BYTE_WIDTH] == JL_UTF8_PARAGRAPH_SEPARATOR_TAIL)) {
-            pos += JL_TWO_BYTES;
-            continue;
-        }
-
-        uint32_t codepoint = escaped;
-        switch (escaped) {
-        case 'b':
-            codepoint = '\b';
-            break;
-        case 'f':
-            codepoint = '\f';
-            break;
-        case 'n':
-            codepoint = '\n';
-            break;
-        case 'r':
-            codepoint = '\r';
-            break;
-        case 't':
-            codepoint = '\t';
-            break;
-        case 'v':
-            codepoint = '\v';
-            break;
-        case '0':
-            codepoint = 0U;
-            break;
-        case 'x':
-            if (limit - pos < JL_TWO_BYTES) {
-                free(decoded.data);
-                return JL_STATUS_FAILURE;
-            }
-            codepoint = (jl_hex_value((unsigned char)text[pos]) << JL_FOUR_BYTES) |
-                        jl_hex_value((unsigned char)text[pos + JL_BYTE_WIDTH]);
-            pos += JL_TWO_BYTES;
-            break;
-        case 'u': {
-            if (limit - pos < JL_FOUR_BYTES) {
-                free(decoded.data);
-                return JL_STATUS_FAILURE;
-            }
-            codepoint = jl_decode_hex4(text + pos);
-            pos += JL_FOUR_BYTES;
-            if (codepoint >= JL_UTF16_SURROGATE_MIN && codepoint <= JL_UTF16_HIGH_SURROGATE_MAX) {
-                if (limit - pos < JL_UNICODE_ESCAPE_BYTES || text[pos] != '\\' ||
-                    text[pos + JL_BYTE_WIDTH] != 'u') {
-                    free(decoded.data);
-                    return JL_STATUS_FAILURE;
-                }
-                uint32_t low = jl_decode_hex4(text + pos + JL_TWO_BYTES);
-                if (low < JL_UTF16_LOW_SURROGATE_MIN || low > JL_UTF16_SURROGATE_MAX) {
-                    free(decoded.data);
-                    return JL_STATUS_FAILURE;
-                }
-                codepoint =
-                    JL_UNICODE_SUPPLEMENTARY_BASE +
-                    ((codepoint - JL_UTF16_SURROGATE_MIN) << JL_UTF16_SURROGATE_PAIR_SHIFT) +
-                    (low - JL_UTF16_LOW_SURROGATE_MIN);
-                pos += JL_UNICODE_ESCAPE_BYTES;
-            }
-            break;
-        }
-        default:
-            break;
         }
         if (jl_append_decoded_codepoint(&decoded, codepoint) != 0) {
             free(decoded.data);
@@ -2845,92 +2883,72 @@ static bool jl_field_shape_matches(const char *text, const jl_member_t *member,
                                   decoded_out) == 0;
 }
 
-int cbm_json_like_match_object_entry(const char *document, size_t document_length,
+static bool jl_match_arguments_valid(const char *document, size_t document_length,
                                      const char *const *object_path, size_t path_len,
                                      const char *entry_key,
                                      const cbm_json_like_object_field_t *fields, size_t field_count,
-                                     char **captured_string_out) {
-    if (!captured_string_out) {
-        return JL_STATUS_FAILURE;
-    }
-    *captured_string_out = NULL;
+                                     size_t *capture_count) {
     if (!document || document_length > JL_MAX_FILE_BYTES || !entry_key || entry_key[0] == '\0' ||
         !fields || field_count == 0U || (path_len > 0U && !object_path)) {
-        return JL_STATUS_FAILURE;
+        return false;
     }
-    for (size_t i = 0U; i < path_len; ++i) {
+    *capture_count = 0U;
+    for (size_t i = 0; i < path_len; i++) {
         if (!object_path[i] || object_path[i][0] == '\0') {
-            return JL_STATUS_FAILURE;
+            return false;
         }
     }
-    size_t capture_count = 0U;
-    for (size_t i = 0U; i < field_count; ++i) {
+    for (size_t i = 0; i < field_count; i++) {
+        unsigned flags = fields[i].flags;
         if (!fields[i].key || fields[i].key[0] == '\0' ||
             fields[i].shape > CBM_JSON_LIKE_VALUE_SINGLE_STRING_ARRAY ||
-            (fields[i].flags & ~(unsigned)(CBM_JSON_LIKE_FIELD_REQUIRED |
-                                           CBM_JSON_LIKE_FIELD_CAPTURE_STRING)) != 0U ||
-            ((fields[i].flags & CBM_JSON_LIKE_FIELD_CAPTURE_STRING) != 0U &&
+            (flags & ~(unsigned)(CBM_JSON_LIKE_FIELD_REQUIRED |
+                                 CBM_JSON_LIKE_FIELD_CAPTURE_STRING)) != 0U ||
+            ((flags & CBM_JSON_LIKE_FIELD_CAPTURE_STRING) != 0U &&
              fields[i].shape == CBM_JSON_LIKE_VALUE_EMPTY_ARRAY)) {
-            return JL_STATUS_FAILURE;
+            return false;
         }
-        capture_count +=
-            (fields[i].flags & CBM_JSON_LIKE_FIELD_CAPTURE_STRING) != 0U ? JL_BYTE_WIDTH : 0U;
-        for (size_t j = 0U; j < i; ++j) {
+        *capture_count += (flags & CBM_JSON_LIKE_FIELD_CAPTURE_STRING) != 0U ? JL_BYTE_WIDTH : 0U;
+        for (size_t j = 0; j < i; j++) {
             if (strcmp(fields[i].key, fields[j].key) == 0) {
-                return JL_STATUS_FAILURE;
+                return false;
             }
         }
     }
-    if (capture_count != JL_BYTE_WIDTH) {
+    return *capture_count == JL_BYTE_WIDTH;
+}
+
+static int jl_match_child_object(const char *document, size_t length, size_t *object_start,
+                                 const char *key) {
+    jl_object_t parent;
+    if (jl_scan_object(document, length, *object_start, key, &parent) != 0) {
         return JL_STATUS_FAILURE;
     }
-    if (document_length == 0U) {
+    if (parent.match_count == 0U) {
         return CBM_JSON_LIKE_OBJECT_MISSING;
     }
-
-    size_t object_start = 0U;
-    if (jl_validate_document(document, document_length, &object_start) != 0) {
-        return JL_STATUS_FAILURE;
-    }
-    for (size_t i = 0U; i < path_len; ++i) {
-        jl_object_t parent;
-        if (jl_scan_object(document, document_length, object_start, object_path[i], &parent) != 0) {
-            return JL_STATUS_FAILURE;
-        }
-        if (parent.match_count == 0U) {
-            return CBM_JSON_LIKE_OBJECT_MISSING;
-        }
-        if (parent.match_count != JL_BYTE_WIDTH || document[parent.match.value_start] != '{') {
-            return CBM_JSON_LIKE_OBJECT_MISMATCH;
-        }
-        object_start = parent.match.value_start;
-    }
-
-    jl_object_t entry_parent;
-    if (jl_scan_object(document, document_length, object_start, entry_key, &entry_parent) != 0) {
-        return JL_STATUS_FAILURE;
-    }
-    if (entry_parent.match_count == 0U) {
-        return CBM_JSON_LIKE_OBJECT_MISSING;
-    }
-    if (entry_parent.match_count != JL_BYTE_WIDTH ||
-        document[entry_parent.match.value_start] != '{') {
+    if (parent.match_count != JL_BYTE_WIDTH || document[parent.match.value_start] != '{') {
         return CBM_JSON_LIKE_OBJECT_MISMATCH;
     }
+    *object_start = parent.match.value_start;
+    return 0;
+}
 
-    size_t entry_start = entry_parent.match.value_start;
+static int jl_match_fields(const char *document, size_t length, size_t entry_start,
+                           const cbm_json_like_object_field_t *fields, size_t field_count,
+                           char **captured_out) {
     size_t found_count = 0U;
-    char *captured = NULL;
     size_t member_count = 0U;
-    for (size_t i = 0U; i < field_count; ++i) {
+    char *captured = NULL;
+    for (size_t i = 0; i < field_count; i++) {
         jl_object_t entry;
-        if (jl_scan_object(document, document_length, entry_start, fields[i].key, &entry) != 0) {
+        if (jl_scan_object(document, length, entry_start, fields[i].key, &entry) != 0) {
             free(captured);
             return JL_STATUS_FAILURE;
         }
         member_count = entry.member_count;
-        if (entry.match_count > JL_BYTE_WIDTH ||
-            (entry.match_count == 0U && (fields[i].flags & CBM_JSON_LIKE_FIELD_REQUIRED) != 0U)) {
+        bool required = (fields[i].flags & CBM_JSON_LIKE_FIELD_REQUIRED) != 0U;
+        if (entry.match_count > JL_BYTE_WIDTH || (entry.match_count == 0U && required)) {
             free(captured);
             return CBM_JSON_LIKE_OBJECT_MISMATCH;
         }
@@ -2939,12 +2957,9 @@ int cbm_json_like_match_object_entry(const char *document, size_t document_lengt
         }
         found_count++;
         char *decoded = NULL;
-        if (!jl_field_shape_matches(document, &entry.match, fields[i].shape, &decoded)) {
-            free(captured);
-            return CBM_JSON_LIKE_OBJECT_MISMATCH;
-        }
-        if (fields[i].expected_string &&
-            (!decoded || strcmp(decoded, fields[i].expected_string) != 0)) {
+        if (!jl_field_shape_matches(document, &entry.match, fields[i].shape, &decoded) ||
+            (fields[i].expected_string &&
+             (!decoded || strcmp(decoded, fields[i].expected_string) != 0))) {
             free(decoded);
             free(captured);
             return CBM_JSON_LIKE_OBJECT_MISMATCH;
@@ -2959,8 +2974,45 @@ int cbm_json_like_match_object_entry(const char *document, size_t document_lengt
         free(captured);
         return CBM_JSON_LIKE_OBJECT_MISMATCH;
     }
-    *captured_string_out = captured;
+    *captured_out = captured;
     return CBM_JSON_LIKE_OBJECT_MATCH;
+}
+
+int cbm_json_like_match_object_entry(const char *document, size_t document_length,
+                                     const char *const *object_path, size_t path_len,
+                                     const char *entry_key,
+                                     const cbm_json_like_object_field_t *fields, size_t field_count,
+                                     char **captured_string_out) {
+    if (!captured_string_out) {
+        return JL_STATUS_FAILURE;
+    }
+    *captured_string_out = NULL;
+    size_t capture_count = 0U;
+    if (!jl_match_arguments_valid(document, document_length, object_path, path_len, entry_key,
+                                  fields, field_count, &capture_count)) {
+        return JL_STATUS_FAILURE;
+    }
+    if (document_length == 0U) {
+        return CBM_JSON_LIKE_OBJECT_MISSING;
+    }
+
+    size_t object_start = 0U;
+    if (jl_validate_document(document, document_length, &object_start) != 0) {
+        return JL_STATUS_FAILURE;
+    }
+    for (size_t i = 0U; i < path_len; ++i) {
+        int matched =
+            jl_match_child_object(document, document_length, &object_start, object_path[i]);
+        if (matched != 0) {
+            return matched;
+        }
+    }
+    int entry_result = jl_match_child_object(document, document_length, &object_start, entry_key);
+    if (entry_result != 0) {
+        return entry_result;
+    }
+    return jl_match_fields(document, document_length, object_start, fields, field_count,
+                           captured_string_out);
 }
 
 int cbm_json_like_get_string_at_path(const char *file_path, const char *const *object_path,

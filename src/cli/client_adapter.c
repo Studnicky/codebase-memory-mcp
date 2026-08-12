@@ -29,9 +29,14 @@ static void sb_append_len(adapter_sb_t *sb, const char *s, size_t add) {
     if (sb->failed || !s) {
         return;
     }
-    if (sb->len + add + SKIP_ONE > sb->cap) {
+    if (add >= SIZE_MAX - sb->len) {
+        sb->failed = true;
+        return;
+    }
+    size_t required = sb->len + add + SKIP_ONE;
+    if (required > sb->cap) {
         size_t want = sb->cap ? sb->cap : CBM_SZ_2K;
-        while (want < sb->len + add + SKIP_ONE) {
+        while (want < required) {
             if (want > SIZE_MAX / PAIR_LEN) {
                 sb->failed = true;
                 return;
@@ -45,6 +50,10 @@ static void sb_append_len(adapter_sb_t *sb, const char *s, size_t add) {
         }
         sb->buf = grown;
         sb->cap = want;
+    }
+    if (!sb->buf) {
+        sb->failed = true;
+        return;
     }
     memcpy(sb->buf + sb->len, s, add);
     sb->len += add;

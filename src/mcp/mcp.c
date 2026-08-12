@@ -51,7 +51,17 @@ enum {
     MCP_TOKEN_PID_SHIFT = 32,
     MCP_TOKEN_SEQUENCE_INCREMENT = 1,
     MCP_PRIVATE_FILE_MODE = 0600,
+    MCP_PRIVATE_DIRECTORY_MODE = 0700,
     MCP_LOG_DIRECTORY_MODE = 0755,
+    MCP_SIGN_NEGATIVE = -1,
+    MCP_SIGN_POSITIVE = 1,
+    MCP_SINGLE_ENTRY = 1,
+    MCP_INTEGER_TEXT_CAPACITY = MCP_COL_16,
+    MCP_UNKNOWN_COUNT = -1,
+    MCP_PATH_SEPARATOR_BYTES = 1,
+    MCP_COMMAND_FAILED = -1,
+    MCP_CAPACITY_GROWTH_FACTOR = 2,
+    MCP_INITIAL_DETECT_FILE_CAPACITY = 16,
     MCP_ROOT_PATH_SLASH_INDEX = 1,
     MCP_QUOTED_NAME_DELIMITERS = 2,
     MCP_JSON_LIST_SEPARATOR_BYTES = 1,
@@ -5335,6 +5345,638 @@ enum {
     ARCH_CYCLE_TRUNCATION_RESERVE = 8,
 };
 
+typedef void (*arch_tree_row_fn)(cbm_sb_t *sb, const void *item);
+typedef void (*arch_json_row_fn)(yyjson_mut_doc *doc, yyjson_mut_val *row, const void *item);
+
+static void arch_tree_rows(cbm_sb_t *sb, const char *key, bool enabled, int count,
+                           const char *const *columns, int column_count, const void *items,
+                           size_t item_size, arch_tree_row_fn render_row) {
+    if (!enabled || count <= 0) {
+        return;
+    }
+    cbm_tree_table_header(sb, key, count, columns, column_count);
+    const char *cursor = items;
+    for (int i = 0; i < count; i++, cursor += item_size) {
+        cbm_tree_row_begin(sb);
+        render_row(sb, cursor);
+        cbm_tree_row_end(sb);
+    }
+}
+
+static void arch_json_rows(yyjson_mut_doc *doc, yyjson_mut_val *root, const char *key, bool enabled,
+                           bool include_empty, int count, const char *const *columns,
+                           int column_count, const void *items, size_t item_size,
+                           arch_json_row_fn render_row) {
+    if (!enabled || (!include_empty && count <= 0)) {
+        return;
+    }
+    yyjson_mut_val *rows = arch_json_section(doc, root, key, columns, column_count);
+    const char *cursor = items;
+    for (int i = 0; i < count; i++, cursor += item_size) {
+        yyjson_mut_val *row = yyjson_mut_arr(doc);
+        render_row(doc, row, cursor);
+        yyjson_mut_arr_add_val(rows, row);
+    }
+}
+
+static void arch_tree_node_label(cbm_sb_t *sb, const void *item) {
+    const cbm_label_count_t *value = item;
+    cbm_tree_cell_str(sb, value->label, true);
+    cbm_tree_cell_int(sb, value->count, false);
+}
+
+static void arch_tree_edge_type(cbm_sb_t *sb, const void *item) {
+    const cbm_type_count_t *value = item;
+    cbm_tree_cell_str(sb, value->type, true);
+    cbm_tree_cell_int(sb, value->count, false);
+}
+
+static void arch_tree_pattern(cbm_sb_t *sb, const void *item) {
+    const char *const *value = item;
+    cbm_tree_cell_str(sb, *value, true);
+}
+
+static void arch_tree_language(cbm_sb_t *sb, const void *item) {
+    const cbm_language_count_t *value = item;
+    cbm_tree_cell_str(sb, value->language, true);
+    cbm_tree_cell_int(sb, value->file_count, false);
+}
+
+static void arch_tree_package(cbm_sb_t *sb, const void *item) {
+    const cbm_package_summary_t *value = item;
+    cbm_tree_cell_str(sb, value->name, true);
+    cbm_tree_cell_int(sb, value->node_count, false);
+    cbm_tree_cell_int(sb, value->fan_in, false);
+    cbm_tree_cell_int(sb, value->fan_out, false);
+}
+
+static void arch_tree_entry_point(cbm_sb_t *sb, const void *item) {
+    const cbm_entry_point_t *value = item;
+    cbm_tree_cell_str(sb, value->qualified_name, true);
+    cbm_tree_cell_str(sb, value->file, false);
+}
+
+static void arch_tree_route(cbm_sb_t *sb, const void *item) {
+    const cbm_route_info_t *value = item;
+    cbm_tree_cell_str(sb, value->method, true);
+    cbm_tree_cell_str(sb, value->path, false);
+    cbm_tree_cell_str(sb, value->handler, false);
+}
+
+static void arch_tree_hotspot(cbm_sb_t *sb, const void *item) {
+    const cbm_hotspot_t *value = item;
+    cbm_tree_cell_str(sb, value->qualified_name, true);
+    cbm_tree_cell_int(sb, value->fan_in, false);
+}
+
+static void arch_tree_boundary(cbm_sb_t *sb, const void *item) {
+    const cbm_cross_pkg_boundary_t *value = item;
+    cbm_tree_cell_str(sb, value->from, true);
+    cbm_tree_cell_str(sb, value->to, false);
+    cbm_tree_cell_int(sb, value->call_count, false);
+}
+
+static void arch_tree_service(cbm_sb_t *sb, const void *item) {
+    const cbm_service_link_t *value = item;
+    cbm_tree_cell_str(sb, value->from, true);
+    cbm_tree_cell_str(sb, value->to, false);
+    cbm_tree_cell_str(sb, value->type, false);
+    cbm_tree_cell_int(sb, value->count, false);
+}
+
+static void arch_tree_layer(cbm_sb_t *sb, const void *item) {
+    const cbm_package_layer_t *value = item;
+    cbm_tree_cell_str(sb, value->name, true);
+    cbm_tree_cell_str(sb, value->layer, false);
+    cbm_tree_cell_str(sb, value->reason, false);
+}
+
+static void arch_tree_cluster(cbm_sb_t *sb, const void *item) {
+    const cbm_cluster_info_t *value = item;
+    char joined[CBM_SZ_1K];
+    cbm_tree_cell_int(sb, value->id, true);
+    cbm_tree_cell_str(sb, value->label, false);
+    cbm_tree_cell_int(sb, value->members, false);
+    cbm_tree_cell_real(sb, value->cohesion, false);
+    arch_join_list(joined, sizeof(joined), value->top_nodes, value->top_node_count);
+    cbm_tree_cell_str(sb, joined, false);
+    arch_join_list(joined, sizeof(joined), value->packages, value->package_count);
+    cbm_tree_cell_str(sb, joined, false);
+    arch_join_list(joined, sizeof(joined), value->edge_types, value->edge_type_count);
+    cbm_tree_cell_str(sb, joined, false);
+}
+
+static void arch_tree_file(cbm_sb_t *sb, const void *item) {
+    const cbm_file_tree_entry_t *value = item;
+    cbm_tree_cell_str(sb, value->path, true);
+    cbm_tree_cell_str(sb, value->type, false);
+    cbm_tree_cell_int(sb, value->children, false);
+}
+
+static void arch_json_node_label(yyjson_mut_doc *doc, yyjson_mut_val *row, const void *item) {
+    const cbm_label_count_t *value = item;
+    yyjson_mut_arr_add_strcpy(doc, row, value->label);
+    yyjson_mut_arr_add_int(doc, row, value->count);
+}
+
+static void arch_json_edge_type(yyjson_mut_doc *doc, yyjson_mut_val *row, const void *item) {
+    const cbm_type_count_t *value = item;
+    yyjson_mut_arr_add_strcpy(doc, row, value->type);
+    yyjson_mut_arr_add_int(doc, row, value->count);
+}
+
+static void arch_json_language(yyjson_mut_doc *doc, yyjson_mut_val *row, const void *item) {
+    const cbm_language_count_t *value = item;
+    yyjson_mut_arr_add_strcpy(doc, row, value->language ? value->language : "");
+    yyjson_mut_arr_add_int(doc, row, value->file_count);
+}
+
+static void arch_json_package(yyjson_mut_doc *doc, yyjson_mut_val *row, const void *item) {
+    const cbm_package_summary_t *value = item;
+    yyjson_mut_arr_add_strcpy(doc, row, value->name ? value->name : "");
+    yyjson_mut_arr_add_int(doc, row, value->node_count);
+    yyjson_mut_arr_add_int(doc, row, value->fan_in);
+    yyjson_mut_arr_add_int(doc, row, value->fan_out);
+}
+
+static void arch_json_entry_point(yyjson_mut_doc *doc, yyjson_mut_val *row, const void *item) {
+    const cbm_entry_point_t *value = item;
+    yyjson_mut_arr_add_strcpy(doc, row, value->qualified_name ? value->qualified_name : "");
+    yyjson_mut_arr_add_strcpy(doc, row, value->file ? value->file : "");
+}
+
+static void arch_json_route(yyjson_mut_doc *doc, yyjson_mut_val *row, const void *item) {
+    const cbm_route_info_t *value = item;
+    yyjson_mut_arr_add_strcpy(doc, row, value->method ? value->method : "");
+    yyjson_mut_arr_add_strcpy(doc, row, value->path ? value->path : "");
+    yyjson_mut_arr_add_strcpy(doc, row, value->handler ? value->handler : "");
+}
+
+static void arch_json_hotspot(yyjson_mut_doc *doc, yyjson_mut_val *row, const void *item) {
+    const cbm_hotspot_t *value = item;
+    yyjson_mut_arr_add_strcpy(doc, row, value->qualified_name ? value->qualified_name : "");
+    yyjson_mut_arr_add_int(doc, row, value->fan_in);
+}
+
+static void arch_json_boundary(yyjson_mut_doc *doc, yyjson_mut_val *row, const void *item) {
+    const cbm_cross_pkg_boundary_t *value = item;
+    yyjson_mut_arr_add_strcpy(doc, row, value->from ? value->from : "");
+    yyjson_mut_arr_add_strcpy(doc, row, value->to ? value->to : "");
+    yyjson_mut_arr_add_int(doc, row, value->call_count);
+}
+
+static void arch_json_service(yyjson_mut_doc *doc, yyjson_mut_val *row, const void *item) {
+    const cbm_service_link_t *value = item;
+    yyjson_mut_arr_add_strcpy(doc, row, value->from ? value->from : "");
+    yyjson_mut_arr_add_strcpy(doc, row, value->to ? value->to : "");
+    yyjson_mut_arr_add_strcpy(doc, row, value->type ? value->type : "");
+    yyjson_mut_arr_add_int(doc, row, value->count);
+}
+
+static void arch_json_layer(yyjson_mut_doc *doc, yyjson_mut_val *row, const void *item) {
+    const cbm_package_layer_t *value = item;
+    yyjson_mut_arr_add_strcpy(doc, row, value->name ? value->name : "");
+    yyjson_mut_arr_add_strcpy(doc, row, value->layer ? value->layer : "");
+    yyjson_mut_arr_add_strcpy(doc, row, value->reason ? value->reason : "");
+}
+
+static void arch_json_cluster_strings(yyjson_mut_doc *doc, yyjson_mut_val *row,
+                                      const char *const *items, int count) {
+    yyjson_mut_val *strings = yyjson_mut_arr(doc);
+    for (int i = 0; i < count; i++) {
+        yyjson_mut_arr_add_str(doc, strings, items[i] ? items[i] : "");
+    }
+    yyjson_mut_arr_add_val(row, strings);
+}
+
+static void arch_json_cluster(yyjson_mut_doc *doc, yyjson_mut_val *row, const void *item) {
+    const cbm_cluster_info_t *value = item;
+    yyjson_mut_arr_add_int(doc, row, value->id);
+    yyjson_mut_arr_add_strcpy(doc, row, value->label);
+    yyjson_mut_arr_add_int(doc, row, value->members);
+    yyjson_mut_arr_add_real(doc, row, value->cohesion);
+    arch_json_cluster_strings(doc, row, value->top_nodes, value->top_node_count);
+    arch_json_cluster_strings(doc, row, value->packages, value->package_count);
+    arch_json_cluster_strings(doc, row, value->edge_types, value->edge_type_count);
+}
+
+static void arch_json_file(yyjson_mut_doc *doc, yyjson_mut_val *row, const void *item) {
+    const cbm_file_tree_entry_t *value = item;
+    yyjson_mut_arr_add_strcpy(doc, row, value->path ? value->path : "");
+    yyjson_mut_arr_add_strcpy(doc, row, value->type ? value->type : "");
+    yyjson_mut_arr_add_int(doc, row, value->children);
+}
+
+static void arch_render_tree_metadata(cbm_sb_t *sb, cbm_store_t *store, const char *project,
+                                      bool default_summary, bool path_scoped, const char *norm_path,
+                                      int node_count, int edge_count) {
+    if (project) {
+        cbm_tree_scalar_str(sb, "project", project);
+    }
+    if (default_summary) {
+        cbm_tree_scalar_str(sb, "aspects_hint",
+                            "Summary view (default). More on request via aspects:[...] — "
+                            "structure, dependencies, routes, hotspots, boundaries, layers, "
+                            "clusters, file_tree — or [\"all\"] for everything.");
+    }
+    if (path_scoped) {
+        cbm_tree_scalar_str(sb, "path", norm_path);
+        cbm_tree_scalar_int(sb, "root_total_nodes", cbm_store_count_nodes(store, project));
+        cbm_tree_scalar_int(sb, "root_total_edges", cbm_store_count_edges(store, project));
+        cbm_tree_scalar_int(sb, "scoped_total_nodes", node_count);
+        cbm_tree_scalar_int(sb, "scoped_total_edges", edge_count);
+    }
+    cbm_tree_scalar_int(sb, "total_nodes", node_count);
+    cbm_tree_scalar_int(sb, "total_edges", edge_count);
+}
+
+static void arch_render_tree_tables(cbm_sb_t *sb, yyjson_doc *aspects_doc, yyjson_val *aspects_arr,
+                                    const cbm_schema_info_t *schema,
+                                    const cbm_architecture_info_t *arch) {
+    static const char *const label_columns[] = {"label", "count"};
+    static const char *const type_columns[] = {"type", "count"};
+    static const char *const pattern_columns[] = {"pattern"};
+    static const char *const language_columns[] = {"language", "files"};
+    static const char *const package_columns[] = {"name", "nodes", "fan_in", "fan_out"};
+    static const char *const entry_columns[] = {"qn", "file"};
+    static const char *const route_columns[] = {"method", "path", "handler"};
+    static const char *const hotspot_columns[] = {"qn", "fan_in"};
+    static const char *const boundary_columns[] = {"from", "to", "calls"};
+    static const char *const service_columns[] = {"from", "to", "type", "count"};
+    static const char *const layer_columns[] = {"name", "layer", "reason"};
+    static const char *const cluster_columns[] = {"id",        "label",    "members",   "cohesion",
+                                                  "top_nodes", "packages", "edge_types"};
+    static const char *const file_columns[] = {"path", "type", "children"};
+    arch_tree_rows(sb, "node_labels", aspect_wanted(aspects_doc, aspects_arr, "structure"),
+                   schema->node_label_count, label_columns, ARCH_NODE_LABEL_COLUMN_COUNT,
+                   schema->node_labels, sizeof(*schema->node_labels), arch_tree_node_label);
+    arch_tree_rows(sb, "edge_types", aspect_wanted(aspects_doc, aspects_arr, "dependencies"),
+                   schema->edge_type_count, type_columns, ARCH_EDGE_TYPE_COLUMN_COUNT,
+                   schema->edge_types, sizeof(*schema->edge_types), arch_tree_edge_type);
+    arch_tree_rows(sb, "relationship_patterns", aspect_wanted(aspects_doc, aspects_arr, "routes"),
+                   schema->rel_pattern_count, pattern_columns,
+                   ARCH_RELATIONSHIP_PATTERN_COLUMN_COUNT, schema->rel_patterns,
+                   sizeof(*schema->rel_patterns), arch_tree_pattern);
+    arch_tree_rows(sb, "languages", true, arch->language_count, language_columns,
+                   ARCH_LANGUAGE_COLUMN_COUNT, arch->languages, sizeof(*arch->languages),
+                   arch_tree_language);
+    arch_tree_rows(sb, "packages", true, arch->package_count, package_columns,
+                   ARCH_PACKAGE_COLUMN_COUNT, arch->packages, sizeof(*arch->packages),
+                   arch_tree_package);
+    arch_tree_rows(sb, "entry_points", true, arch->entry_point_count, entry_columns,
+                   ARCH_ENTRY_POINT_COLUMN_COUNT, arch->entry_points, sizeof(*arch->entry_points),
+                   arch_tree_entry_point);
+    arch_tree_rows(sb, "routes", true, arch->route_count, route_columns, ARCH_ROUTE_COLUMN_COUNT,
+                   arch->routes, sizeof(*arch->routes), arch_tree_route);
+    arch_tree_rows(sb, "hotspots", true, arch->hotspot_count, hotspot_columns,
+                   ARCH_HOTSPOT_COLUMN_COUNT, arch->hotspots, sizeof(*arch->hotspots),
+                   arch_tree_hotspot);
+    arch_tree_rows(sb, "boundaries", true, arch->boundary_count, boundary_columns,
+                   ARCH_BOUNDARY_COLUMN_COUNT, arch->boundaries, sizeof(*arch->boundaries),
+                   arch_tree_boundary);
+    arch_tree_rows(sb, "services", true, arch->service_count, service_columns,
+                   ARCH_SERVICE_COLUMN_COUNT, arch->services, sizeof(*arch->services),
+                   arch_tree_service);
+    arch_tree_rows(sb, "layers", true, arch->layer_count, layer_columns, ARCH_LAYER_COLUMN_COUNT,
+                   arch->layers, sizeof(*arch->layers), arch_tree_layer);
+    arch_tree_rows(sb, "clusters", true, arch->cluster_count, cluster_columns,
+                   ARCH_CLUSTER_COLUMN_COUNT, arch->clusters, sizeof(*arch->clusters),
+                   arch_tree_cluster);
+    arch_tree_rows(sb, "file_tree", true, arch->file_tree_count, file_columns,
+                   ARCH_FILE_TREE_COLUMN_COUNT, arch->file_tree, sizeof(*arch->file_tree),
+                   arch_tree_file);
+}
+
+static void arch_render_tree_cross_repo(cbm_sb_t *sb, const cbm_schema_info_t *schema) {
+    static const char *const cross_types[] = {"CROSS_HTTP_CALLS",    "CROSS_ASYNC_CALLS",
+                                              "CROSS_CHANNEL",       "CROSS_GRPC_CALLS",
+                                              "CROSS_GRAPHQL_CALLS", "CROSS_TRPC_CALLS"};
+    int cross_total = 0;
+    for (int type_index = 0; type_index < (int)(sizeof(cross_types) / sizeof(cross_types[0]));
+         type_index++) {
+        for (int edge_index = 0; edge_index < schema->edge_type_count; edge_index++) {
+            if (strcmp(schema->edge_types[edge_index].type, cross_types[type_index]) == 0) {
+                cross_total += schema->edge_types[edge_index].count;
+                break;
+            }
+        }
+    }
+    if (cross_total > 0) {
+        cbm_tree_scalar_int(sb, "cross_repo_links_total", cross_total);
+    }
+}
+
+static void arch_render_tree_cycle_row(cbm_sb_t *sb, cbm_store_t *store, const int64_t *members,
+                                       int size) {
+    char row[CBM_SZ_2K];
+    int offset = snprintf(row, sizeof(row), "  %d ", size);
+    int shown = size < ARCH_SCC_MEMBERS_SHOWN ? size : ARCH_SCC_MEMBERS_SHOWN;
+    int omitted = size - shown;
+    for (int member = 0;
+         member < shown && offset < (int)sizeof(row) - ARCH_CYCLE_ROW_APPEND_RESERVE; member++) {
+        char qualified_name[CBM_SZ_512];
+        arch_node_qn(store, members[member], qualified_name, sizeof(qualified_name));
+        offset += snprintf(row + offset, sizeof(row) - (size_t)offset, "%s%s", member ? ";" : "",
+                           qualified_name);
+    }
+    if (omitted > 0 && offset < (int)sizeof(row) - ARCH_CYCLE_TRUNCATION_RESERVE) {
+        snprintf(row + offset, sizeof(row) - (size_t)offset, ";+%d", omitted);
+    }
+    cbm_sb_append(sb, row);
+    cbm_sb_append(sb, "\n");
+}
+
+static void arch_render_tree_cycles(cbm_sb_t *sb, cbm_store_t *store, const char *project,
+                                    yyjson_val *aspects_arr) {
+    if (!aspect_explicitly_named(aspects_arr, "cycles")) {
+        return;
+    }
+    int64_t **members = NULL;
+    int *sizes = NULL;
+    int cycle_count = 0;
+    int total_cycles = 0;
+    int scanned = 0;
+    bool truncated = false;
+    if (arch_compute_cycles(store, project, &members, &sizes, &cycle_count, &total_cycles, &scanned,
+                            &truncated) != CBM_STORE_OK) {
+        return;
+    }
+    cbm_tree_scalar_int(sb, "call_edges_scanned", scanned);
+    cbm_tree_scalar_int(sb, "cycles_total", total_cycles);
+    if (truncated) {
+        cbm_tree_scalar_bool(sb, "cycles_partial", true);
+        cbm_tree_scalar_str(sb, "cycles_hint",
+                            "call graph exceeded the scan budget; cycle list may be incomplete");
+    }
+    if (total_cycles > cycle_count) {
+        char omitted[CBM_SZ_128];
+        snprintf(omitted, sizeof(omitted), "cycles_omitted: %d  (showing the first %d)\n",
+                 total_cycles - cycle_count, cycle_count);
+        cbm_sb_append(sb, omitted);
+    }
+    char header[CBM_SZ_128];
+    snprintf(header, sizeof(header),
+             "cycles: %d  (rows: size members; circular CALLS dependencies)\n", cycle_count);
+    cbm_sb_append(sb, header);
+    for (int cycle = 0; cycle < cycle_count; cycle++) {
+        arch_render_tree_cycle_row(sb, store, members[cycle], sizes[cycle]);
+        free(members[cycle]);
+    }
+    free(members);
+    free(sizes);
+}
+
+static void arch_render_json_metadata(yyjson_mut_doc *doc, yyjson_mut_val *root, cbm_store_t *store,
+                                      const char *project, bool default_summary, bool path_scoped,
+                                      const char *norm_path, int node_count, int edge_count) {
+    if (project) {
+        yyjson_mut_obj_add_str(doc, root, "project", project);
+    }
+    if (default_summary) {
+        yyjson_mut_obj_add_str(doc, root, "aspects_hint",
+                               "Summary view (default). More on request via aspects:[...] — "
+                               "structure, dependencies, routes, hotspots, boundaries, layers, "
+                               "clusters, file_tree — or [\"all\"] for everything.");
+    }
+    if (path_scoped) {
+        yyjson_mut_obj_add_str(doc, root, "path", norm_path);
+        yyjson_mut_obj_add_int(doc, root, "root_total_nodes",
+                               cbm_store_count_nodes(store, project));
+        yyjson_mut_obj_add_int(doc, root, "root_total_edges",
+                               cbm_store_count_edges(store, project));
+        yyjson_mut_obj_add_int(doc, root, "scoped_total_nodes", node_count);
+        yyjson_mut_obj_add_int(doc, root, "scoped_total_edges", edge_count);
+    }
+    yyjson_mut_obj_add_int(doc, root, "total_nodes", node_count);
+    yyjson_mut_obj_add_int(doc, root, "total_edges", edge_count);
+}
+
+static void arch_render_json_patterns(yyjson_mut_doc *doc, yyjson_mut_val *root, bool enabled,
+                                      const cbm_schema_info_t *schema) {
+    if (!enabled || schema->rel_pattern_count <= 0) {
+        return;
+    }
+    yyjson_mut_val *patterns = yyjson_mut_arr(doc);
+    for (int index = 0; index < schema->rel_pattern_count; index++) {
+        yyjson_mut_arr_add_str(doc, patterns, schema->rel_patterns[index]);
+    }
+    yyjson_mut_obj_add_val(doc, root, "relationship_patterns", patterns);
+}
+
+static void arch_render_json_tables(yyjson_mut_doc *doc, yyjson_mut_val *root,
+                                    yyjson_doc *aspects_doc, yyjson_val *aspects_arr,
+                                    const cbm_schema_info_t *schema,
+                                    const cbm_architecture_info_t *arch) {
+    static const char *const label_columns[] = {"label", "count"};
+    static const char *const type_columns[] = {"type", "count"};
+    static const char *const language_columns[] = {"language", "files"};
+    static const char *const package_columns[] = {"name", "nodes", "fan_in", "fan_out"};
+    static const char *const entry_columns[] = {"qn", "file"};
+    static const char *const route_columns[] = {"method", "path", "handler"};
+    static const char *const hotspot_columns[] = {"qn", "fan_in"};
+    static const char *const boundary_columns[] = {"from", "to", "calls"};
+    static const char *const service_columns[] = {"from", "to", "type", "count"};
+    static const char *const layer_columns[] = {"name", "layer", "reason"};
+    static const char *const cluster_columns[] = {"id",        "label",    "members",   "cohesion",
+                                                  "top_nodes", "packages", "edge_types"};
+    static const char *const file_columns[] = {"path", "type", "children"};
+    arch_json_rows(doc, root, "node_labels", aspect_wanted(aspects_doc, aspects_arr, "structure"),
+                   true, schema->node_label_count, label_columns, ARCH_NODE_LABEL_COLUMN_COUNT,
+                   schema->node_labels, sizeof(*schema->node_labels), arch_json_node_label);
+    arch_json_rows(doc, root, "edge_types", aspect_wanted(aspects_doc, aspects_arr, "dependencies"),
+                   true, schema->edge_type_count, type_columns, ARCH_EDGE_TYPE_COLUMN_COUNT,
+                   schema->edge_types, sizeof(*schema->edge_types), arch_json_edge_type);
+    arch_json_rows(doc, root, "languages", true, false, arch->language_count, language_columns,
+                   ARCH_LANGUAGE_COLUMN_COUNT, arch->languages, sizeof(*arch->languages),
+                   arch_json_language);
+    arch_json_rows(doc, root, "packages", true, false, arch->package_count, package_columns,
+                   ARCH_PACKAGE_COLUMN_COUNT, arch->packages, sizeof(*arch->packages),
+                   arch_json_package);
+    arch_json_rows(doc, root, "entry_points", true, false, arch->entry_point_count, entry_columns,
+                   ARCH_ENTRY_POINT_COLUMN_COUNT, arch->entry_points, sizeof(*arch->entry_points),
+                   arch_json_entry_point);
+    arch_json_rows(doc, root, "routes", true, false, arch->route_count, route_columns,
+                   ARCH_ROUTE_COLUMN_COUNT, arch->routes, sizeof(*arch->routes), arch_json_route);
+    arch_json_rows(doc, root, "hotspots", true, false, arch->hotspot_count, hotspot_columns,
+                   ARCH_HOTSPOT_COLUMN_COUNT, arch->hotspots, sizeof(*arch->hotspots),
+                   arch_json_hotspot);
+    arch_json_rows(doc, root, "boundaries", true, false, arch->boundary_count, boundary_columns,
+                   ARCH_BOUNDARY_COLUMN_COUNT, arch->boundaries, sizeof(*arch->boundaries),
+                   arch_json_boundary);
+    arch_json_rows(doc, root, "services", true, false, arch->service_count, service_columns,
+                   ARCH_SERVICE_COLUMN_COUNT, arch->services, sizeof(*arch->services),
+                   arch_json_service);
+    arch_json_rows(doc, root, "layers", true, false, arch->layer_count, layer_columns,
+                   ARCH_LAYER_COLUMN_COUNT, arch->layers, sizeof(*arch->layers), arch_json_layer);
+    arch_json_rows(doc, root, "clusters", true, false, arch->cluster_count, cluster_columns,
+                   ARCH_CLUSTER_COLUMN_COUNT, arch->clusters, sizeof(*arch->clusters),
+                   arch_json_cluster);
+    arch_json_rows(doc, root, "file_tree", true, false, arch->file_tree_count, file_columns,
+                   ARCH_FILE_TREE_COLUMN_COUNT, arch->file_tree, sizeof(*arch->file_tree),
+                   arch_json_file);
+}
+
+static void arch_render_json_cycles(yyjson_mut_doc *doc, yyjson_mut_val *root, cbm_store_t *store,
+                                    const char *project, yyjson_val *aspects_arr) {
+    if (!aspect_explicitly_named(aspects_arr, "cycles")) {
+        return;
+    }
+    int64_t **members = NULL;
+    int *sizes = NULL;
+    int cycle_count = 0;
+    int total_cycles = 0;
+    int scanned = 0;
+    bool truncated = false;
+    if (arch_compute_cycles(store, project, &members, &sizes, &cycle_count, &total_cycles, &scanned,
+                            &truncated) != CBM_STORE_OK) {
+        return;
+    }
+    yyjson_mut_obj_add_int(doc, root, "call_edges_scanned", scanned);
+    yyjson_mut_obj_add_int(doc, root, "cycles_total", total_cycles);
+    yyjson_mut_obj_add_bool(doc, root, "cycles_partial", truncated);
+    yyjson_mut_val *cycles = yyjson_mut_arr(doc);
+    for (int cycle = 0; cycle < cycle_count; cycle++) {
+        yyjson_mut_val *entry = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_int(doc, entry, "size", sizes[cycle]);
+        yyjson_mut_val *cycle_members = yyjson_mut_arr(doc);
+        int shown = sizes[cycle] < ARCH_SCC_MEMBERS_SHOWN ? sizes[cycle] : ARCH_SCC_MEMBERS_SHOWN;
+        for (int member = 0; member < shown; member++) {
+            char qualified_name[CBM_SZ_512];
+            arch_node_qn(store, members[cycle][member], qualified_name, sizeof(qualified_name));
+            yyjson_mut_arr_add_strcpy(doc, cycle_members, qualified_name);
+        }
+        yyjson_mut_obj_add_val(doc, entry, "members", cycle_members);
+        yyjson_mut_arr_add_val(cycles, entry);
+        free(members[cycle]);
+    }
+    yyjson_mut_obj_add_val(doc, root, "cycles", cycles);
+    free(members);
+    free(sizes);
+}
+
+typedef struct {
+    yyjson_doc *doc;
+    yyjson_val *array;
+    const char *values[MCP_COL_16];
+    int count;
+    bool default_summary;
+} arch_aspects_t;
+
+static void arch_aspects_dispose(arch_aspects_t *aspects) {
+    if (aspects->doc) {
+        yyjson_doc_free(aspects->doc);
+    }
+    *aspects = (arch_aspects_t){0};
+}
+
+static char *arch_aspects_unknown_error(const char *aspect) {
+    char valid_list[CBM_SZ_256];
+    size_t offset = 0;
+    for (int index = 0; VALID_ASPECTS[index] && offset < sizeof(valid_list); index++) {
+        int written = snprintf(valid_list + offset, sizeof(valid_list) - offset, "%s%s",
+                               index > 0 ? ", " : "", VALID_ASPECTS[index]);
+        if (written < 0) {
+            break;
+        }
+        offset += (size_t)written;
+    }
+    char message[CBM_SZ_512];
+    snprintf(message, sizeof(message), "Unknown aspect '%s'. Valid: %s.", aspect, valid_list);
+    return cbm_mcp_text_result(message, true);
+}
+
+static char *arch_aspects_init(const char *args, arch_aspects_t *aspects) {
+    *aspects = (arch_aspects_t){0};
+    yyjson_doc *args_doc = yyjson_read(args, strlen(args), 0);
+    if (args_doc) {
+        yyjson_val *value = yyjson_obj_get(yyjson_doc_get_root(args_doc), "aspects");
+        if (yyjson_is_arr(value)) {
+            aspects->doc = args_doc;
+            aspects->array = value;
+        } else {
+            yyjson_doc_free(args_doc);
+        }
+    }
+    if (aspects->array) {
+        size_t index;
+        size_t maximum;
+        yyjson_val *value;
+        yyjson_arr_foreach(aspects->array, index, maximum, value) {
+            const char *text = yyjson_get_str(value);
+            if (text && aspects->count < MCP_COL_16) {
+                aspects->values[aspects->count++] = text;
+            }
+        }
+    }
+    for (int index = 0; index < aspects->count; index++) {
+        if (!aspect_is_valid(aspects->values[index])) {
+            char *error = arch_aspects_unknown_error(aspects->values[index]);
+            arch_aspects_dispose(aspects);
+            return error;
+        }
+    }
+    if (aspects->count == 0) {
+        aspects->values[aspects->count++] = "languages";
+        aspects->values[aspects->count++] = "packages";
+        aspects->values[aspects->count++] = "entry_points";
+        aspects->default_summary = true;
+    }
+    return NULL;
+}
+
+static char *arch_render_tree_response(cbm_store_t *store, const char *project,
+                                       const arch_aspects_t *aspects,
+                                       const cbm_schema_info_t *schema,
+                                       const cbm_architecture_info_t *architecture,
+                                       bool path_scoped, const char *normalized_path,
+                                       int node_count, int edge_count) {
+    cbm_sb_t sb;
+    cbm_sb_init(&sb);
+    arch_render_tree_metadata(&sb, store, project, aspects->default_summary, path_scoped,
+                              normalized_path, node_count, edge_count);
+    arch_render_tree_tables(&sb, aspects->doc, aspects->array, schema, architecture);
+    arch_render_tree_cross_repo(&sb, schema);
+    arch_render_tree_cycles(&sb, store, project, aspects->array);
+    char *text = cbm_sb_finish(&sb);
+    char *result = cbm_mcp_text_result(text ? text : "out of memory", text == NULL);
+    free(text);
+    return result;
+}
+
+static char *arch_render_json_response(cbm_store_t *store, const char *project,
+                                       const arch_aspects_t *aspects,
+                                       const cbm_schema_info_t *schema,
+                                       const cbm_architecture_info_t *architecture,
+                                       bool path_scoped, const char *normalized_path,
+                                       int node_count, int edge_count) {
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *root = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+    arch_render_json_metadata(doc, root, store, project, aspects->default_summary, path_scoped,
+                              normalized_path, node_count, edge_count);
+    arch_render_json_tables(doc, root, aspects->doc, aspects->array, schema, architecture);
+    arch_render_json_patterns(doc, root, aspect_wanted(aspects->doc, aspects->array, "routes"),
+                              schema);
+    append_cross_repo_summary(doc, root, schema);
+    arch_render_json_cycles(doc, root, store, project, aspects->array);
+    char *json = yy_doc_to_str(doc);
+    yyjson_mut_doc_free(doc);
+    char *result = cbm_mcp_text_result(json, false);
+    free(json);
+    return result;
+}
+
+static char *arch_render_response(bool json_format, cbm_store_t *store, const char *project,
+                                  const arch_aspects_t *aspects, const cbm_schema_info_t *schema,
+                                  const cbm_architecture_info_t *architecture, bool path_scoped,
+                                  const char *normalized_path, int node_count, int edge_count) {
+    return json_format
+               ? arch_render_json_response(store, project, aspects, schema, architecture,
+                                           path_scoped, normalized_path, node_count, edge_count)
+               : arch_render_tree_response(store, project, aspects, schema, architecture,
+                                           path_scoped, normalized_path, node_count, edge_count);
+}
+
 static char *handle_get_architecture(cbm_mcp_server_t *srv, const char *args) {
     char *project = get_project_arg(args);
     cbm_store_t *store = resolve_store(srv, project);
@@ -5351,81 +5993,13 @@ static char *handle_get_architecture(cbm_mcp_server_t *srv, const char *args) {
         return not_indexed;
     }
 
-    /* Parse aspects array from args */
-    yyjson_doc *aspects_doc = NULL;
-    yyjson_val *aspects_arr = NULL;
-    {
-        yyjson_doc *args_doc = yyjson_read(args, strlen(args), 0);
-        if (args_doc) {
-            yyjson_val *aval = yyjson_obj_get(yyjson_doc_get_root(args_doc), "aspects");
-            if (yyjson_is_arr(aval)) {
-                aspects_doc = args_doc; /* keep alive */
-                aspects_arr = aval;
-            } else {
-                yyjson_doc_free(args_doc);
-            }
-        }
+    arch_aspects_t aspects;
+    char *aspect_error = arch_aspects_init(args, &aspects);
+    if (aspect_error) {
+        free(project);
+        free(scope_path);
+        return aspect_error;
     }
-
-    /* Build a C string array from aspects for cbm_store_get_architecture.
-     * Strings point into aspects_doc memory so aspects_doc must outlive this array. */
-    const char *aspects_strs[MCP_COL_16];
-    int aspects_strs_count = 0;
-    if (aspects_arr) {
-        size_t aspect_idx;
-        size_t aspect_max;
-        yyjson_val *aspect_val;
-        yyjson_arr_foreach(aspects_arr, aspect_idx, aspect_max, aspect_val) {
-            const char *s = yyjson_get_str(aspect_val);
-            if (s && aspects_strs_count < MCP_COL_16) {
-                aspects_strs[aspects_strs_count++] = s;
-            }
-        }
-    }
-
-    /* Server-side validation: reject unknown aspect tokens with an isError
-     * result listing the valid values. The JSON-Schema enum is advisory —
-     * many MCP clients do not validate arguments against tool schemas — so
-     * without this check a typo degraded to a silent near-empty payload. */
-    for (int i = 0; i < aspects_strs_count; i++) {
-        if (!aspect_is_valid(aspects_strs[i])) {
-            char valid_list[CBM_SZ_256];
-            size_t off = 0;
-            for (int j = 0; VALID_ASPECTS[j] && off < sizeof(valid_list); j++) {
-                int n = snprintf(valid_list + off, sizeof(valid_list) - off, "%s%s",
-                                 j > 0 ? ", " : "", VALID_ASPECTS[j]);
-                if (n < 0) {
-                    break;
-                }
-                off += (size_t)n;
-            }
-            char msg[CBM_SZ_512];
-            snprintf(msg, sizeof(msg), "Unknown aspect '%s'. Valid: %s.", aspects_strs[i],
-                     valid_list);
-            char *err = cbm_mcp_text_result(msg, true);
-            free(project);
-            free(scope_path);
-            if (aspects_doc) {
-                yyjson_doc_free(aspects_doc);
-            }
-            return err;
-        }
-    }
-
-    /* Default (no aspects) = compact summary. The old default rendered ALL
-     * aspects including the full file_tree — ~94KB (~23K tokens) on a
-     * mid-size repo, a context bomb for the LLM consumers. Explicit
-     * aspects (or ["all"]) keep full access to every section. */
-    bool default_summary = false;
-    if (aspects_strs_count == 0) {
-        /* NOT "overview" — that means everything-except-file_tree. Totals and
-         * node_labels/edge_types counts are always emitted alongside. */
-        aspects_strs[aspects_strs_count++] = "languages";
-        aspects_strs[aspects_strs_count++] = "packages";
-        aspects_strs[aspects_strs_count++] = "entry_points";
-        default_summary = true;
-    }
-
     cbm_schema_info_t schema = {0};
     /* Counts-only: this handler renders label/type counts but never property
      * keys, and full key discovery json_each-scans every row (seconds-to-
@@ -5433,7 +6007,7 @@ static char *handle_get_architecture(cbm_mcp_server_t *srv, const char *args) {
     cbm_store_get_schema_counts_scoped(store, project, scope_path, &schema);
 
     cbm_architecture_info_t arch = {0};
-    cbm_store_get_architecture(store, project, scope_path, aspects_strs, aspects_strs_count, &arch);
+    cbm_store_get_architecture(store, project, scope_path, aspects.values, aspects.count, &arch);
 
     int node_count = cbm_store_count_nodes_scoped(store, project, scope_path);
     int edge_count = cbm_store_count_edges_scoped(store, project, scope_path);
@@ -5446,541 +6020,13 @@ static char *handle_get_architecture(cbm_mcp_server_t *srv, const char *args) {
     bool arch_legacy_json = arch_format && strcmp(arch_format, "json") == 0;
     free(arch_format);
 
-    if (!arch_legacy_json) {
-        cbm_sb_t sb;
-        cbm_sb_init(&sb);
-        if (project) {
-            cbm_tree_scalar_str(&sb, "project", project);
-        }
-        if (default_summary) {
-            cbm_tree_scalar_str(&sb, "aspects_hint",
-                                "Summary view (default). More on request via aspects:[...] — "
-                                "structure, dependencies, routes, hotspots, boundaries, layers, "
-                                "clusters, file_tree — or [\"all\"] for everything.");
-        }
-        if (path_scoped) {
-            cbm_tree_scalar_str(&sb, "path", norm_path);
-            cbm_tree_scalar_int(&sb, "root_total_nodes", cbm_store_count_nodes(store, project));
-            cbm_tree_scalar_int(&sb, "root_total_edges", cbm_store_count_edges(store, project));
-            cbm_tree_scalar_int(&sb, "scoped_total_nodes", node_count);
-            cbm_tree_scalar_int(&sb, "scoped_total_edges", edge_count);
-        }
-        cbm_tree_scalar_int(&sb, "total_nodes", node_count);
-        cbm_tree_scalar_int(&sb, "total_edges", edge_count);
-
-        if (aspect_wanted(aspects_doc, aspects_arr, "structure") && schema.node_label_count > 0) {
-            static const char *const lcols[] = {"label", "count"};
-            cbm_tree_table_header(&sb, "node_labels", schema.node_label_count, lcols,
-                                  ARCH_NODE_LABEL_COLUMN_COUNT);
-            for (int i = 0; i < schema.node_label_count; i++) {
-                cbm_tree_row_begin(&sb);
-                cbm_tree_cell_str(&sb, schema.node_labels[i].label, true);
-                cbm_tree_cell_int(&sb, schema.node_labels[i].count, false);
-                cbm_tree_row_end(&sb);
-            }
-        }
-        if (aspect_wanted(aspects_doc, aspects_arr, "dependencies") && schema.edge_type_count > 0) {
-            static const char *const tcols[] = {"type", "count"};
-            cbm_tree_table_header(&sb, "edge_types", schema.edge_type_count, tcols,
-                                  ARCH_EDGE_TYPE_COLUMN_COUNT);
-            for (int i = 0; i < schema.edge_type_count; i++) {
-                cbm_tree_row_begin(&sb);
-                cbm_tree_cell_str(&sb, schema.edge_types[i].type, true);
-                cbm_tree_cell_int(&sb, schema.edge_types[i].count, false);
-                cbm_tree_row_end(&sb);
-            }
-        }
-        if (aspect_wanted(aspects_doc, aspects_arr, "routes") && schema.rel_pattern_count > 0) {
-            static const char *const pcols[] = {"pattern"};
-            cbm_tree_table_header(&sb, "relationship_patterns", schema.rel_pattern_count, pcols,
-                                  ARCH_RELATIONSHIP_PATTERN_COLUMN_COUNT);
-            for (int i = 0; i < schema.rel_pattern_count; i++) {
-                cbm_tree_row_begin(&sb);
-                cbm_tree_cell_str(&sb, schema.rel_patterns[i], true);
-                cbm_tree_row_end(&sb);
-            }
-        }
-        if (arch.language_count > 0) {
-            static const char *const gcols[] = {"language", "files"};
-            cbm_tree_table_header(&sb, "languages", arch.language_count, gcols,
-                                  ARCH_LANGUAGE_COLUMN_COUNT);
-            for (int i = 0; i < arch.language_count; i++) {
-                cbm_tree_row_begin(&sb);
-                cbm_tree_cell_str(&sb, arch.languages[i].language, true);
-                cbm_tree_cell_int(&sb, arch.languages[i].file_count, false);
-                cbm_tree_row_end(&sb);
-            }
-        }
-        if (arch.package_count > 0) {
-            static const char *const kcols[] = {"name", "nodes", "fan_in", "fan_out"};
-            cbm_tree_table_header(&sb, "packages", arch.package_count, kcols,
-                                  ARCH_PACKAGE_COLUMN_COUNT);
-            for (int i = 0; i < arch.package_count; i++) {
-                cbm_tree_row_begin(&sb);
-                cbm_tree_cell_str(&sb, arch.packages[i].name, true);
-                cbm_tree_cell_int(&sb, arch.packages[i].node_count, false);
-                cbm_tree_cell_int(&sb, arch.packages[i].fan_in, false);
-                cbm_tree_cell_int(&sb, arch.packages[i].fan_out, false);
-                cbm_tree_row_end(&sb);
-            }
-        }
-        if (arch.entry_point_count > 0) {
-            /* qn only — `name` is its last segment. */
-            static const char *const ecols[] = {"qn", "file"};
-            cbm_tree_table_header(&sb, "entry_points", arch.entry_point_count, ecols,
-                                  ARCH_ENTRY_POINT_COLUMN_COUNT);
-            for (int i = 0; i < arch.entry_point_count; i++) {
-                cbm_tree_row_begin(&sb);
-                cbm_tree_cell_str(&sb, arch.entry_points[i].qualified_name, true);
-                cbm_tree_cell_str(&sb, arch.entry_points[i].file, false);
-                cbm_tree_row_end(&sb);
-            }
-        }
-        if (arch.route_count > 0) {
-            static const char *const rcols[] = {"method", "path", "handler"};
-            cbm_tree_table_header(&sb, "routes", arch.route_count, rcols, ARCH_ROUTE_COLUMN_COUNT);
-            for (int i = 0; i < arch.route_count; i++) {
-                cbm_tree_row_begin(&sb);
-                cbm_tree_cell_str(&sb, arch.routes[i].method, true);
-                cbm_tree_cell_str(&sb, arch.routes[i].path, false);
-                cbm_tree_cell_str(&sb, arch.routes[i].handler, false);
-                cbm_tree_row_end(&sb);
-            }
-        }
-        if (arch.hotspot_count > 0) {
-            static const char *const hcols[] = {"qn", "fan_in"};
-            cbm_tree_table_header(&sb, "hotspots", arch.hotspot_count, hcols,
-                                  ARCH_HOTSPOT_COLUMN_COUNT);
-            for (int i = 0; i < arch.hotspot_count; i++) {
-                cbm_tree_row_begin(&sb);
-                cbm_tree_cell_str(&sb, arch.hotspots[i].qualified_name, true);
-                cbm_tree_cell_int(&sb, arch.hotspots[i].fan_in, false);
-                cbm_tree_row_end(&sb);
-            }
-        }
-        if (arch.boundary_count > 0) {
-            static const char *const bcols[] = {"from", "to", "calls"};
-            cbm_tree_table_header(&sb, "boundaries", arch.boundary_count, bcols,
-                                  ARCH_BOUNDARY_COLUMN_COUNT);
-            for (int i = 0; i < arch.boundary_count; i++) {
-                cbm_tree_row_begin(&sb);
-                cbm_tree_cell_str(&sb, arch.boundaries[i].from, true);
-                cbm_tree_cell_str(&sb, arch.boundaries[i].to, false);
-                cbm_tree_cell_int(&sb, arch.boundaries[i].call_count, false);
-                cbm_tree_row_end(&sb);
-            }
-        }
-        if (arch.service_count > 0) {
-            static const char *const scols[] = {"from", "to", "type", "count"};
-            cbm_tree_table_header(&sb, "services", arch.service_count, scols,
-                                  ARCH_SERVICE_COLUMN_COUNT);
-            for (int i = 0; i < arch.service_count; i++) {
-                cbm_tree_row_begin(&sb);
-                cbm_tree_cell_str(&sb, arch.services[i].from, true);
-                cbm_tree_cell_str(&sb, arch.services[i].to, false);
-                cbm_tree_cell_str(&sb, arch.services[i].type, false);
-                cbm_tree_cell_int(&sb, arch.services[i].count, false);
-                cbm_tree_row_end(&sb);
-            }
-        }
-        if (arch.layer_count > 0) {
-            static const char *const ycols[] = {"name", "layer", "reason"};
-            cbm_tree_table_header(&sb, "layers", arch.layer_count, ycols, ARCH_LAYER_COLUMN_COUNT);
-            for (int i = 0; i < arch.layer_count; i++) {
-                cbm_tree_row_begin(&sb);
-                cbm_tree_cell_str(&sb, arch.layers[i].name, true);
-                cbm_tree_cell_str(&sb, arch.layers[i].layer, false);
-                cbm_tree_cell_str(&sb, arch.layers[i].reason, false);
-                cbm_tree_row_end(&sb);
-            }
-        }
-        if (arch.cluster_count > 0) {
-            /* Nested lists become ';'-joined cells. */
-            static const char *const ccols[] = {"id",        "label",    "members",   "cohesion",
-                                                "top_nodes", "packages", "edge_types"};
-            cbm_tree_table_header(&sb, "clusters", arch.cluster_count, ccols,
-                                  ARCH_CLUSTER_COLUMN_COUNT);
-            for (int i = 0; i < arch.cluster_count; i++) {
-                const cbm_cluster_info_t *c = &arch.clusters[i];
-                char joined[CBM_SZ_1K];
-                cbm_tree_row_begin(&sb);
-                cbm_tree_cell_int(&sb, c->id, true);
-                cbm_tree_cell_str(&sb, c->label, false);
-                cbm_tree_cell_int(&sb, c->members, false);
-                cbm_tree_cell_real(&sb, c->cohesion, false);
-                arch_join_list(joined, sizeof(joined), c->top_nodes, c->top_node_count);
-                cbm_tree_cell_str(&sb, joined, false);
-                arch_join_list(joined, sizeof(joined), c->packages, c->package_count);
-                cbm_tree_cell_str(&sb, joined, false);
-                arch_join_list(joined, sizeof(joined), c->edge_types, c->edge_type_count);
-                cbm_tree_cell_str(&sb, joined, false);
-                cbm_tree_row_end(&sb);
-            }
-        }
-        if (arch.file_tree_count > 0) {
-            static const char *const fcols[] = {"path", "type", "children"};
-            cbm_tree_table_header(&sb, "file_tree", arch.file_tree_count, fcols,
-                                  ARCH_FILE_TREE_COLUMN_COUNT);
-            for (int i = 0; i < arch.file_tree_count; i++) {
-                cbm_tree_row_begin(&sb);
-                cbm_tree_cell_str(&sb, arch.file_tree[i].path, true);
-                cbm_tree_cell_str(&sb, arch.file_tree[i].type, false);
-                cbm_tree_cell_int(&sb, arch.file_tree[i].children, false);
-                cbm_tree_row_end(&sb);
-            }
-        }
-        /* Cross-repo edge summary (mirrors append_cross_repo_summary). */
-        {
-            static const char *const cross_types[] = {"CROSS_HTTP_CALLS",    "CROSS_ASYNC_CALLS",
-                                                      "CROSS_CHANNEL",       "CROSS_GRPC_CALLS",
-                                                      "CROSS_GRAPHQL_CALLS", "CROSS_TRPC_CALLS"};
-            int cross_total = 0;
-            for (int t = 0; t < (int)(sizeof(cross_types) / sizeof(cross_types[0])); t++) {
-                for (int i = 0; i < schema.edge_type_count; i++) {
-                    if (strcmp(schema.edge_types[i].type, cross_types[t]) == 0) {
-                        cross_total += schema.edge_types[i].count;
-                        break;
-                    }
-                }
-            }
-            if (cross_total > 0) {
-                cbm_tree_scalar_int(&sb, "cross_repo_links_total", cross_total);
-            }
-        }
-
-        /* cycles: circular CALLS dependencies (SCCs of size > 1) — opt-in, it
-         * scans the whole call graph. A quotient/condensation view. */
-        if (aspect_explicitly_named(aspects_arr, "cycles")) {
-            int64_t **members = NULL;
-            int *sizes = NULL;
-            int ncyc = 0;
-            int total_cyc = 0;
-            int scanned = 0;
-            bool etrunc = false;
-            if (arch_compute_cycles(store, project, &members, &sizes, &ncyc, &total_cyc, &scanned,
-                                    &etrunc) == CBM_STORE_OK) {
-                cbm_tree_scalar_int(&sb, "call_edges_scanned", scanned);
-                cbm_tree_scalar_int(&sb, "cycles_total", total_cyc);
-                if (etrunc) {
-                    cbm_tree_scalar_bool(&sb, "cycles_partial", true);
-                    cbm_tree_scalar_str(&sb, "cycles_hint",
-                                        "call graph exceeded the scan budget; cycle list may be "
-                                        "incomplete");
-                }
-                if (total_cyc > ncyc) {
-                    char omit[CBM_SZ_128];
-                    snprintf(omit, sizeof(omit), "cycles_omitted: %d  (showing the first %d)\n",
-                             total_cyc - ncyc, ncyc);
-                    cbm_sb_append(&sb, omit);
-                }
-                char hdr[CBM_SZ_128];
-                snprintf(hdr, sizeof(hdr),
-                         "cycles: %d  (rows: size members; circular CALLS dependencies)\n", ncyc);
-                cbm_sb_append(&sb, hdr);
-                for (int c = 0; c < ncyc; c++) {
-                    char row[CBM_SZ_2K];
-                    int off = snprintf(row, sizeof(row), "  %d ", sizes[c]);
-                    bool clipped = sizes[c] > ARCH_SCC_MEMBERS_SHOWN;
-                    int show = clipped ? ARCH_SCC_MEMBERS_SHOWN : sizes[c];
-                    for (int m = 0;
-                         m < show && off < (int)sizeof(row) - ARCH_CYCLE_ROW_APPEND_RESERVE; m++) {
-                        char qn[CBM_SZ_512];
-                        arch_node_qn(store, members[c][m], qn, sizeof(qn));
-                        // Loop guard above holds off in [0, sizeof(row) - 2).
-                        off += snprintf(row + off, sizeof(row) - (size_t)off, "%s%s", m ? ";" : "",
-                                        qn);
-                    }
-                    if (clipped && off < (int)sizeof(row) - ARCH_CYCLE_TRUNCATION_RESERVE) {
-                        // Guard above holds off in [0, sizeof(row) - 8).
-                        snprintf(row + off, sizeof(row) - (size_t)off, ";+%d", sizes[c] - show);
-                    }
-                    cbm_sb_append(&sb, row);
-                    cbm_sb_append(&sb, "\n");
-                    free(members[c]);
-                }
-                free(members);
-                free(sizes);
-            }
-        }
-
-        cbm_store_architecture_free(&arch);
-        cbm_store_schema_free(&schema);
-        if (aspects_doc) {
-            yyjson_doc_free(aspects_doc);
-        }
-        free(project);
-        free(scope_path);
-        char *text = cbm_sb_finish(&sb);
-        char *result = cbm_mcp_text_result(text ? text : "out of memory", text == NULL);
-        free(text);
-        return result;
-    }
-
-    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-    yyjson_mut_val *root = yyjson_mut_obj(doc);
-    yyjson_mut_doc_set_root(doc, root);
-
-    if (project) {
-        yyjson_mut_obj_add_str(doc, root, "project", project);
-    }
-    if (default_summary) {
-        yyjson_mut_obj_add_str(doc, root, "aspects_hint",
-                               "Summary view (default). More on request via aspects:[...] — "
-                               "structure, dependencies, routes, hotspots, boundaries, layers, "
-                               "clusters, file_tree — or [\"all\"] for everything.");
-    }
-    if (path_scoped) {
-        yyjson_mut_obj_add_str(doc, root, "path", norm_path);
-        int root_nodes = cbm_store_count_nodes(store, project);
-        int root_edges = cbm_store_count_edges(store, project);
-        yyjson_mut_obj_add_int(doc, root, "root_total_nodes", root_nodes);
-        yyjson_mut_obj_add_int(doc, root, "root_total_edges", root_edges);
-        yyjson_mut_obj_add_int(doc, root, "scoped_total_nodes", node_count);
-        yyjson_mut_obj_add_int(doc, root, "scoped_total_edges", edge_count);
-    }
-    yyjson_mut_obj_add_int(doc, root, "total_nodes", node_count);
-    yyjson_mut_obj_add_int(doc, root, "total_edges", edge_count);
-
-    /* Every section below is the json-tree model: {cols, rows[[...]]} —
-     * mirrors the text tree tables one-for-one. */
-    if (aspect_wanted(aspects_doc, aspects_arr, "structure")) {
-        static const char *const lcols[] = {"label", "count"};
-        yyjson_mut_val *rows =
-            arch_json_section(doc, root, "node_labels", lcols, ARCH_NODE_LABEL_COLUMN_COUNT);
-        for (int i = 0; i < schema.node_label_count; i++) {
-            yyjson_mut_val *row = yyjson_mut_arr(doc);
-            yyjson_mut_arr_add_strcpy(doc, row, schema.node_labels[i].label);
-            yyjson_mut_arr_add_int(doc, row, schema.node_labels[i].count);
-            yyjson_mut_arr_add_val(rows, row);
-        }
-    }
-
-    if (aspect_wanted(aspects_doc, aspects_arr, "dependencies")) {
-        static const char *const tcols[] = {"type", "count"};
-        yyjson_mut_val *rows =
-            arch_json_section(doc, root, "edge_types", tcols, ARCH_EDGE_TYPE_COLUMN_COUNT);
-        for (int i = 0; i < schema.edge_type_count; i++) {
-            yyjson_mut_val *row = yyjson_mut_arr(doc);
-            yyjson_mut_arr_add_strcpy(doc, row, schema.edge_types[i].type);
-            yyjson_mut_arr_add_int(doc, row, schema.edge_types[i].count);
-            yyjson_mut_arr_add_val(rows, row);
-        }
-    }
-
-    /* Relationship patterns (a plain list — no columns to factor) */
-    if (aspect_wanted(aspects_doc, aspects_arr, "routes") && schema.rel_pattern_count > 0) {
-        yyjson_mut_val *pats = yyjson_mut_arr(doc);
-        for (int i = 0; i < schema.rel_pattern_count; i++) {
-            yyjson_mut_arr_add_str(doc, pats, schema.rel_patterns[i]);
-        }
-        yyjson_mut_obj_add_val(doc, root, "relationship_patterns", pats);
-    }
-
-    if (arch.language_count > 0) {
-        static const char *const gcols[] = {"language", "files"};
-        yyjson_mut_val *rows =
-            arch_json_section(doc, root, "languages", gcols, ARCH_LANGUAGE_COLUMN_COUNT);
-        for (int i = 0; i < arch.language_count; i++) {
-            yyjson_mut_val *row = yyjson_mut_arr(doc);
-            yyjson_mut_arr_add_strcpy(doc, row,
-                                      arch.languages[i].language ? arch.languages[i].language : "");
-            yyjson_mut_arr_add_int(doc, row, arch.languages[i].file_count);
-            yyjson_mut_arr_add_val(rows, row);
-        }
-    }
-
-    if (arch.package_count > 0) {
-        static const char *const kcols[] = {"name", "nodes", "fan_in", "fan_out"};
-        yyjson_mut_val *rows =
-            arch_json_section(doc, root, "packages", kcols, ARCH_PACKAGE_COLUMN_COUNT);
-        for (int i = 0; i < arch.package_count; i++) {
-            yyjson_mut_val *row = yyjson_mut_arr(doc);
-            yyjson_mut_arr_add_strcpy(doc, row, arch.packages[i].name ? arch.packages[i].name : "");
-            yyjson_mut_arr_add_int(doc, row, arch.packages[i].node_count);
-            yyjson_mut_arr_add_int(doc, row, arch.packages[i].fan_in);
-            yyjson_mut_arr_add_int(doc, row, arch.packages[i].fan_out);
-            yyjson_mut_arr_add_val(rows, row);
-        }
-    }
-
-    if (arch.entry_point_count > 0) {
-        static const char *const ecols[] = {"qn", "file"};
-        yyjson_mut_val *rows =
-            arch_json_section(doc, root, "entry_points", ecols, ARCH_ENTRY_POINT_COLUMN_COUNT);
-        for (int i = 0; i < arch.entry_point_count; i++) {
-            yyjson_mut_val *row = yyjson_mut_arr(doc);
-            yyjson_mut_arr_add_strcpy(
-                doc, row,
-                arch.entry_points[i].qualified_name ? arch.entry_points[i].qualified_name : "");
-            yyjson_mut_arr_add_strcpy(doc, row,
-                                      arch.entry_points[i].file ? arch.entry_points[i].file : "");
-            yyjson_mut_arr_add_val(rows, row);
-        }
-    }
-
-    if (arch.route_count > 0) {
-        static const char *const rcols[] = {"method", "path", "handler"};
-        yyjson_mut_val *rows =
-            arch_json_section(doc, root, "routes", rcols, ARCH_ROUTE_COLUMN_COUNT);
-        for (int i = 0; i < arch.route_count; i++) {
-            yyjson_mut_val *row = yyjson_mut_arr(doc);
-            yyjson_mut_arr_add_strcpy(doc, row, arch.routes[i].method ? arch.routes[i].method : "");
-            yyjson_mut_arr_add_strcpy(doc, row, arch.routes[i].path ? arch.routes[i].path : "");
-            yyjson_mut_arr_add_strcpy(doc, row,
-                                      arch.routes[i].handler ? arch.routes[i].handler : "");
-            yyjson_mut_arr_add_val(rows, row);
-        }
-    }
-
-    if (arch.hotspot_count > 0) {
-        static const char *const hcols[] = {"qn", "fan_in"};
-        yyjson_mut_val *rows =
-            arch_json_section(doc, root, "hotspots", hcols, ARCH_HOTSPOT_COLUMN_COUNT);
-        for (int i = 0; i < arch.hotspot_count; i++) {
-            yyjson_mut_val *row = yyjson_mut_arr(doc);
-            yyjson_mut_arr_add_strcpy(
-                doc, row, arch.hotspots[i].qualified_name ? arch.hotspots[i].qualified_name : "");
-            yyjson_mut_arr_add_int(doc, row, arch.hotspots[i].fan_in);
-            yyjson_mut_arr_add_val(rows, row);
-        }
-    }
-
-    if (arch.boundary_count > 0) {
-        static const char *const bcols[] = {"from", "to", "calls"};
-        yyjson_mut_val *rows =
-            arch_json_section(doc, root, "boundaries", bcols, ARCH_BOUNDARY_COLUMN_COUNT);
-        for (int i = 0; i < arch.boundary_count; i++) {
-            yyjson_mut_val *row = yyjson_mut_arr(doc);
-            yyjson_mut_arr_add_strcpy(doc, row,
-                                      arch.boundaries[i].from ? arch.boundaries[i].from : "");
-            yyjson_mut_arr_add_strcpy(doc, row, arch.boundaries[i].to ? arch.boundaries[i].to : "");
-            yyjson_mut_arr_add_int(doc, row, arch.boundaries[i].call_count);
-            yyjson_mut_arr_add_val(rows, row);
-        }
-    }
-
-    if (arch.service_count > 0) {
-        static const char *const scols[] = {"from", "to", "type", "count"};
-        yyjson_mut_val *rows =
-            arch_json_section(doc, root, "services", scols, ARCH_SERVICE_COLUMN_COUNT);
-        for (int i = 0; i < arch.service_count; i++) {
-            yyjson_mut_val *row = yyjson_mut_arr(doc);
-            yyjson_mut_arr_add_strcpy(doc, row, arch.services[i].from ? arch.services[i].from : "");
-            yyjson_mut_arr_add_strcpy(doc, row, arch.services[i].to ? arch.services[i].to : "");
-            yyjson_mut_arr_add_strcpy(doc, row, arch.services[i].type ? arch.services[i].type : "");
-            yyjson_mut_arr_add_int(doc, row, arch.services[i].count);
-            yyjson_mut_arr_add_val(rows, row);
-        }
-    }
-
-    if (arch.layer_count > 0) {
-        static const char *const ycols[] = {"name", "layer", "reason"};
-        yyjson_mut_val *rows =
-            arch_json_section(doc, root, "layers", ycols, ARCH_LAYER_COLUMN_COUNT);
-        for (int i = 0; i < arch.layer_count; i++) {
-            yyjson_mut_val *row = yyjson_mut_arr(doc);
-            yyjson_mut_arr_add_strcpy(doc, row, arch.layers[i].name ? arch.layers[i].name : "");
-            yyjson_mut_arr_add_strcpy(doc, row, arch.layers[i].layer ? arch.layers[i].layer : "");
-            yyjson_mut_arr_add_strcpy(doc, row, arch.layers[i].reason ? arch.layers[i].reason : "");
-            yyjson_mut_arr_add_val(rows, row);
-        }
-    }
-
-    if (arch.cluster_count > 0) {
-        /* Nested lists stay nested arrays within the row (tree-json). */
-        static const char *const ccols[] = {"id",        "label",    "members",   "cohesion",
-                                            "top_nodes", "packages", "edge_types"};
-        yyjson_mut_val *rows =
-            arch_json_section(doc, root, "clusters", ccols, ARCH_CLUSTER_COLUMN_COUNT);
-        for (int i = 0; i < arch.cluster_count; i++) {
-            const cbm_cluster_info_t *c = &arch.clusters[i];
-            yyjson_mut_val *row = yyjson_mut_arr(doc);
-            yyjson_mut_arr_add_int(doc, row, c->id);
-            yyjson_mut_arr_add_strcpy(doc, row, c->label);
-            yyjson_mut_arr_add_int(doc, row, c->members);
-            yyjson_mut_arr_add_real(doc, row, c->cohesion);
-            yyjson_mut_val *top = yyjson_mut_arr(doc);
-            for (int j = 0; j < c->top_node_count; j++) {
-                yyjson_mut_arr_add_str(doc, top, c->top_nodes[j] ? c->top_nodes[j] : "");
-            }
-            yyjson_mut_arr_add_val(row, top);
-            yyjson_mut_val *pkgs = yyjson_mut_arr(doc);
-            for (int j = 0; j < c->package_count; j++) {
-                yyjson_mut_arr_add_str(doc, pkgs, c->packages[j] ? c->packages[j] : "");
-            }
-            yyjson_mut_arr_add_val(row, pkgs);
-            yyjson_mut_val *etypes = yyjson_mut_arr(doc);
-            for (int j = 0; j < c->edge_type_count; j++) {
-                yyjson_mut_arr_add_str(doc, etypes, c->edge_types[j] ? c->edge_types[j] : "");
-            }
-            yyjson_mut_arr_add_val(row, etypes);
-            yyjson_mut_arr_add_val(rows, row);
-        }
-    }
-
-    if (arch.file_tree_count > 0) {
-        static const char *const fcols[] = {"path", "type", "children"};
-        yyjson_mut_val *rows =
-            arch_json_section(doc, root, "file_tree", fcols, ARCH_FILE_TREE_COLUMN_COUNT);
-        for (int i = 0; i < arch.file_tree_count; i++) {
-            yyjson_mut_val *row = yyjson_mut_arr(doc);
-            yyjson_mut_arr_add_strcpy(doc, row,
-                                      arch.file_tree[i].path ? arch.file_tree[i].path : "");
-            yyjson_mut_arr_add_strcpy(doc, row,
-                                      arch.file_tree[i].type ? arch.file_tree[i].type : "");
-            yyjson_mut_arr_add_int(doc, row, arch.file_tree[i].children);
-            yyjson_mut_arr_add_val(rows, row);
-        }
-    }
-
-    append_cross_repo_summary(doc, root, &schema);
-
-    /* cycles: SCCs of size > 1 in the CALLS graph (same model as tree). */
-    if (aspect_explicitly_named(aspects_arr, "cycles")) {
-        int64_t **members = NULL;
-        int *sizes = NULL;
-        int ncyc = 0;
-        int total_cyc = 0;
-        int scanned = 0;
-        bool etrunc = false;
-        if (arch_compute_cycles(store, project, &members, &sizes, &ncyc, &total_cyc, &scanned,
-                                &etrunc) == CBM_STORE_OK) {
-            yyjson_mut_obj_add_int(doc, root, "call_edges_scanned", scanned);
-            yyjson_mut_obj_add_int(doc, root, "cycles_total", total_cyc);
-            yyjson_mut_obj_add_bool(doc, root, "cycles_partial", etrunc);
-            yyjson_mut_val *cyc = yyjson_mut_arr(doc);
-            for (int c = 0; c < ncyc; c++) {
-                yyjson_mut_val *o = yyjson_mut_obj(doc);
-                yyjson_mut_obj_add_int(doc, o, "size", sizes[c]);
-                yyjson_mut_val *mem = yyjson_mut_arr(doc);
-                int show = sizes[c] < ARCH_SCC_MEMBERS_SHOWN ? sizes[c] : ARCH_SCC_MEMBERS_SHOWN;
-                for (int m = 0; m < show; m++) {
-                    char qn[CBM_SZ_512];
-                    arch_node_qn(store, members[c][m], qn, sizeof(qn));
-                    yyjson_mut_arr_add_strcpy(doc, mem, qn);
-                }
-                yyjson_mut_obj_add_val(doc, o, "members", mem);
-                yyjson_mut_arr_add_val(cyc, o);
-                free(members[c]);
-            }
-            yyjson_mut_obj_add_val(doc, root, "cycles", cyc);
-            free(members);
-            free(sizes);
-        }
-    }
-
-    char *json = yy_doc_to_str(doc);
-    yyjson_mut_doc_free(doc);
+    char *result = arch_render_response(arch_legacy_json, store, project, &aspects, &schema, &arch,
+                                        path_scoped, norm_path, node_count, edge_count);
     cbm_store_architecture_free(&arch);
     cbm_store_schema_free(&schema);
-    if (aspects_doc) {
-        yyjson_doc_free(aspects_doc);
-    }
+    arch_aspects_dispose(&aspects);
     free(project);
     free(scope_path);
-
-    char *result = cbm_mcp_text_result(json, false);
-    free(json);
     return result;
 }
 
@@ -6762,7 +6808,8 @@ static void bfs_tree_table_add_row(cbm_sb_t *output, cbm_traverse_result_t *tr,
     char row[CBM_SZ_512];
     const char *local_name = bfs_tree_local_name(qualified_name, prefix_length);
     const char *evidence_class = NULL;
-    double evidence_confidence = -1.0;
+    static const double no_evidence_confidence = -1.0;
+    double evidence_confidence = no_evidence_confidence;
     bool has_evidence =
         include_evidence &&
         bfs_edge_evidence_for_hop(tr, visited->node.id, &evidence_class, &evidence_confidence);
@@ -6813,8 +6860,8 @@ static void bfs_to_tree_table(cbm_sb_t *sb, const char *key, cbm_traverse_result
 static int clamp_mcp_depth(int depth, const char *tool) {
     int cap = cbm_mcp_max_depth();
     if (depth > cap) {
-        char req_buf[16];
-        char cap_buf[16];
+        char req_buf[MCP_INTEGER_TEXT_CAPACITY];
+        char cap_buf[MCP_INTEGER_TEXT_CAPACITY];
         snprintf(req_buf, sizeof(req_buf), "%d", depth);
         snprintf(cap_buf, sizeof(cap_buf), "%d", cap);
         cbm_log_warn("mcp.depth_capped", "tool", tool, "requested", req_buf, "cap", cap_buf);
@@ -6943,7 +6990,7 @@ static char *trace_find_target_nodes(cbm_store_t *store, const trace_request_t *
             *nodes_out = malloc(sizeof(**nodes_out));
             if (*nodes_out) {
                 (*nodes_out)[0] = qualified_node;
-                *node_count_out = 1;
+                *node_count_out = MCP_SINGLE_ENTRY;
             } else {
                 free_node_contents(&qualified_node);
             }
@@ -7362,13 +7409,13 @@ static int cross_repo_project_lock_key_compare_values(const char *left, const ch
         unsigned char left_folded = cross_repo_project_lock_fold(*left_cursor);
         unsigned char right_folded = cross_repo_project_lock_fold(*right_cursor);
         if (left_folded != right_folded) {
-            return left_folded < right_folded ? -1 : 1;
+            return left_folded < right_folded ? MCP_SIGN_NEGATIVE : MCP_SIGN_POSITIVE;
         }
         left_cursor++;
         right_cursor++;
     }
     if (*left_cursor != *right_cursor) {
-        return *left_cursor ? 1 : -1;
+        return *left_cursor ? MCP_SIGN_POSITIVE : MCP_SIGN_NEGATIVE;
     }
     return strcmp(left, right);
 }
@@ -7439,7 +7486,7 @@ static const char *cross_repo_targets_parse(const char *args, cross_repo_targets
     if (parsed_count != targets->count) {
         return "target_projects must contain valid project names or '*'";
     }
-    if (targets->all_projects && targets->count != 1) {
+    if (targets->all_projects && targets->count != MCP_SINGLE_ENTRY) {
         return "target_projects wildcard '*' must be the only entry";
     }
     if (!targets->all_projects) {
@@ -7448,7 +7495,7 @@ static const char *cross_repo_targets_parse(const char *args, cross_repo_targets
         int unique_count = 0;
         for (int i = 0; i < targets->count; i++) {
             if (unique_count == 0 ||
-                strcmp(targets->items[i], targets->items[unique_count - 1]) != 0) {
+                strcmp(targets->items[i], targets->items[unique_count - SKIP_ONE]) != 0) {
                 targets->items[unique_count++] = targets->items[i];
             }
         }
@@ -7460,7 +7507,8 @@ static const char *cross_repo_targets_parse(const char *args, cross_repo_targets
 static const char *cross_repo_lease_keys_build(const char *project,
                                                const cross_repo_targets_t *targets,
                                                const char ***out_keys, int *out_count) {
-    const char **lease_keys = malloc(((size_t)targets->count + 1U) * sizeof(*lease_keys));
+    const char **lease_keys =
+        malloc(((size_t)targets->count + (size_t)SKIP_ONE) * sizeof(*lease_keys));
     if (!lease_keys) {
         return "failed to allocate cross-repo project leases";
     }
@@ -7477,7 +7525,7 @@ static const char *cross_repo_lease_keys_build(const char *project,
         int unique_count = 0;
         for (int i = 0; i < lease_count; i++) {
             if (unique_count == 0 || !cross_repo_project_lock_keys_equivalent(
-                                         lease_keys[i], lease_keys[unique_count - 1])) {
+                                         lease_keys[i], lease_keys[unique_count - SKIP_ONE])) {
                 lease_keys[unique_count++] = lease_keys[i];
             }
         }
@@ -7909,7 +7957,8 @@ static void add_index_response_summaries(yyjson_mut_doc *doc, yyjson_mut_val *ro
 
 static index_response_counts_t index_response_counts(cbm_store_t *store, const char *project_name,
                                                      cbm_pipeline_t *pipeline) {
-    index_response_counts_t counts = {.expected_nodes = -1, .expected_edges = -1};
+    index_response_counts_t counts = {.expected_nodes = MCP_UNKNOWN_COUNT,
+                                      .expected_edges = MCP_UNKNOWN_COUNT};
     cbm_pipeline_get_committed_counts(pipeline, &counts.expected_nodes, &counts.expected_edges);
     const double ratio = cbm_dump_verify_min_ratio();
     const int min_floor = CBM_DUMP_VERIFY_MIN_FLOOR;
@@ -8100,7 +8149,7 @@ static void supervisor_tmp_path(char *out, size_t out_sz, const char *suffix) {
     if (cdir && cdir[0]) {
         char logdir[CBM_SZ_1K];
         snprintf(logdir, sizeof(logdir), "%s/logs", cdir);
-        cbm_mkdir_p(logdir, 0755);
+        cbm_mkdir_p(logdir, MCP_LOG_DIRECTORY_MODE);
         snprintf(out, out_sz, "%s/.supervisor-%d%s", logdir, (int)getpid(), suffix);
     } else {
         snprintf(out, out_sz, ".supervisor-%d%s", (int)getpid(), suffix);
@@ -8177,15 +8226,15 @@ static void supervisor_remove_open_path(char **paths, int *count, const char *pa
 
 static const char *supervisor_journal_path(char *line, char *event) {
     size_t length = strlen(line);
-    if (length == 0 || line[length - 1] != '\n') {
+    if (length == 0 || line[length - MCP_SINGLE_ENTRY] != '\n') {
         return NULL;
     }
     line[--length] = '\0';
-    if (length > 0 && line[length - 1] == '\r') {
+    if (length > 0 && line[length - MCP_SINGLE_ENTRY] == '\r') {
         line[--length] = '\0';
     }
     if (length < SUPERVISOR_JOURNAL_MIN_LINE_BYTES || (line[0] != 'S' && line[0] != 'D') ||
-        line[1] != ' ') {
+        line[MCP_ROOT_PATH_SLASH_INDEX] != ' ') {
         return "";
     }
     *event = line[0];
@@ -8504,12 +8553,14 @@ static bool resolve_session_repo_path(cbm_mcp_server_t *srv, char **repo_path) {
 
     size_t root_len = strlen(srv->session_root);
     size_t path_len = strlen(*repo_path);
-    bool needs_separator = root_len > 0 && srv->session_root[root_len - 1] != '/';
-    if (root_len > SIZE_MAX - path_len - (needs_separator ? 2U : 1U)) {
+    bool needs_separator = root_len > 0 && srv->session_root[root_len - MCP_SINGLE_ENTRY] != '/';
+    if (root_len > SIZE_MAX - path_len -
+                       (needs_separator ? MCP_QUOTED_NAME_DELIMITERS : MCP_PATH_SEPARATOR_BYTES)) {
         return false;
     }
 
-    size_t joined_size = root_len + (needs_separator ? 1U : 0U) + path_len + 1U;
+    size_t joined_size = root_len + (needs_separator ? MCP_PATH_SEPARATOR_BYTES : 0U) + path_len +
+                         MCP_STRING_TERMINATOR_BYTES;
     char *joined = malloc(joined_size);
     if (!joined) {
         return false;
@@ -8881,22 +8932,64 @@ static char *resolve_snippet_source(const char *root_path, const char *file_path
     return NULL;
 }
 
-static bool utf8_is_cont(unsigned char c) {
-    return (c & 0xC0) == 0x80;
+enum {
+    UTF8_ASCII_MAX = 0x7F,
+    UTF8_CONTINUATION_MASK = 0xC0,
+    UTF8_CONTINUATION_VALUE = 0x80,
+    UTF8_ONE_BYTE_LEN = 1,
+    UTF8_TWO_BYTE_LEN = 2,
+    UTF8_THREE_BYTE_LEN = 3,
+    UTF8_FOUR_BYTE_LEN = 4,
+    UTF8_SECOND_BYTE_OFFSET = 1,
+    UTF8_THIRD_BYTE_OFFSET = 2,
+    UTF8_FOURTH_BYTE_OFFSET = 3,
+    UTF8_TWO_BYTE_LEAD_MIN = 0xC2,
+    UTF8_TWO_BYTE_LEAD_MAX = 0xDF,
+    UTF8_THREE_BYTE_E0 = 0xE0,
+    UTF8_THREE_BYTE_E1_MIN = 0xE1,
+    UTF8_THREE_BYTE_E1_MAX = 0xEC,
+    UTF8_THREE_BYTE_ED = 0xED,
+    UTF8_THREE_BYTE_EE_MIN = 0xEE,
+    UTF8_THREE_BYTE_EE_MAX = 0xEF,
+    UTF8_FOUR_BYTE_F0 = 0xF0,
+    UTF8_FOUR_BYTE_F1_MIN = 0xF1,
+    UTF8_FOUR_BYTE_F1_MAX = 0xF3,
+    UTF8_FOUR_BYTE_F4 = 0xF4,
+    UTF8_E0_SECOND_MIN = 0xA0,
+    UTF8_ED_SECOND_MAX = 0x9F,
+    UTF8_F0_SECOND_MIN = 0x90,
+    UTF8_F4_SECOND_MAX = 0x8F,
+    UTF8_REPLACEMENT_FIRST = 0xEF,
+    UTF8_REPLACEMENT_SECOND = 0xBF,
+    UTF8_REPLACEMENT_THIRD = 0xBD,
+};
+
+static bool utf8_is_cont(unsigned char byte) {
+    return (byte & UTF8_CONTINUATION_MASK) == UTF8_CONTINUATION_VALUE;
+}
+
+static bool utf8_has_continuations(const unsigned char *text, const unsigned char *end,
+                                   size_t byte_count) {
+    if (text + byte_count > end) {
+        return false;
+    }
+    for (size_t offset = UTF8_SECOND_BYTE_OFFSET; offset < byte_count; offset++) {
+        if (!utf8_is_cont(text[offset])) {
+            return false;
+        }
+    }
+    return true;
 }
 
 static char *sanitize_utf8_lossy(const char *s) {
     enum {
         UTF8_REPLACEMENT_LEN = 3,
-        UTF8_THREE_BYTE_LEN = 3,
-        UTF8_FOUR_BYTE_LEN = 4,
-        UTF8_FOURTH_BYTE = 3,
     };
     if (!s) {
         return NULL;
     }
     size_t len = strlen(s);
-    if (len > (((size_t)-1) - SKIP_ONE) / UTF8_REPLACEMENT_LEN) {
+    if (len > (SIZE_MAX - SKIP_ONE) / UTF8_REPLACEMENT_LEN) {
         return NULL;
     }
     char *out = malloc((len * UTF8_REPLACEMENT_LEN) + SKIP_ONE);
@@ -8910,28 +9003,21 @@ static char *sanitize_utf8_lossy(const char *s) {
     while (p < end) {
         unsigned char c = *p;
         size_t n = 0;
-        if (c < 0x80) {
-            n = 1;
-        } else if (c >= 0xC2 && c <= 0xDF && p + 1 < end && utf8_is_cont(p[1])) {
-            n = 2;
-        } else if (c == 0xE0 && p + 2 < end && p[1] >= 0xA0 && p[1] <= 0xBF && utf8_is_cont(p[2])) {
+        if (c <= UTF8_ASCII_MAX) {
+            n = UTF8_ONE_BYTE_LEN;
+        } else if (c >= UTF8_TWO_BYTE_LEAD_MIN && c <= UTF8_TWO_BYTE_LEAD_MAX &&
+                   utf8_has_continuations(p, end, UTF8_TWO_BYTE_LEN)) {
+            n = UTF8_TWO_BYTE_LEN;
+        } else if (utf8_has_continuations(p, end, UTF8_THREE_BYTE_LEN) &&
+                   ((c == UTF8_THREE_BYTE_E0 && p[UTF8_SECOND_BYTE_OFFSET] >= UTF8_E0_SECOND_MIN) ||
+                    (c >= UTF8_THREE_BYTE_E1_MIN && c <= UTF8_THREE_BYTE_E1_MAX) ||
+                    (c == UTF8_THREE_BYTE_ED && p[UTF8_SECOND_BYTE_OFFSET] <= UTF8_ED_SECOND_MAX) ||
+                    (c >= UTF8_THREE_BYTE_EE_MIN && c <= UTF8_THREE_BYTE_EE_MAX))) {
             n = UTF8_THREE_BYTE_LEN;
-        } else if (c >= 0xE1 && c <= 0xEC && p + 2 < end && utf8_is_cont(p[1]) &&
-                   utf8_is_cont(p[2])) {
-            n = UTF8_THREE_BYTE_LEN;
-        } else if (c == 0xED && p + 2 < end && p[1] >= 0x80 && p[1] <= 0x9F && utf8_is_cont(p[2])) {
-            n = UTF8_THREE_BYTE_LEN;
-        } else if (c >= 0xEE && c <= 0xEF && p + 2 < end && utf8_is_cont(p[1]) &&
-                   utf8_is_cont(p[2])) {
-            n = UTF8_THREE_BYTE_LEN;
-        } else if (c == 0xF0 && p + UTF8_FOURTH_BYTE < end && p[1] >= 0x90 && p[1] <= 0xBF &&
-                   utf8_is_cont(p[2]) && utf8_is_cont(p[UTF8_FOURTH_BYTE])) {
-            n = UTF8_FOUR_BYTE_LEN;
-        } else if (c >= 0xF1 && c <= 0xF3 && p + UTF8_FOURTH_BYTE < end && utf8_is_cont(p[1]) &&
-                   utf8_is_cont(p[2]) && utf8_is_cont(p[UTF8_FOURTH_BYTE])) {
-            n = UTF8_FOUR_BYTE_LEN;
-        } else if (c == 0xF4 && p + UTF8_FOURTH_BYTE < end && p[1] >= 0x80 && p[1] <= 0x8F &&
-                   utf8_is_cont(p[2]) && utf8_is_cont(p[UTF8_FOURTH_BYTE])) {
+        } else if (utf8_has_continuations(p, end, UTF8_FOUR_BYTE_LEN) &&
+                   ((c == UTF8_FOUR_BYTE_F0 && p[UTF8_SECOND_BYTE_OFFSET] >= UTF8_F0_SECOND_MIN) ||
+                    (c >= UTF8_FOUR_BYTE_F1_MIN && c <= UTF8_FOUR_BYTE_F1_MAX) ||
+                    (c == UTF8_FOUR_BYTE_F4 && p[UTF8_SECOND_BYTE_OFFSET] <= UTF8_F4_SECOND_MAX))) {
             n = UTF8_FOUR_BYTE_LEN;
         }
 
@@ -8940,10 +9026,10 @@ static char *sanitize_utf8_lossy(const char *s) {
             dst += n;
             p += n;
         } else {
-            *dst++ = 0xEF;
-            *dst++ = 0xBF;
-            *dst++ = 0xBD;
-            p++;
+            *dst++ = UTF8_REPLACEMENT_FIRST;
+            *dst++ = UTF8_REPLACEMENT_SECOND;
+            *dst++ = UTF8_REPLACEMENT_THIRD;
+            p += UTF8_ONE_BYTE_LEN;
         }
     }
     *dst = '\0';
@@ -9010,8 +9096,8 @@ static char *build_snippet_response(cbm_mcp_server_t *srv, cbm_node_t *node,
      * (far above any real function) and flag it; the exact range is still in
      * start_line/end_line for a targeted re-read. */
     bool snippet_clipped = false;
-    if (end - start + 1 > MCP_SNIPPET_MAX_LINES) {
-        end = start + MCP_SNIPPET_MAX_LINES - 1;
+    if (end - start + MCP_SINGLE_ENTRY > MCP_SNIPPET_MAX_LINES) {
+        end = start + MCP_SNIPPET_MAX_LINES - MCP_SINGLE_ENTRY;
         snippet_clipped = true;
     }
     char *abs_path = NULL;
@@ -9409,11 +9495,11 @@ static void attach_result_source(yyjson_mut_doc *doc, yyjson_mut_val *item, sear
         int s = r->start_line;
         int e = r->end_line;
         bool truncated = false;
-        if (e - s + 1 > SC_FULL_MAX_LINES) {
+        if (e - s + MCP_SINGLE_ENTRY > SC_FULL_MAX_LINES) {
             if (r->match_count > 0 && r->match_lines[0] - SC_FULL_LEAD > s) {
                 s = r->match_lines[0] - SC_FULL_LEAD;
             }
-            e = s + SC_FULL_MAX_LINES - 1;
+            e = s + SC_FULL_MAX_LINES - MCP_SINGLE_ENTRY;
             if (e > r->end_line) {
                 e = r->end_line;
             }
@@ -9989,9 +10075,9 @@ static bool write_scoped_filelist(cbm_mcp_server_t *srv, const char *project, co
              *     newline separator would split plain xargs on the space).
              *   - Windows: newline, consumed by PowerShell `Get-Content |
              *     Select-String -LiteralPath` (NUL bytes break Get-Content). */
-            (void)fwrite(root_path, 1, strlen(root_path), fl);
+            (void)fwrite(root_path, MCP_SINGLE_ENTRY, strlen(root_path), fl);
             (void)fputc('/', fl);
-            (void)fwrite(indexed_files[fi], 1, strlen(indexed_files[fi]), fl);
+            (void)fwrite(indexed_files[fi], MCP_SINGLE_ENTRY, strlen(indexed_files[fi]), fl);
 #ifdef _WIN32
             (void)fputc('\n', fl);
 #else
@@ -10507,7 +10593,8 @@ static bool mcp_command_output_path(char out[CBM_SZ_2K]) {
     int written;
     if (cache && cache[0]) {
         written = snprintf(directory, sizeof(directory), "%s/logs", cache);
-        if (written <= 0 || written >= (int)sizeof(directory) || !cbm_mkdir_p(directory, 0700)) {
+        if (written <= 0 || written >= (int)sizeof(directory) ||
+            !cbm_mkdir_p(directory, MCP_PRIVATE_DIRECTORY_MODE)) {
             return false;
         }
     } else {
@@ -10566,19 +10653,19 @@ static int mcp_run_shell_command_cancellable(cbm_mcp_server_t *srv, const char *
                                              char output_path[CBM_SZ_2K],
                                              cbm_proc_result_t *result_out) {
     if (!srv || !command || !output_path || !result_out || !mcp_command_output_path(output_path)) {
-        return -1;
+        return MCP_COMMAND_FAILED;
     }
     /* Internal test seam: rejecting after output allocation exercises the same
      * cleanup contract as a contained process-tree failure. */
     if (srv->command_test_hook && !srv->command_test_hook(srv->command_test_context, command)) {
-        return -1;
+        return MCP_COMMAND_FAILED;
     }
 #ifdef _WIN32
     char shell[CBM_SZ_4K];
     if (!mcp_resolve_windows_cmd(shell)) {
         (void)cbm_unlink(output_path);
         output_path[0] = '\0';
-        return -1;
+        return MCP_COMMAND_FAILED;
     }
 #else
     const char *shell = "/bin/sh";
@@ -10600,7 +10687,7 @@ static int mcp_run_shell_command_cancellable(cbm_mcp_server_t *srv, const char *
     if (cbm_subprocess_spawn(&options, &process) != 0) {
         (void)cbm_unlink(output_path);
         output_path[0] = '\0';
-        return -1;
+        return MCP_COMMAND_FAILED;
     }
 
     cbm_proc_poll_t state;
@@ -10617,7 +10704,7 @@ static int mcp_run_shell_command_cancellable(cbm_mcp_server_t *srv, const char *
     bool contained = state == CBM_PROC_POLL_TERMINAL && result_out->tree_quiesced &&
                      !result_out->supervision_failed;
     cbm_subprocess_destroy(process);
-    return contained ? 0 : -1;
+    return contained ? 0 : MCP_COMMAND_FAILED;
 }
 
 /* Does `node`'s line range overlap any recorded hunk for `file`? Used to scope
@@ -10656,7 +10743,7 @@ static bool detect_is_seedable_label(const char *lb) {
 
 static void detect_collect_seeds(cbm_store_t *store, const char *project, const char *file,
                                  const cbm_changed_hunk_t *hunks, int hunk_count, int64_t **seeds,
-                                 int *n, size_t *cap) {
+                                 int *n, size_t *const cap) {
     cbm_node_t *nodes = NULL;
     int ncount = 0;
     cbm_store_find_nodes_by_file(store, project, file, &nodes, &ncount);
@@ -10692,7 +10779,7 @@ static void detect_collect_seeds(cbm_store_t *store, const char *project, const 
                 continue;
             }
             if ((size_t)*n >= *cap) {
-                *cap = *cap ? *cap * 2 : 16;
+                *cap = *cap ? *cap * MCP_CAPACITY_GROWTH_FACTOR : MCP_INITIAL_DETECT_FILE_CAPACITY;
                 *seeds = cbm_realloc_or_abort(*seeds, *cap * sizeof(int64_t));
             }
             (*seeds)[(*n)++] = nodes[i].id;
@@ -10715,10 +10802,10 @@ static void detect_module_of(const char *file, char *out, size_t outsz) {
         snprintf(out, outsz, "%s", file);
         return;
     }
-    const char *s2 = strchr(s1 + 1, '/');
+    const char *s2 = strchr(s1 + MCP_SINGLE_ENTRY, '/');
     size_t len = s2 ? (size_t)(s2 - file) : strlen(file);
     if (len >= outsz) {
-        len = outsz - 1;
+        len = outsz - MCP_SINGLE_ENTRY;
     }
     memcpy(out, file, len);
     out[len] = '\0';
@@ -10734,6 +10821,7 @@ enum {
     DETECT_FILE_CAPACITY_GROWTH = 2,
     DETECT_INITIAL_FILE_CAPACITY = 16,
     DETECT_MERGE_BASE_CAPACITY = 64,
+    DETECT_HUNK_CAPACITY = 4096,
 };
 
 static int detect_module_rollup(const cbm_traverse_result_t *impact, char mods[][CBM_SZ_128],
@@ -10753,7 +10841,7 @@ static int detect_module_rollup(const cbm_traverse_result_t *impact, char mods[]
         if (j == nmods) {
             if (nmods < DETECT_MODCAP) {
                 snprintf(mods[nmods], CBM_SZ_128, "%s", m);
-                mcnt[nmods] = 1;
+                mcnt[nmods] = MCP_SINGLE_ENTRY;
                 nmods++;
             } else {
                 (*overflow)++;
@@ -10781,7 +10869,7 @@ static void detect_emit_impacted_tree(cbm_sb_t *sb, cbm_traverse_result_t *tr, i
              "+ name; nearest hops first)\n",
              shown, shown);
     cbm_sb_append(sb, hdr);
-    if (shown > 1) {
+    if (shown > MCP_SINGLE_ENTRY) {
         qsort(tr->visited, (size_t)shown, sizeof(cbm_node_hop_t), tree_hop_cmp_qn);
     }
     char cur_group[CBM_SZ_1K] = "";
@@ -10812,65 +10900,402 @@ static void detect_emit_impacted_tree(cbm_sb_t *sb, cbm_traverse_result_t *tr, i
     }
 }
 
-static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
-    char *project = get_project_arg(args);
-    char *base_branch = cbm_mcp_get_string_arg(args, "base_branch");
+typedef struct {
+    const char *base_branch;
+    const char *direction;
+    char *const *files;
+    int file_count;
+    int seed_count;
+    int impact_limit;
+    int git_status;
+    const char *merge_base;
+    bool want_symbols;
+    bool legacy_json;
+} detect_response_t;
+
+static void detect_render_module_rollup_tree(cbm_sb_t *output,
+                                             const cbm_traverse_result_t *impact) {
+    if (impact->visited_count <= 0) {
+        return;
+    }
+    cbm_sb_append(output, "impacted_modules: (rows: module count)\n");
+    char (*modules)[CBM_SZ_128] = malloc((size_t)DETECT_MODCAP * CBM_SZ_128);
+    int *counts = malloc((size_t)DETECT_MODCAP * sizeof(int));
+    if (modules && counts) {
+        int overflow = 0;
+        int module_count = detect_module_rollup(impact, modules, counts, &overflow);
+        for (int index = 0; index < module_count; index++) {
+            char row[CBM_SZ_256];
+            snprintf(row, sizeof(row), "  %s %d\n", modules[index], counts[index]);
+            cbm_sb_append(output, row);
+        }
+        if (overflow > 0) {
+            char row[CBM_SZ_128];
+            snprintf(row, sizeof(row), "  (other) %d\n", overflow);
+            cbm_sb_append(output, row);
+        }
+    }
+    free(modules);
+    free(counts);
+}
+
+static void detect_render_module_rollup_json(yyjson_mut_doc *doc, yyjson_mut_val *root,
+                                             const cbm_traverse_result_t *impact) {
+    if (impact->visited_count <= 0) {
+        return;
+    }
+    char (*modules)[CBM_SZ_128] = malloc((size_t)DETECT_MODCAP * CBM_SZ_128);
+    int *counts = malloc((size_t)DETECT_MODCAP * sizeof(int));
+    if (modules && counts) {
+        int overflow = 0;
+        int module_count = detect_module_rollup(impact, modules, counts, &overflow);
+        yyjson_mut_val *rollup = yyjson_mut_arr(doc);
+        for (int index = 0; index < module_count; index++) {
+            yyjson_mut_val *entry = yyjson_mut_obj(doc);
+            yyjson_mut_obj_add_strcpy(doc, entry, "module", modules[index]);
+            yyjson_mut_obj_add_int(doc, entry, "count", counts[index]);
+            yyjson_mut_arr_add_val(rollup, entry);
+        }
+        if (overflow > 0) {
+            yyjson_mut_val *entry = yyjson_mut_obj(doc);
+            yyjson_mut_obj_add_strcpy(doc, entry, "module", "(other)");
+            yyjson_mut_obj_add_int(doc, entry, "count", overflow);
+            yyjson_mut_arr_add_val(rollup, entry);
+        }
+        yyjson_mut_obj_add_val(doc, root, "impacted_modules", rollup);
+    }
+    free(modules);
+    free(counts);
+}
+
+static void detect_render_changed_files_tree(cbm_sb_t *output, const detect_response_t *response) {
+    char header[CBM_SZ_64];
+    snprintf(header, sizeof(header), "changed_files: %d\n", response->file_count);
+    cbm_sb_append(output, header);
+    for (int index = 0; index < response->file_count; index++) {
+        cbm_sb_append(output, "  ");
+        cbm_sb_append(output, response->files[index]);
+        cbm_sb_append(output, "\n");
+    }
+}
+
+static char *detect_render_response_json(const detect_response_t *response,
+                                         const cbm_traverse_result_t *impact, bool truncated,
+                                         bool is_error) {
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *root = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+    yyjson_mut_obj_add_strcpy(doc, root, "base", response->base_branch);
+    if (response->merge_base[0]) {
+        yyjson_mut_obj_add_strcpy(doc, root, "merge_base", response->merge_base);
+    }
+    yyjson_mut_obj_add_strcpy(doc, root, "direction", response->direction);
+    yyjson_mut_val *changed_files = yyjson_mut_arr(doc);
+    for (int index = 0; index < response->file_count; index++) {
+        yyjson_mut_arr_add_strcpy(doc, changed_files, response->files[index]);
+    }
+    yyjson_mut_obj_add_val(doc, root, "changed_files", changed_files);
+    yyjson_mut_obj_add_int(doc, root, "seed_symbols", response->seed_count);
+    yyjson_mut_obj_add_int(doc, root, "impacted_total", impact->visited_count);
+    int shown = impact->visited_count < response->impact_limit ? impact->visited_count
+                                                               : response->impact_limit;
+    yyjson_mut_obj_add_int(doc, root, "impacted_shown", shown);
+    yyjson_mut_val *impacted = yyjson_mut_arr(doc);
+    for (int index = 0; index < shown; index++) {
+        yyjson_mut_val *entry = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_strcpy(doc, entry, "qn",
+                                  impact->visited[index].node.qualified_name
+                                      ? impact->visited[index].node.qualified_name
+                                      : "");
+        yyjson_mut_obj_add_strcpy(
+            doc, entry, "label",
+            impact->visited[index].node.label ? impact->visited[index].node.label : "");
+        yyjson_mut_obj_add_strcpy(
+            doc, entry, "file",
+            impact->visited[index].node.file_path ? impact->visited[index].node.file_path : "");
+        yyjson_mut_obj_add_int(doc, entry, "hop", impact->visited[index].hop);
+        yyjson_mut_arr_add_val(impacted, entry);
+    }
+    yyjson_mut_obj_add_val(doc, root, "impacted", impacted);
+    detect_render_module_rollup_json(doc, root, impact);
+    yyjson_mut_obj_add_bool(doc, root, "truncated", truncated);
+    if (is_error) {
+        char hint[CBM_SZ_256];
+        snprintf(hint, sizeof(hint),
+                 "git diff exited with status %d. Check that branch '%s' exists.",
+                 response->git_status, response->base_branch);
+        yyjson_mut_obj_add_strcpy(doc, root, "hint", hint);
+    }
+    char *rendered = yy_doc_to_str(doc);
+    yyjson_mut_doc_free(doc);
+    return rendered;
+}
+
+static char *detect_render_response(const detect_response_t *response,
+                                    cbm_traverse_result_t *impact, bool truncated) {
+    bool is_error = response->git_status != 0 && response->file_count == 0;
+    if (!response->legacy_json) {
+        cbm_sb_t output;
+        cbm_sb_init(&output);
+        cbm_tree_scalar_str(&output, "base", response->base_branch);
+        if (response->merge_base[0]) {
+            cbm_tree_scalar_str(&output, "merge_base", response->merge_base);
+        }
+        cbm_tree_scalar_str(&output, "direction", response->direction);
+        if (is_error) {
+            char hint[CBM_SZ_256];
+            snprintf(hint, sizeof(hint),
+                     "git diff exited with status %d. Check that branch '%s' exists.",
+                     response->git_status, response->base_branch);
+            cbm_tree_scalar_str(&output, "hint", hint);
+        }
+        detect_render_changed_files_tree(&output, response);
+        cbm_tree_scalar_int(&output, "seed_symbols", response->seed_count);
+        if (response->want_symbols) {
+            detect_emit_impacted_tree(&output, impact, response->impact_limit);
+            detect_render_module_rollup_tree(&output, impact);
+            if (truncated) {
+                cbm_tree_scalar_bool(&output, "truncated", true);
+                cbm_tree_scalar_str(&output, "hint",
+                                    "impact hit the safety ceiling — narrow with a lower "
+                                    "'depth' or a smaller diff");
+            }
+        }
+        return cbm_sb_finish(&output);
+    }
+
+    return detect_render_response_json(response, impact, truncated, is_error);
+}
+
+typedef struct {
+    char *project;
+    char *base_branch;
+    char *scope;
+    char *root_path;
+    int depth;
+    bool want_symbols;
+} detect_request_t;
+
+typedef struct {
+    char **files;
+    int file_count;
+    size_t file_capacity;
+    int64_t *seeds;
+    int seed_count;
+    size_t seed_capacity;
+    cbm_changed_hunk_t *hunks;
+    int hunk_count;
+} detect_collected_t;
+
+static void detect_collected_dispose(detect_collected_t *collected) {
+    for (int index = 0; index < collected->file_count; index++) {
+        free(collected->files[index]);
+    }
+    free(collected->files);
+    free(collected->seeds);
+    free(collected->hunks);
+    *collected = (detect_collected_t){0};
+}
+
+static void detect_request_dispose(detect_request_t *request) {
+    free(request->project);
+    free(request->base_branch);
+    free(request->scope);
+    free(request->root_path);
+    *request = (detect_request_t){0};
+}
+
+static char *detect_request_init(cbm_mcp_server_t *srv, const char *args,
+                                 detect_request_t *request) {
+    *request = (detect_request_t){
+        .project = get_project_arg(args),
+        .base_branch = cbm_mcp_get_string_arg(args, "base_branch"),
+        .scope = cbm_mcp_get_string_arg(args, "scope"),
+        .depth = clamp_mcp_depth(cbm_mcp_get_int_arg(args, "depth", MCP_DEFAULT_BFS_DEPTH),
+                                 "detect_changes"),
+    };
     char *since = cbm_mcp_get_string_arg(args, "since");
-    char *scope = cbm_mcp_get_string_arg(args, "scope");
-    int depth = cbm_mcp_get_int_arg(args, "depth", MCP_DEFAULT_BFS_DEPTH);
-    depth = clamp_mcp_depth(depth, "detect_changes");
-
-    /* scope: "files" = just changed files, "symbols" = files + symbols (default) */
-    bool want_symbols = !scope || strcmp(scope, "symbols") == 0 || strcmp(scope, "impact") == 0;
-
-    /* `since` (e.g. "HEAD~10", "v0.5.0") is the documented diff base but was
-     * previously parsed and never used: it takes precedence over base_branch.
-     * Route it through base_branch so the shared shell-arg validation and the
-     * existing `<base>...HEAD` (three-dot) diff apply unchanged — `since` thus
-     * adopts the same merge-base semantics base_branch already uses. */
+    request->want_symbols = !request->scope || strcmp(request->scope, "symbols") == 0 ||
+                            strcmp(request->scope, "impact") == 0;
     if (since && since[0]) {
-        free(base_branch);
-        base_branch = since; /* transfer ownership */
+        free(request->base_branch);
+        request->base_branch = since;
         since = NULL;
     }
-    free(since); /* no-op after the swap (since is NULL); frees it otherwise */
-
-    if (!base_branch) {
-        base_branch = heap_strdup("main");
+    free(since);
+    if (!request->base_branch) {
+        request->base_branch = heap_strdup("main");
     }
-
-    /* Reject shell metacharacters, and a leading '-', in the user-supplied
-     * branch name. base_branch is spliced into `git diff --name-only
-     * "<base>"...HEAD`; a value starting with '-' would be read by git as an
-     * option rather than a ref (e.g. `--output=<path>` writes the diff to an
-     * arbitrary file). A real git ref never begins with '-'. */
-    if (!cbm_validate_shell_arg(base_branch) || base_branch[0] == '-' ||
-        !validate_windows_cmd_interpolation_arg(base_branch)) {
-        free(project);
-        free(base_branch);
-        free(scope);
+    if (!cbm_validate_shell_arg(request->base_branch) || request->base_branch[0] == '-' ||
+        !validate_windows_cmd_interpolation_arg(request->base_branch)) {
+        detect_request_dispose(request);
         return cbm_mcp_text_result("base_branch contains invalid characters", true);
     }
-
-    char *root_path = get_project_root(srv, project);
-    if (!root_path) {
-        char *err = build_no_store_error(project);
-        char *res = cbm_mcp_text_result(err, true);
-        free(err);
-        free(project);
-        free(base_branch);
-        free(scope);
-        return res;
+    request->root_path = get_project_root(srv, request->project);
+    if (!request->root_path) {
+        char *error = build_no_store_error(request->project);
+        char *result = cbm_mcp_text_result(error, true);
+        free(error);
+        detect_request_dispose(request);
+        return result;
     }
-
-    if (!validate_search_path_arg(root_path) ||
-        !validate_windows_cmd_interpolation_arg(root_path)) {
-        free(root_path);
-        free(project);
-        free(base_branch);
-        free(scope);
+    if (!validate_search_path_arg(request->root_path) ||
+        !validate_windows_cmd_interpolation_arg(request->root_path)) {
+        detect_request_dispose(request);
         return cbm_mcp_text_result("project path contains invalid characters", true);
     }
+    return NULL;
+}
+
+static void detect_collect_hunks(cbm_mcp_server_t *srv, const detect_request_t *request,
+                                 detect_collected_t *collected) {
+    if (!request->want_symbols) {
+        return;
+    }
+    char command[CBM_SZ_2K];
+#ifdef _WIN32
+    snprintf(command, sizeof(command),
+             "git -C \"%s\" diff --unified=0 \"%s\"...HEAD 2>NUL & "
+             "git -C \"%s\" diff --unified=0 2>NUL",
+             request->root_path, request->base_branch, request->root_path);
+#else
+    snprintf(command, sizeof(command),
+             "{ git -C '%s' diff --unified=0 '%s'...HEAD 2>/dev/null; "
+             "git -C '%s' diff --unified=0 2>/dev/null; }",
+             request->root_path, request->base_branch, request->root_path);
+#endif
+    char output_path[CBM_SZ_2K] = {0};
+    cbm_proc_result_t result = {0};
+    int run_status = mcp_run_shell_command_cancellable(srv, command, output_path, &result);
+    bool cancelled = result.cancellation_requested || mcp_request_cancelled(srv);
+    FILE *output = !cancelled && run_status == 0 ? cbm_fopen(output_path, "rb") : NULL;
+    if (output) {
+        (void)fseek(output, 0, SEEK_END);
+        long size = ftell(output);
+        if (size > 0) {
+            (void)fseek(output, 0, SEEK_SET);
+            char *buffer = malloc((size_t)size + SKIP_ONE);
+            if (buffer) {
+                size_t read_count = fread(buffer, SKIP_ONE, (size_t)size, output);
+                buffer[read_count] = '\0';
+                collected->hunks = cbm_realloc_or_abort(NULL, (size_t)DETECT_HUNK_CAPACITY *
+                                                                  sizeof(cbm_changed_hunk_t));
+                collected->hunk_count =
+                    cbm_parse_hunks(buffer, collected->hunks, DETECT_HUNK_CAPACITY);
+                if (collected->hunk_count >= DETECT_HUNK_CAPACITY) {
+                    cbm_log_info("detect_changes.hunks", "action", "scoping_disabled", "reason",
+                                 "hunk_cap_reached");
+                    free(collected->hunks);
+                    collected->hunks = NULL;
+                    collected->hunk_count = 0;
+                }
+                free(buffer);
+            }
+        }
+        (void)fclose(output);
+    }
+    if (output_path[0]) {
+        (void)cbm_unlink(output_path);
+    }
+}
+
+static bool detect_path_is_duplicate(const detect_collected_t *collected, const char *path) {
+    for (int index = 0; index < collected->file_count; index++) {
+        if (strcmp(collected->files[index], path) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void detect_collect_changed_files(FILE *input, cbm_store_t *store,
+                                         const detect_request_t *request,
+                                         detect_collected_t *collected) {
+    char line[CBM_SZ_1K];
+    while (fgets(line, sizeof(line), input)) {
+        size_t length = strlen(line);
+        while (length > 0 && (line[length - SKIP_ONE] == '\n' || line[length - SKIP_ONE] == '\r')) {
+            line[--length] = '\0';
+        }
+        if (length == 0) {
+            continue;
+        }
+        char *path = line;
+        if (length > PAIR_LEN && line[PAIR_LEN] == ' ' && strchr(" MADRCU?!", line[0]) &&
+            strchr(" MADRCU?!", line[SKIP_ONE])) {
+            path = line + PAIR_LEN + SKIP_ONE;
+            char *rename_arrow = strstr(path, " -> ");
+            if (rename_arrow) {
+                enum { DETECT_RENAME_ARROW_LENGTH = 4 };
+                path = rename_arrow + DETECT_RENAME_ARROW_LENGTH;
+            }
+        }
+        if (path[0] == '\0' || detect_path_is_duplicate(collected, path)) {
+            continue;
+        }
+        if ((size_t)collected->file_count >= collected->file_capacity) {
+            collected->file_capacity = collected->file_capacity
+                                           ? collected->file_capacity * DETECT_FILE_CAPACITY_GROWTH
+                                           : DETECT_INITIAL_FILE_CAPACITY;
+            collected->files =
+                cbm_realloc_or_abort(collected->files, collected->file_capacity * sizeof(char *));
+        }
+        collected->files[collected->file_count++] = heap_strdup(path);
+        if (request->want_symbols) {
+            detect_collect_seeds(store, request->project, path, collected->hunks,
+                                 collected->hunk_count, &collected->seeds, &collected->seed_count,
+                                 &collected->seed_capacity);
+        }
+    }
+}
+
+static char *detect_read_merge_base(cbm_mcp_server_t *srv, const detect_request_t *request,
+                                    char merge_base[DETECT_MERGE_BASE_CAPACITY]) {
+    char command[CBM_SZ_2K];
+#ifdef _WIN32
+    snprintf(command, sizeof(command), "git -C \"%s\" merge-base \"%s\" HEAD 2>NUL",
+             request->root_path, request->base_branch);
+#else
+    snprintf(command, sizeof(command), "git -C '%s' merge-base '%s' HEAD 2>/dev/null",
+             request->root_path, request->base_branch);
+#endif
+    char output_path[CBM_SZ_2K] = {0};
+    cbm_proc_result_t result = {0};
+    int run_status = mcp_run_shell_command_cancellable(srv, command, output_path, &result);
+    bool cancelled = result.cancellation_requested || mcp_request_cancelled(srv);
+    bool containment_failed = run_status != 0 && output_path[0] != '\0';
+    FILE *output = run_status == 0 && result.exit_code == 0 ? cbm_fopen(output_path, "rb") : NULL;
+    if (output && !cancelled && fgets(merge_base, DETECT_MERGE_BASE_CAPACITY, output)) {
+        size_t length = strlen(merge_base);
+        while (length > 0 &&
+               (merge_base[length - SKIP_ONE] == '\n' || merge_base[length - SKIP_ONE] == '\r')) {
+            merge_base[--length] = '\0';
+        }
+    }
+    if (output) {
+        (void)fclose(output);
+    }
+    if (output_path[0]) {
+        (void)cbm_unlink(output_path);
+    }
+    if (!cancelled && !containment_failed) {
+        return NULL;
+    }
+    return cbm_mcp_text_result(
+        cancelled ? "detect_changes cancelled for this request"
+                  : "git merge-base failed: the contained command could not complete",
+        true);
+}
+
+static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
+    detect_request_t request;
+    char *request_error = detect_request_init(srv, args, &request);
+    if (request_error) {
+        return request_error;
+    }
+    const char *base_branch = request.base_branch;
+    const char *root_path = request.root_path;
+    bool want_symbols = request.want_symbols;
 
     /* Get changed files via git (-C avoids cd + quoting issues on Windows).
      * Three sources are merged:
@@ -10904,10 +11329,7 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
     bool git_cancelled = git_result.cancellation_requested || mcp_request_cancelled(srv);
     if (git_cancelled) {
         (void)cbm_unlink(output_path);
-        free(root_path);
-        free(project);
-        free(base_branch);
-        free(scope);
+        detect_request_dispose(&request);
         return cbm_mcp_text_result("detect_changes cancelled for this request", true);
     }
     if (git_run != 0) {
@@ -10916,19 +11338,13 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
         snprintf(errmsg, sizeof(errmsg),
                  "git diff failed: the contained command could not complete. "
                  "Check that git is installed.");
-        free(root_path);
-        free(project);
-        free(base_branch);
-        free(scope);
+        detect_request_dispose(&request);
         return cbm_mcp_text_result(errmsg, true);
     }
     FILE *fp = cbm_fopen(output_path, "rb");
     if (!fp) {
         (void)cbm_unlink(output_path);
-        free(root_path);
-        free(project);
-        free(base_branch);
-        free(scope);
+        detect_request_dispose(&request);
         return cbm_mcp_text_result("git diff failed: contained output could not be read", true);
     }
 
@@ -10952,10 +11368,7 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
                  "\"outbound\" (dependencies), or \"both\"",
                  direction);
         free(direction);
-        free(root_path);
-        free(project);
-        free(base_branch);
-        free(scope);
+        detect_request_dispose(&request);
         (void)fclose(fp);
         (void)cbm_unlink(output_path);
         return cbm_mcp_text_result(errbuf, true);
@@ -10974,341 +11387,50 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
         imp_limit = MCP_BFS_LIMIT_MAX;
     }
 
-    /* Collect changed file paths into a C array (drives seeds, the rollup, and
-     * both output encodings). */
-    char **files = NULL;
-    int file_count = 0;
-    size_t file_cap = 0;
-    int64_t *seeds = NULL;
-    int seed_count = 0;
-    size_t seed_cap = 0;
+    detect_collected_t collected = {0};
+    detect_collect_hunks(srv, &request, &collected);
 
-    /* Hunk line ranges (unified=0 diff), used to scope seed detection to the
-     * actually-changed lines instead of every definition in a changed file
-     * (see detect_collect_seeds). Best-effort: any failure here just leaves
-     * `hunks` empty and every file falls back to its previous whole-file
-     * seeding — this is a precision improvement, not a correctness
-     * dependency, so it is never treated as a request-level failure.
-     *
-     * Coordinate systems: `base...HEAD` hunks carry HEAD-side line numbers,
-     * the worktree diff carries worktree-side ones, and node line ranges come
-     * from the indexed snapshot. These agree while the index is fresh — the
-     * watcher reindexes on HEAD movement and on a dirty tree — but a stale
-     * index combined with insertions earlier in the file shifts the node lines
-     * relative to the hunks and can mis-scope. The failure is bounded by
-     * detect_collect_seeds' zero-overlap fallback: a file whose definitions all
-     * miss reverts to whole-file seeding rather than dropping out. */
-    cbm_changed_hunk_t *hunks = NULL;
-    int hunk_count = 0;
-    if (want_symbols) {
-        char hunk_cmd[CBM_SZ_2K];
-#ifdef _WIN32
-        snprintf(hunk_cmd, sizeof(hunk_cmd),
-                 "git -C \"%s\" diff --unified=0 \"%s\"...HEAD 2>NUL & "
-                 "git -C \"%s\" diff --unified=0 2>NUL",
-                 root_path, base_branch, root_path);
-#else
-        snprintf(hunk_cmd, sizeof(hunk_cmd),
-                 "{ git -C '%s' diff --unified=0 '%s'...HEAD 2>/dev/null; "
-                 "git -C '%s' diff --unified=0 2>/dev/null; }",
-                 root_path, base_branch, root_path);
-#endif
-        char hunk_output_path[CBM_SZ_2K] = {0};
-        cbm_proc_result_t hunk_result = {0};
-        int hunk_run =
-            mcp_run_shell_command_cancellable(srv, hunk_cmd, hunk_output_path, &hunk_result);
-        bool hunk_cancelled = hunk_result.cancellation_requested || mcp_request_cancelled(srv);
-        FILE *hfp = (!hunk_cancelled && hunk_run == 0) ? cbm_fopen(hunk_output_path, "rb") : NULL;
-        if (hfp) {
-            (void)fseek(hfp, 0, SEEK_END);
-            long hsz = ftell(hfp);
-            if (hsz > 0) {
-                (void)fseek(hfp, 0, SEEK_SET);
-                char *hbuf = malloc((size_t)hsz + SKIP_ONE);
-                if (hbuf) {
-                    size_t hread = fread(hbuf, SKIP_ONE, (size_t)hsz, hfp);
-                    hbuf[hread] = '\0';
-                    enum { HUNK_CAP = 4096 };
-                    hunks =
-                        cbm_realloc_or_abort(NULL, (size_t)HUNK_CAP * sizeof(cbm_changed_hunk_t));
-                    hunk_count = cbm_parse_hunks(hbuf, hunks, HUNK_CAP);
-                    /* A filled buffer means the diff was truncated: the hunks
-                     * past the cap are gone, so files captured only partially
-                     * would still look scoped and silently under-seed. Drop
-                     * scoping for the whole request rather than under-report a
-                     * large refactor — whole-file seeding is the safe side. */
-                    if (hunk_count >= HUNK_CAP) {
-                        cbm_log_info("detect_changes.hunks", "action", "scoping_disabled", "reason",
-                                     "hunk_cap_reached");
-                        free(hunks);
-                        hunks = NULL;
-                        hunk_count = 0;
-                    }
-                    free(hbuf);
-                }
-            }
-            (void)fclose(hfp);
-        }
-        if (hunk_output_path[0]) {
-            (void)cbm_unlink(hunk_output_path);
-        }
-    }
-
-    char line[CBM_SZ_1K];
-    while (fgets(line, sizeof(line), fp)) {
-        size_t len = strlen(line);
-        while (len > 0 && (line[len - SKIP_ONE] == '\n' || line[len - SKIP_ONE] == '\r')) {
-            line[--len] = '\0';
-        }
-        if (len == 0) {
-            continue;
-        }
-        /* Strip the `git status --porcelain` 2-char code + space; for a rename
-         * ("R  old -> new") keep the destination path. */
-        char *path_line = line;
-        if (len > PAIR_LEN && line[PAIR_LEN] == ' ' && strchr(" MADRCU?!", line[0]) &&
-            strchr(" MADRCU?!", line[SKIP_ONE])) {
-            path_line = line + PAIR_LEN + SKIP_ONE;
-            char *arrow = strstr(path_line, " -> ");
-            if (arrow) {
-                enum { ARROW_LEN = 4 };
-                path_line = arrow + ARROW_LEN;
-            }
-        }
-        if (path_line[0] == '\0') {
-            continue;
-        }
-        /* Dedup: the three git sources are sorted+unioned on POSIX but not on
-         * Windows (separate commands), and a path can repeat. */
-        bool dup = false;
-        for (int i = 0; i < file_count; i++) {
-            if (strcmp(files[i], path_line) == 0) {
-                dup = true;
-                break;
-            }
-        }
-        if (dup) {
-            continue;
-        }
-        if ((size_t)file_count >= file_cap) {
-            file_cap =
-                file_cap ? file_cap * DETECT_FILE_CAPACITY_GROWTH : DETECT_INITIAL_FILE_CAPACITY;
-            files = cbm_realloc_or_abort(files, file_cap * sizeof(char *));
-        }
-        files[file_count++] = heap_strdup(path_line);
-        if (want_symbols) {
-            detect_collect_seeds(store, project, path_line, hunks, hunk_count, &seeds, &seed_count,
-                                 &seed_cap);
-        }
-    }
+    detect_collect_changed_files(fp, store, &request, &collected);
     (void)fclose(fp);
     (void)cbm_unlink(output_path);
     int git_status = git_result.exit_code;
 
-    /* merge-base SHA: the exact commit the diff is measured against, so the
-     * result is reproducible even as base_branch advances. Best-effort. */
     char merge_base[DETECT_MERGE_BASE_CAPACITY] = "";
-    {
-        char mbcmd[CBM_SZ_2K];
-#ifdef _WIN32
-        snprintf(mbcmd, sizeof(mbcmd), "git -C \"%s\" merge-base \"%s\" HEAD 2>NUL", root_path,
-                 base_branch);
-#else
-        snprintf(mbcmd, sizeof(mbcmd), "git -C '%s' merge-base '%s' HEAD 2>/dev/null", root_path,
-                 base_branch);
-#endif
-        char mb_output_path[CBM_SZ_2K] = {0};
-        cbm_proc_result_t mb_result = {0};
-        int mb_run = mcp_run_shell_command_cancellable(srv, mbcmd, mb_output_path, &mb_result);
-        bool mb_cancelled = mb_result.cancellation_requested || mcp_request_cancelled(srv);
-        bool mb_containment_failed = mb_run != 0 && mb_output_path[0] != '\0';
-        FILE *mbfp =
-            mb_run == 0 && mb_result.exit_code == 0 ? cbm_fopen(mb_output_path, "rb") : NULL;
-        if (mbfp && !mb_cancelled) {
-            if (fgets(merge_base, sizeof(merge_base), mbfp)) {
-                size_t l = strlen(merge_base);
-                while (l > 0 &&
-                       (merge_base[l - SKIP_ONE] == '\n' || merge_base[l - SKIP_ONE] == '\r')) {
-                    merge_base[--l] = '\0';
-                }
-            }
-        }
-        if (mbfp) {
-            (void)fclose(mbfp);
-        }
-        if (mb_output_path[0]) {
-            (void)cbm_unlink(mb_output_path);
-        }
-        if (mb_cancelled || mb_containment_failed) {
-            for (int i = 0; i < file_count; i++) {
-                free(files[i]);
-            }
-            free(files);
-            free(seeds);
-            free(hunks);
-            free(direction);
-            free(root_path);
-            free(project);
-            free(base_branch);
-            free(scope);
-            return cbm_mcp_text_result(
-                mb_cancelled ? "detect_changes cancelled for this request"
-                             : "git merge-base failed: the contained command could not complete",
-                true);
-        }
+    char *merge_error = detect_read_merge_base(srv, &request, merge_base);
+    if (merge_error) {
+        detect_collected_dispose(&collected);
+        free(direction);
+        detect_request_dispose(&request);
+        return merge_error;
     }
 
     /* The impact traversal: ONE multi-source BFS over all seeds. */
     cbm_traverse_result_t impact = {0};
     bool truncated = false;
-    if (want_symbols && seed_count > 0) {
-        (void)cbm_store_bfs_multi(store, seeds, seed_count, direction, NULL, 0, depth,
-                                  MCP_BFS_LIMIT_MAX, &impact, &truncated);
+    if (want_symbols && collected.seed_count > 0) {
+        (void)cbm_store_bfs_multi(store, collected.seeds, collected.seed_count, direction, NULL, 0,
+                                  request.depth, MCP_BFS_LIMIT_MAX, &impact, &truncated);
     }
 
-    bool is_error = (git_status != 0 && file_count == 0);
-    char *out_str = NULL;
-
-    if (!legacy_json) {
-        cbm_sb_t sb;
-        cbm_sb_init(&sb);
-        cbm_tree_scalar_str(&sb, "base", base_branch);
-        if (merge_base[0]) {
-            cbm_tree_scalar_str(&sb, "merge_base", merge_base);
-        }
-        cbm_tree_scalar_str(&sb, "direction", direction);
-        if (is_error) {
-            char hint_buf[CBM_SZ_256];
-            snprintf(hint_buf, sizeof(hint_buf),
-                     "git diff exited with status %d. Check that branch '%s' exists.", git_status,
-                     base_branch);
-            cbm_tree_scalar_str(&sb, "hint", hint_buf);
-        }
-        /* changed files (the git result) */
-        char cf[CBM_SZ_64];
-        snprintf(cf, sizeof(cf), "changed_files: %d\n", file_count);
-        cbm_sb_append(&sb, cf);
-        for (int i = 0; i < file_count; i++) {
-            cbm_sb_append(&sb, "  ");
-            cbm_sb_append(&sb, files[i]);
-            cbm_sb_append(&sb, "\n");
-        }
-        cbm_tree_scalar_int(&sb, "seed_symbols", seed_count);
-        if (want_symbols) {
-            detect_emit_impacted_tree(&sb, &impact, imp_limit);
-            /* module rollup: a quotient view of the blast radius */
-            if (impact.visited_count > 0) {
-                cbm_sb_append(&sb, "impacted_modules: (rows: module count)\n");
-                char (*mods)[CBM_SZ_128] = malloc((size_t)DETECT_MODCAP * CBM_SZ_128);
-                int *mcnt = malloc((size_t)DETECT_MODCAP * sizeof(int));
-                if (mods && mcnt) {
-                    int overflow = 0;
-                    int nmods = detect_module_rollup(&impact, mods, mcnt, &overflow);
-                    for (int j = 0; j < nmods; j++) {
-                        char mrow[CBM_SZ_256];
-                        snprintf(mrow, sizeof(mrow), "  %s %d\n", mods[j], mcnt[j]);
-                        cbm_sb_append(&sb, mrow);
-                    }
-                    if (overflow > 0) {
-                        char orow[CBM_SZ_128];
-                        snprintf(orow, sizeof(orow), "  (other) %d\n", overflow);
-                        cbm_sb_append(&sb, orow);
-                    }
-                }
-                free(mods);
-                free(mcnt);
-            }
-            if (truncated) {
-                cbm_tree_scalar_bool(&sb, "truncated", true);
-                cbm_tree_scalar_str(&sb, "hint",
-                                    "impact hit the safety ceiling — narrow with a lower "
-                                    "'depth' or a smaller diff");
-            }
-        }
-        out_str = cbm_sb_finish(&sb);
-    } else {
-        /* format:"json" = json-stringified tree: same model, structured. */
-        yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-        yyjson_mut_val *root_obj = yyjson_mut_obj(doc);
-        yyjson_mut_doc_set_root(doc, root_obj);
-        yyjson_mut_obj_add_strcpy(doc, root_obj, "base", base_branch);
-        if (merge_base[0]) {
-            yyjson_mut_obj_add_strcpy(doc, root_obj, "merge_base", merge_base);
-        }
-        yyjson_mut_obj_add_strcpy(doc, root_obj, "direction", direction);
-        yyjson_mut_val *cf = yyjson_mut_arr(doc);
-        for (int i = 0; i < file_count; i++) {
-            yyjson_mut_arr_add_strcpy(doc, cf, files[i]);
-        }
-        yyjson_mut_obj_add_val(doc, root_obj, "changed_files", cf);
-        yyjson_mut_obj_add_int(doc, root_obj, "seed_symbols", seed_count);
-        yyjson_mut_obj_add_int(doc, root_obj, "impacted_total", impact.visited_count);
-        int imp_shown = impact.visited_count < imp_limit ? impact.visited_count : imp_limit;
-        yyjson_mut_obj_add_int(doc, root_obj, "impacted_shown", imp_shown);
-        yyjson_mut_val *imp = yyjson_mut_arr(doc);
-        for (int i = 0; i < imp_shown; i++) {
-            yyjson_mut_val *o = yyjson_mut_obj(doc);
-            yyjson_mut_obj_add_strcpy(
-                doc, o, "qn",
-                impact.visited[i].node.qualified_name ? impact.visited[i].node.qualified_name : "");
-            yyjson_mut_obj_add_strcpy(
-                doc, o, "label", impact.visited[i].node.label ? impact.visited[i].node.label : "");
-            yyjson_mut_obj_add_strcpy(
-                doc, o, "file",
-                impact.visited[i].node.file_path ? impact.visited[i].node.file_path : "");
-            yyjson_mut_obj_add_int(doc, o, "hop", impact.visited[i].hop);
-            yyjson_mut_arr_add_val(imp, o);
-        }
-        yyjson_mut_obj_add_val(doc, root_obj, "impacted", imp);
-        /* Model parity with the tree encoding: the complete module rollup. */
-        if (impact.visited_count > 0) {
-            char (*mods)[CBM_SZ_128] = malloc((size_t)DETECT_MODCAP * CBM_SZ_128);
-            int *mcnt = malloc((size_t)DETECT_MODCAP * sizeof(int));
-            if (mods && mcnt) {
-                int overflow = 0;
-                int nmods = detect_module_rollup(&impact, mods, mcnt, &overflow);
-                yyjson_mut_val *rollup = yyjson_mut_arr(doc);
-                for (int j = 0; j < nmods; j++) {
-                    yyjson_mut_val *o = yyjson_mut_obj(doc);
-                    yyjson_mut_obj_add_strcpy(doc, o, "module", mods[j]);
-                    yyjson_mut_obj_add_int(doc, o, "count", mcnt[j]);
-                    yyjson_mut_arr_add_val(rollup, o);
-                }
-                if (overflow > 0) {
-                    yyjson_mut_val *o = yyjson_mut_obj(doc);
-                    yyjson_mut_obj_add_strcpy(doc, o, "module", "(other)");
-                    yyjson_mut_obj_add_int(doc, o, "count", overflow);
-                    yyjson_mut_arr_add_val(rollup, o);
-                }
-                yyjson_mut_obj_add_val(doc, root_obj, "impacted_modules", rollup);
-            }
-            free(mods);
-            free(mcnt);
-        }
-        yyjson_mut_obj_add_bool(doc, root_obj, "truncated", truncated);
-        if (is_error) {
-            char hint_buf[CBM_SZ_256];
-            snprintf(hint_buf, sizeof(hint_buf),
-                     "git diff exited with status %d. Check that branch '%s' exists.", git_status,
-                     base_branch);
-            yyjson_mut_obj_add_strcpy(doc, root_obj, "hint", hint_buf);
-        }
-        out_str = yy_doc_to_str(doc);
-        yyjson_mut_doc_free(doc);
-    }
+    detect_response_t response = {
+        .base_branch = base_branch,
+        .direction = direction,
+        .files = collected.files,
+        .file_count = collected.file_count,
+        .seed_count = collected.seed_count,
+        .impact_limit = imp_limit,
+        .git_status = git_status,
+        .merge_base = merge_base,
+        .want_symbols = want_symbols,
+        .legacy_json = legacy_json,
+    };
+    bool is_error = git_status != 0 && collected.file_count == 0;
+    char *out_str = detect_render_response(&response, &impact, truncated);
 
     cbm_store_traverse_free(&impact);
-    for (int i = 0; i < file_count; i++) {
-        free(files[i]);
-    }
-    free(files);
-    free(seeds);
-    free(hunks);
+    detect_collected_dispose(&collected);
     free(direction);
-    free(root_path);
-    free(project);
-    free(base_branch);
-    free(scope);
+    detect_request_dispose(&request);
 
     char *result = cbm_mcp_text_result(out_str, is_error);
     free(out_str);
@@ -11852,7 +11974,7 @@ static void *autoindex_thread(void *arg) {
 bool cbm_mcp_auto_index_within_file_limit(const char *root_path, int file_limit,
                                           int *file_count_out) {
     if (file_count_out) {
-        *file_count_out = -1;
+        *file_count_out = MCP_UNKNOWN_COUNT;
     }
     if (!root_path || !root_path[0] || file_limit < 0) {
         return false;
@@ -11863,13 +11985,13 @@ bool cbm_mcp_auto_index_within_file_limit(const char *root_path, int file_limit,
         .ignore_file = NULL,
         .max_file_size = 0,
     };
-    int count = -1;
+    int count = MCP_UNKNOWN_COUNT;
     cbm_discover_status_t status = cbm_discover_count_bounded(
         root_path, &options, file_limit, cbm_now_ms() + AUTO_INDEX_COUNT_TIMEOUT_MS, &count);
     if (file_count_out) {
         *file_count_out = count;
         if (status == CBM_DISCOVER_LIMIT_EXCEEDED) {
-            *file_count_out = file_limit < INT_MAX ? file_limit + 1 : INT_MAX;
+            *file_count_out = file_limit < INT_MAX ? file_limit + MCP_SINGLE_ENTRY : INT_MAX;
         }
     }
     return status == CBM_DISCOVER_OK;
@@ -11912,9 +12034,9 @@ static void maybe_auto_index(cbm_mcp_server_t *srv) {
     }
 
     /* Quick tracked-file count check to avoid OOM on massive repos. */
-    int file_count = -1;
+    int file_count = MCP_UNKNOWN_COUNT;
     if (!cbm_mcp_auto_index_within_file_limit(srv->session_root, file_limit, &file_count)) {
-        char files[32];
+        char files[CBM_SZ_32];
         (void)snprintf(files, sizeof(files), "%d", file_count);
         cbm_log_warn("autoindex.skip", "reason",
                      file_count >= 0 ? "too_many_files" : "unsafe_or_unavailable_path", "files",

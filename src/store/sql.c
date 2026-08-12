@@ -14,17 +14,26 @@
 #include <string.h>
 
 static sqlite3 *as_db(cbm_sql_t *db) {
-    return (sqlite3 *)(void *)db;
+    return (sqlite3 *)db;
 }
 
 enum {
     SQL_NUL_TERMINATED = -1,
     SQL_ALIGN = 8,
     SQL_ALIGN_OFFSET = SQL_ALIGN - 1,
+    SQL_STRING_TERMINATOR_BYTES = 1,
 };
 
 static sqlite3_stmt *as_stmt(cbm_sql_stmt_t *st) {
-    return (sqlite3_stmt *)(void *)st;
+    return (sqlite3_stmt *)st;
+}
+
+static cbm_sql_t *as_cbm_db(sqlite3 *db) {
+    return (cbm_sql_t *)db;
+}
+
+static cbm_sql_stmt_t *as_cbm_stmt(sqlite3_stmt *statement) {
+    return (cbm_sql_stmt_t *)statement;
 }
 
 bool cbm_sql_open(const char *path, cbm_sql_t **out) {
@@ -43,7 +52,7 @@ bool cbm_sql_open(const char *path, cbm_sql_t **out) {
         sqlite3_close(db);
         return false;
     }
-    *out = (cbm_sql_t *)(void *)db;
+    *out = as_cbm_db(db);
     return true;
 }
 
@@ -68,8 +77,20 @@ bool cbm_sql_prepare(cbm_sql_t *db, const char *sql, cbm_sql_stmt_t **out) {
         sqlite3_finalize(st);
         return false;
     }
-    *out = (cbm_sql_stmt_t *)(void *)st;
+    *out = as_cbm_stmt(st);
     return true;
+}
+
+static bool bind_copied_text(sqlite3_stmt *statement, int index, const char *value) {
+    size_t text_length = strlen(value);
+    size_t allocation_length = text_length + SQL_STRING_TERMINATOR_BYTES;
+    char *copy = sqlite3_malloc64((sqlite3_uint64)allocation_length);
+    if (!copy) {
+        return false;
+    }
+    memcpy(copy, value, allocation_length);
+    return sqlite3_bind_text64(statement, index, copy, (sqlite3_uint64)text_length, sqlite3_free,
+                               SQLITE_UTF8) == SQLITE_OK;
 }
 
 bool cbm_sql_bind_text(cbm_sql_stmt_t *st, int index, const char *value) {
@@ -79,10 +100,7 @@ bool cbm_sql_bind_text(cbm_sql_stmt_t *st, int index, const char *value) {
     if (!value) {
         return sqlite3_bind_null(as_stmt(st), index) == SQLITE_OK;
     }
-    /* SQLITE_TRANSIENT: sqlite copies the bytes, so the caller's buffer does
-     * not have to outlive the statement. */
-    return sqlite3_bind_text(as_stmt(st), index, value, SQL_NUL_TERMINATED, SQLITE_TRANSIENT) ==
-           SQLITE_OK;
+    return bind_copied_text(as_stmt(st), index, value);
 }
 
 bool cbm_sql_bind_int(cbm_sql_stmt_t *st, int index, int value) {

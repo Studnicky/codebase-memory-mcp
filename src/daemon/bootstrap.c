@@ -43,6 +43,37 @@ enum {
     BOOTSTRAP_RETRY_NS = 1000000,
     BOOTSTRAP_COORDINATION_CLEANUP_MS = 500,
     BOOTSTRAP_PATH_CAP = 4096,
+    BOOTSTRAP_ARGV_FIRST_USER_INDEX = 1,
+    BOOTSTRAP_ARGV_NOT_FOUND = -1,
+    BOOTSTRAP_ARGV_FOUND_INDEX = 0,
+    BOOTSTRAP_ARGV_NEXT_INDEX = 1,
+    BOOTSTRAP_SHA256_HEX_LENGTH = 64,
+    BOOTSTRAP_DECIMAL_RADIX = 10,
+    BOOTSTRAP_WORKER_REQUIRED_ARGC = 9,
+    BOOTSTRAP_WORKER_CLI_INDEX = 1,
+    BOOTSTRAP_WORKER_MODE_INDEX = 2,
+    BOOTSTRAP_WORKER_BUILD_FLAG_INDEX = 3,
+    BOOTSTRAP_WORKER_FINGERPRINT_INDEX = 4,
+    BOOTSTRAP_WORKER_COMMAND_INDEX = 5,
+    BOOTSTRAP_WORKER_ROOT_INDEX = 6,
+    BOOTSTRAP_WORKER_RESPONSE_FLAG_INDEX = 7,
+    BOOTSTRAP_WORKER_RESPONSE_PATH_INDEX = 8,
+    BOOTSTRAP_WORKER_OPTION_START_INDEX = 9,
+    BOOTSTRAP_WORKER_OPTION_VALUE_OFFSET = 1,
+    BOOTSTRAP_WORKER_OPTION_ARGUMENTS = 2,
+    BOOTSTRAP_DAEMON_ARGV_INDEX = 1,
+    BOOTSTRAP_DAEMON_ARGC = 2,
+    BOOTSTRAP_PERMANENT_DAEMON_ARGV_INDEX = 2,
+    BOOTSTRAP_PERMANENT_DAEMON_ARGC = 3,
+    BOOTSTRAP_LOCK_STATUS_HELD = 0,
+    BOOTSTRAP_LOCK_STATUS_ACQUIRED = 1,
+    BOOTSTRAP_LIFETIME_STATUS_FREE = 0,
+    BOOTSTRAP_LIFETIME_STATUS_HELD = 1,
+    BOOTSTRAP_ALLOCATION_ELEMENT_COUNT = 1,
+    BOOTSTRAP_MILLISECOND_RETRY_THRESHOLD = 1,
+    BOOTSTRAP_POSIX_SPAWN_ARGV_TERMINATOR = 1,
+    BOOTSTRAP_THREAD_START_FAILURE = -1,
+    BOOTSTRAP_NANOSECONDS_PER_MILLISECOND = 1000000,
 };
 
 static bool bootstrap_arg_is(const char *arg, const char *expected) {
@@ -50,12 +81,12 @@ static bool bootstrap_arg_is(const char *arg, const char *expected) {
 }
 
 static int bootstrap_find_arg(int argc, char *const argv[], const char *expected) {
-    for (int i = 1; argv && i < argc; i++) {
+    for (int i = BOOTSTRAP_ARGV_FIRST_USER_INDEX; argv && i < argc; i++) {
         if (bootstrap_arg_is(argv[i], expected)) {
             return i;
         }
     }
-    return -1;
+    return BOOTSTRAP_ARGV_NOT_FOUND;
 }
 
 static bool bootstrap_has_help_after(int argc, char *const argv[], int start) {
@@ -68,10 +99,10 @@ static bool bootstrap_has_help_after(int argc, char *const argv[], int start) {
 }
 
 static bool bootstrap_worker_fingerprint_valid(const char *fingerprint) {
-    if (!fingerprint || strlen(fingerprint) != 64U) {
+    if (!fingerprint || strlen(fingerprint) != BOOTSTRAP_SHA256_HEX_LENGTH) {
         return false;
     }
-    for (size_t i = 0; i < 64U; i++) {
+    for (size_t i = 0; i < BOOTSTRAP_SHA256_HEX_LENGTH; i++) {
         char ch = fingerprint[i];
         if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'))) {
             return false;
@@ -90,10 +121,10 @@ static bool bootstrap_worker_budget_valid(const char *text) {
             return false;
         }
         size_t digit = (size_t)(*cursor - '0');
-        if (value > (SIZE_MAX - digit) / 10U) {
+        if (value > (SIZE_MAX - digit) / BOOTSTRAP_DECIMAL_RADIX) {
             return false;
         }
-        value = (value * 10U) + digit;
+        value = (value * BOOTSTRAP_DECIMAL_RADIX) + digit;
     }
     return value > 0;
 }
@@ -102,37 +133,99 @@ static bool bootstrap_worker_budget_valid(const char *text) {
  * worker state is initialized. index_supervisor owns the matching builder and
  * performs the captured-build comparison after this syntax-only classification. */
 static bool bootstrap_worker_argv_exact(int argc, char *const argv[]) {
-    if (argc < 9 || !argv || !bootstrap_arg_is(argv[1], "cli") ||
-        !bootstrap_arg_is(argv[2], "--index-worker") ||
-        !bootstrap_arg_is(argv[3], "--index-worker-build") ||
-        !bootstrap_worker_fingerprint_valid(argv[4]) ||
-        !bootstrap_arg_is(argv[5], "index_repository") || !argv[6] || !argv[6][0] ||
-        !bootstrap_arg_is(argv[7], "--response-out") || !argv[8] || !argv[8][0]) {
+    if (argc < BOOTSTRAP_WORKER_REQUIRED_ARGC || !argv ||
+        !bootstrap_arg_is(argv[BOOTSTRAP_WORKER_CLI_INDEX], "cli") ||
+        !bootstrap_arg_is(argv[BOOTSTRAP_WORKER_MODE_INDEX], "--index-worker") ||
+        !bootstrap_arg_is(argv[BOOTSTRAP_WORKER_BUILD_FLAG_INDEX], "--index-worker-build") ||
+        !bootstrap_worker_fingerprint_valid(argv[BOOTSTRAP_WORKER_FINGERPRINT_INDEX]) ||
+        !bootstrap_arg_is(argv[BOOTSTRAP_WORKER_COMMAND_INDEX], "index_repository") ||
+        !argv[BOOTSTRAP_WORKER_ROOT_INDEX] || !argv[BOOTSTRAP_WORKER_ROOT_INDEX][0] ||
+        !bootstrap_arg_is(argv[BOOTSTRAP_WORKER_RESPONSE_FLAG_INDEX], "--response-out") ||
+        !argv[BOOTSTRAP_WORKER_RESPONSE_PATH_INDEX] ||
+        !argv[BOOTSTRAP_WORKER_RESPONSE_PATH_INDEX][0]) {
         return false;
     }
-    int next = 9;
+    int next = BOOTSTRAP_WORKER_OPTION_START_INDEX;
     if (next < argc && bootstrap_arg_is(argv[next], "--index-worker-memory-budget-bytes")) {
-        if (next + 1 >= argc || !bootstrap_worker_budget_valid(argv[next + 1])) {
+        if (next + BOOTSTRAP_WORKER_OPTION_VALUE_OFFSET >= argc ||
+            !bootstrap_worker_budget_valid(argv[next + BOOTSTRAP_WORKER_OPTION_VALUE_OFFSET])) {
             return false;
         }
-        next += 2;
+        next += BOOTSTRAP_WORKER_OPTION_ARGUMENTS;
     }
     if (next < argc && bootstrap_arg_is(argv[next], "--index-worker-single-thread")) {
-        next++;
+        next += BOOTSTRAP_WORKER_OPTION_VALUE_OFFSET;
     }
     if (next < argc && bootstrap_arg_is(argv[next], "--index-worker-marker")) {
-        if (next + 1 >= argc || !argv[next + 1] || !argv[next + 1][0]) {
+        if (next + BOOTSTRAP_WORKER_OPTION_VALUE_OFFSET >= argc ||
+            !argv[next + BOOTSTRAP_WORKER_OPTION_VALUE_OFFSET] ||
+            !argv[next + BOOTSTRAP_WORKER_OPTION_VALUE_OFFSET][0]) {
             return false;
         }
-        next += 2;
+        next += BOOTSTRAP_WORKER_OPTION_ARGUMENTS;
     }
     if (next < argc && bootstrap_arg_is(argv[next], "--index-worker-quarantine")) {
-        if (next + 1 >= argc || !argv[next + 1] || !argv[next + 1][0]) {
+        if (next + BOOTSTRAP_WORKER_OPTION_VALUE_OFFSET >= argc ||
+            !argv[next + BOOTSTRAP_WORKER_OPTION_VALUE_OFFSET] ||
+            !argv[next + BOOTSTRAP_WORKER_OPTION_VALUE_OFFSET][0]) {
             return false;
         }
-        next += 2;
+        next += BOOTSTRAP_WORKER_OPTION_ARGUMENTS;
     }
     return next == argc;
+}
+
+static cbm_daemon_process_role_t bootstrap_daemon_marker_role(int argc, char *const argv[],
+                                                              int daemon_arg) {
+    if (argc == BOOTSTRAP_DAEMON_ARGC && daemon_arg == BOOTSTRAP_DAEMON_ARGV_INDEX) {
+        return CBM_DAEMON_PROCESS_DAEMON;
+    }
+    if (argc == BOOTSTRAP_PERMANENT_DAEMON_ARGC && daemon_arg == BOOTSTRAP_DAEMON_ARGV_INDEX &&
+        bootstrap_arg_is(argv[BOOTSTRAP_PERMANENT_DAEMON_ARGV_INDEX], CBM_DAEMON_PERMANENT_ARG)) {
+        return CBM_DAEMON_PROCESS_DAEMON;
+    }
+    return CBM_DAEMON_PROCESS_INVALID;
+}
+
+static bool bootstrap_stateless_command(const char *arg) {
+    static const char *const commands[] = {
+        "install",
+        "uninstall",
+        "update",
+        "allow-root",
+    };
+    for (size_t command = 0; command < sizeof(commands) / sizeof(commands[0]); command++) {
+        if (bootstrap_arg_is(arg, commands[command])) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool bootstrap_top_level_role(int argc, char *const argv[], int arg,
+                                     cbm_daemon_process_role_t *role_out) {
+    const char *value = argv[arg];
+    int next = arg + BOOTSTRAP_ARGV_NEXT_INDEX;
+    if (bootstrap_arg_is(value, "cli") || bootstrap_arg_is(value, "config")) {
+        *role_out = bootstrap_has_help_after(argc, argv, next) ? CBM_DAEMON_PROCESS_STATELESS
+                                                               : CBM_DAEMON_PROCESS_LOCAL_CLI;
+        return true;
+    }
+    if (bootstrap_arg_is(value, "hook-augment")) {
+        *role_out = CBM_DAEMON_PROCESS_HOOK_CLIENT;
+        return true;
+    }
+    if (bootstrap_arg_is(value, "daemon")) {
+        *role_out = bootstrap_has_help_after(argc, argv, next) ? CBM_DAEMON_PROCESS_STATELESS
+                                                               : CBM_DAEMON_PROCESS_DAEMON_CTL;
+        return true;
+    }
+    if (bootstrap_arg_is(value, "--version") || bootstrap_arg_is(value, "--help") ||
+        bootstrap_arg_is(value, "-h") || bootstrap_stateless_command(value)) {
+        *role_out = CBM_DAEMON_PROCESS_STATELESS;
+        return true;
+    }
+    return false;
 }
 
 cbm_daemon_process_role_t cbm_daemon_process_role(int argc, char *const argv[]) {
@@ -141,67 +234,23 @@ cbm_daemon_process_role_t cbm_daemon_process_role(int argc, char *const argv[]) 
     }
 
     int daemon_arg = bootstrap_find_arg(argc, argv, CBM_DAEMON_INTERNAL_ARG);
-    if (daemon_arg >= 0) {
-        /* Byte-exact daemon-role grammar, deliberately unforgiving: the bare
-         * internal marker, or the marker followed by exactly the permanent
-         * flag. Every other shape — reordered, repeated, or extended — is
-         * INVALID, so argv smuggling cannot reach the daemon role. */
-        if (argc == 2 && daemon_arg == 1) {
-            return CBM_DAEMON_PROCESS_DAEMON;
-        }
-        if (argc == 3 && daemon_arg == 1 && bootstrap_arg_is(argv[2], CBM_DAEMON_PERMANENT_ARG)) {
-            return CBM_DAEMON_PROCESS_DAEMON;
-        }
-        return CBM_DAEMON_PROCESS_INVALID;
+    if (daemon_arg >= BOOTSTRAP_ARGV_FOUND_INDEX) {
+        return bootstrap_daemon_marker_role(argc, argv, daemon_arg);
     }
 
     int worker_arg = bootstrap_find_arg(argc, argv, "--index-worker");
-    if (worker_arg >= 0) {
+    if (worker_arg >= BOOTSTRAP_ARGV_FOUND_INDEX) {
         return bootstrap_worker_argv_exact(argc, argv) ? CBM_DAEMON_PROCESS_WORKER
                                                        : CBM_DAEMON_PROCESS_INVALID;
     }
 
-    static const char *const stateless_commands[] = {
-        "install",
-        "uninstall",
-        "update",
-        /* allow-root writes one line of user-level config and reads nothing from a
-         * project, so it needs no daemon. Listed here rather than routed through
-         * the daemon so enrolling a root cannot depend on daemon state. */
-        "allow-root",
-    };
     /* Stop at the first top-level mode token. Tool names, flag values, and JSON
      * following `cli` are opaque user input: a search query named "install"
      * or containing "--version" must never bypass the mandatory daemon. */
-    for (int arg = 1; arg < argc; arg++) {
-        if (bootstrap_arg_is(argv[arg], "cli")) {
-            if (bootstrap_has_help_after(argc, argv, arg + 1)) {
-                return CBM_DAEMON_PROCESS_STATELESS;
-            }
-            return CBM_DAEMON_PROCESS_LOCAL_CLI;
-        }
-        if (bootstrap_arg_is(argv[arg], "hook-augment")) {
-            return CBM_DAEMON_PROCESS_HOOK_CLIENT;
-        }
-        if (bootstrap_arg_is(argv[arg], "config")) {
-            return bootstrap_has_help_after(argc, argv, arg + 1) ? CBM_DAEMON_PROCESS_STATELESS
-                                                                 : CBM_DAEMON_PROCESS_LOCAL_CLI;
-        }
-        /* Placed after the `cli` check on purpose: `cbm cli search "daemon
-         * start"` is opaque tool input and must stay LOCAL_CLI. */
-        if (bootstrap_arg_is(argv[arg], "daemon")) {
-            return bootstrap_has_help_after(argc, argv, arg + 1) ? CBM_DAEMON_PROCESS_STATELESS
-                                                                 : CBM_DAEMON_PROCESS_DAEMON_CTL;
-        }
-        if (bootstrap_arg_is(argv[arg], "--version") || bootstrap_arg_is(argv[arg], "--help") ||
-            bootstrap_arg_is(argv[arg], "-h")) {
-            return CBM_DAEMON_PROCESS_STATELESS;
-        }
-        for (size_t command = 0;
-             command < sizeof(stateless_commands) / sizeof(stateless_commands[0]); command++) {
-            if (bootstrap_arg_is(argv[arg], stateless_commands[command])) {
-                return CBM_DAEMON_PROCESS_STATELESS;
-            }
+    for (int arg = BOOTSTRAP_ARGV_FIRST_USER_INDEX; arg < argc; arg++) {
+        cbm_daemon_process_role_t role = CBM_DAEMON_PROCESS_MCP_CLIENT;
+        if (bootstrap_top_level_role(argc, argv, arg, &role)) {
+            return role;
         }
     }
     return CBM_DAEMON_PROCESS_MCP_CLIENT;
@@ -227,8 +276,8 @@ bool cbm_daemon_bootstrap_launch_spec_init(const char *executable_path,
     memset(spec_out, 0, sizeof(*spec_out));
     spec_out->executable_path = executable_path;
     spec_out->argv[0] = executable_path;
-    spec_out->argv[1] = CBM_DAEMON_INTERNAL_ARG;
-    spec_out->argc = 2U;
+    spec_out->argv[BOOTSTRAP_DAEMON_ARGV_INDEX] = CBM_DAEMON_INTERNAL_ARG;
+    spec_out->argc = BOOTSTRAP_DAEMON_ARGC;
     spec_out->detached = true;
     spec_out->inherit_standard_handles = false;
     spec_out->use_shell = false;
@@ -240,8 +289,8 @@ bool cbm_daemon_bootstrap_launch_spec_init_permanent(const char *executable_path
     if (!cbm_daemon_bootstrap_launch_spec_init(executable_path, spec_out)) {
         return false;
     }
-    spec_out->argv[2] = CBM_DAEMON_PERMANENT_ARG;
-    spec_out->argc = 3U;
+    spec_out->argv[BOOTSTRAP_PERMANENT_DAEMON_ARGV_INDEX] = CBM_DAEMON_PERMANENT_ARG;
+    spec_out->argc = BOOTSTRAP_PERMANENT_DAEMON_ARGC;
     return true;
 }
 
@@ -272,7 +321,9 @@ static void bootstrap_pause(uint64_t deadline) {
     uint64_t remaining_ms = deadline - now;
     struct timespec pause = {
         .tv_sec = 0,
-        .tv_nsec = remaining_ms > 1 ? BOOTSTRAP_RETRY_NS : (long)(remaining_ms * 1000000ULL),
+        .tv_nsec = remaining_ms > BOOTSTRAP_MILLISECOND_RETRY_THRESHOLD
+                       ? BOOTSTRAP_RETRY_NS
+                       : (long)(remaining_ms * (uint64_t)BOOTSTRAP_NANOSECONDS_PER_MILLISECOND),
     };
     (void)cbm_nanosleep(&pause, NULL);
 }
@@ -358,6 +409,161 @@ static bool bootstrap_config_valid(const cbm_daemon_bootstrap_config_t *config,
            ops->startup_lock_release && ops->spawn_daemon;
 }
 
+typedef struct {
+    const cbm_daemon_bootstrap_config_t *config;
+    const cbm_daemon_bootstrap_ops_t *ops;
+    cbm_daemon_bootstrap_result_t *result;
+    uint64_t deadline;
+    cbm_daemon_bootstrap_cohort_t cohort;
+    cbm_daemon_runtime_client_t *client;
+    cbm_daemon_runtime_connect_result_t connect_result;
+    cbm_daemon_bootstrap_probe_status_t probe;
+    cbm_daemon_bootstrap_lock_t startup_lock;
+    bool lock_acquired;
+    bool generation_observed;
+} bootstrap_session_t;
+
+static void bootstrap_session_probe(bootstrap_session_t *session) {
+    session->probe =
+        bootstrap_probe(session->config, session->ops, &session->client, &session->connect_result);
+}
+
+static bool bootstrap_probe_has_generation(cbm_daemon_bootstrap_probe_status_t probe) {
+    return probe == CBM_DAEMON_BOOTSTRAP_PROBE_RESERVED ||
+           probe == CBM_DAEMON_BOOTSTRAP_PROBE_TERMINAL;
+}
+
+static void bootstrap_session_release_lock(bootstrap_session_t *session) {
+    if (session->lock_acquired) {
+        bootstrap_startup_lock_release_complete(session->ops, &session->startup_lock);
+        session->lock_acquired = false;
+    }
+}
+
+static void bootstrap_session_wait_for_generation(bootstrap_session_t *session) {
+    session->generation_observed = true;
+    bootstrap_pause(session->deadline);
+    bootstrap_session_probe(session);
+}
+
+static bool bootstrap_session_acquire_lock(bootstrap_session_t *session) {
+    int status = session->ops->startup_lock_try_acquire(
+        session->ops->context, session->config->endpoint, &session->startup_lock);
+    if (status < 0 || (status != BOOTSTRAP_LOCK_STATUS_HELD &&
+                       (status != BOOTSTRAP_LOCK_STATUS_ACQUIRED || !session->startup_lock))) {
+        session->probe = CBM_DAEMON_BOOTSTRAP_PROBE_ERROR;
+        return false;
+    }
+    if (status == BOOTSTRAP_LOCK_STATUS_HELD) {
+        bootstrap_pause(session->deadline);
+        bootstrap_session_probe(session);
+        return false;
+    }
+    session->lock_acquired = true;
+    bootstrap_session_probe(session);
+    return true;
+}
+
+static bool bootstrap_session_launch(bootstrap_session_t *session) {
+    cbm_daemon_bootstrap_launch_spec_t spec;
+    bool ready =
+        session->config->spawn_permanent
+            ? cbm_daemon_bootstrap_launch_spec_init_permanent(session->config->executable_path,
+                                                              &spec)
+            : cbm_daemon_bootstrap_launch_spec_init(session->config->executable_path, &spec);
+    if (!ready ||
+        !session->ops->startup_lock_prepare_handoff(session->ops->context, session->startup_lock) ||
+        !session->ops->spawn_daemon(session->ops->context, &spec)) {
+        session->probe = CBM_DAEMON_BOOTSTRAP_PROBE_ERROR;
+        return false;
+    }
+    session->result->daemon_spawned = true;
+    return true;
+}
+
+static void bootstrap_session_wait_for_spawn(bootstrap_session_t *session) {
+    do {
+        bootstrap_pause(session->deadline);
+        bootstrap_session_probe(session);
+        if (bootstrap_probe_has_generation(session->probe)) {
+            session->generation_observed = true;
+            bootstrap_session_release_lock(session);
+            return;
+        }
+    } while (bootstrap_probe_is_waitable(session->probe) && cbm_now_ms() < session->deadline);
+}
+
+static void bootstrap_session_process_absence(bootstrap_session_t *session) {
+    if (!bootstrap_session_acquire_lock(session)) {
+        return;
+    }
+    if (bootstrap_probe_has_generation(session->probe)) {
+        session->generation_observed = true;
+        bootstrap_session_release_lock(session);
+        return;
+    }
+    if (bootstrap_probe_is_finishable(session->probe) ||
+        session->probe == CBM_DAEMON_BOOTSTRAP_PROBE_ERROR) {
+        return;
+    }
+    if (session->probe != CBM_DAEMON_BOOTSTRAP_PROBE_UNAVAILABLE ||
+        !bootstrap_session_launch(session)) {
+        session->probe = CBM_DAEMON_BOOTSTRAP_PROBE_ERROR;
+        return;
+    }
+    bootstrap_session_wait_for_spawn(session);
+}
+
+static void bootstrap_session_run(bootstrap_session_t *session) {
+    while (cbm_now_ms() < session->deadline && bootstrap_probe_is_waitable(session->probe)) {
+        if (bootstrap_probe_has_generation(session->probe)) {
+            bootstrap_session_wait_for_generation(session);
+            continue;
+        }
+        bootstrap_session_process_absence(session);
+        if (session->lock_acquired) {
+            return;
+        }
+    }
+}
+
+static cbm_daemon_bootstrap_status_t bootstrap_cohort_failure(
+    cbm_version_cohort_status_t cohort_status, cbm_daemon_bootstrap_cohort_t cohort,
+    const cbm_daemon_conflict_t *conflict, const cbm_daemon_bootstrap_ops_t *ops,
+    cbm_daemon_bootstrap_result_t *result) {
+    result->status = cohort_status == CBM_VERSION_COHORT_CONFLICT ? CBM_DAEMON_BOOTSTRAP_CONFLICT
+                                                                  : CBM_DAEMON_BOOTSTRAP_FAILED;
+    bool formatted = cohort_status == CBM_VERSION_COHORT_CONFLICT &&
+                     cbm_daemon_conflict_format(conflict, result->message, sizeof(result->message));
+    if (!formatted) {
+        const char *reason = cohort_status == CBM_VERSION_COHORT_BUSY
+                                 ? "another CBM activation is in progress"
+                                 : "exact-build admission could not be verified";
+        (void)snprintf(result->message, sizeof(result->message), "CBM daemon could not start: %s",
+                       reason);
+    }
+    if (ops->visible_diagnostic) {
+        ops->visible_diagnostic(ops->context, result->message);
+    }
+    if (cohort) {
+        ops->cohort_release(ops->context, cohort);
+    }
+    return result->status;
+}
+
+static void bootstrap_session_report_failure(bootstrap_session_t *session) {
+    session->result->status = CBM_DAEMON_BOOTSTRAP_FAILED;
+    const char *message = session->generation_observed
+                              ? "CBM daemon is active or starting but could not accept this client "
+                                "within %u ms"
+                              : "CBM daemon could not start within %u ms";
+    (void)snprintf(session->result->message, sizeof(session->result->message), message,
+                   session->config->startup_timeout_ms);
+    if (session->ops->visible_diagnostic) {
+        session->ops->visible_diagnostic(session->ops->context, session->result->message);
+    }
+}
+
 cbm_daemon_bootstrap_status_t cbm_daemon_bootstrap_execute_with_ops(
     const cbm_daemon_bootstrap_config_t *config, const cbm_daemon_bootstrap_ops_t *ops,
     cbm_daemon_bootstrap_result_t *result_out) {
@@ -374,162 +580,44 @@ cbm_daemon_bootstrap_status_t cbm_daemon_bootstrap_execute_with_ops(
         return CBM_DAEMON_BOOTSTRAP_FAILED;
     }
 
-    uint64_t deadline = bootstrap_deadline_after(config->startup_timeout_ms);
-    cbm_daemon_bootstrap_cohort_t cohort = NULL;
+    bootstrap_session_t session = {
+        .config = config,
+        .ops = ops,
+        .result = result_out,
+        .deadline = bootstrap_deadline_after(config->startup_timeout_ms),
+    };
     cbm_daemon_conflict_t cohort_conflict;
-    cbm_version_cohort_status_t cohort_status = ops->cohort_acquire(
-        ops->context, config->endpoint, config->identity, deadline, &cohort, &cohort_conflict);
+    cbm_version_cohort_status_t cohort_status =
+        ops->cohort_acquire(ops->context, config->endpoint, config->identity, session.deadline,
+                            &session.cohort, &cohort_conflict);
     if (cohort_status != CBM_VERSION_COHORT_OK) {
-        result_out->status = cohort_status == CBM_VERSION_COHORT_CONFLICT
-                                 ? CBM_DAEMON_BOOTSTRAP_CONFLICT
-                                 : CBM_DAEMON_BOOTSTRAP_FAILED;
-        bool formatted = cohort_status == CBM_VERSION_COHORT_CONFLICT &&
-                         cbm_daemon_conflict_format(&cohort_conflict, result_out->message,
-                                                    sizeof(result_out->message));
-        if (!formatted) {
-            const char *reason = cohort_status == CBM_VERSION_COHORT_BUSY
-                                     ? "another CBM activation is in progress"
-                                     : "exact-build admission could not be verified";
-            (void)snprintf(result_out->message, sizeof(result_out->message),
-                           "CBM daemon could not start: %s", reason);
-        }
-        if (ops->visible_diagnostic) {
-            ops->visible_diagnostic(ops->context, result_out->message);
-        }
-        if (cohort) {
-            ops->cohort_release(ops->context, cohort);
-        }
-        return result_out->status;
+        return bootstrap_cohort_failure(cohort_status, session.cohort, &cohort_conflict, ops,
+                                        result_out);
     }
 
-    cbm_daemon_runtime_client_t *client = NULL;
-    cbm_daemon_runtime_connect_result_t connect_result;
-    cbm_daemon_bootstrap_probe_status_t probe =
-        bootstrap_probe(config, ops, &client, &connect_result);
-    if (bootstrap_probe_is_finishable(probe)) {
-        cbm_daemon_bootstrap_status_t status =
-            bootstrap_finish_probe(probe, client, &connect_result, ops, result_out);
-        ops->cohort_release(ops->context, cohort);
+    bootstrap_session_probe(&session);
+    if (bootstrap_probe_is_finishable(session.probe)) {
+        cbm_daemon_bootstrap_status_t status = bootstrap_finish_probe(
+            session.probe, session.client, &session.connect_result, ops, result_out);
+        ops->cohort_release(ops->context, session.cohort);
         return status;
     }
-    if (!bootstrap_probe_is_waitable(probe)) {
-        probe = CBM_DAEMON_BOOTSTRAP_PROBE_ERROR;
+    if (!bootstrap_probe_is_waitable(session.probe)) {
+        session.probe = CBM_DAEMON_BOOTSTRAP_PROBE_ERROR;
     }
 
-    cbm_daemon_bootstrap_lock_t startup_lock = NULL;
-    bool lock_acquired = false;
-    bool generation_observed = probe == CBM_DAEMON_BOOTSTRAP_PROBE_RESERVED ||
-                               probe == CBM_DAEMON_BOOTSTRAP_PROBE_TERMINAL;
-    while (cbm_now_ms() < deadline) {
-        if (!bootstrap_probe_is_waitable(probe)) {
-            break;
-        }
-        if (probe == CBM_DAEMON_BOOTSTRAP_PROBE_RESERVED ||
-            probe == CBM_DAEMON_BOOTSTRAP_PROBE_TERMINAL) {
-            /* A live or stopping generation owns the transition for now. Its
-             * disappearance is not sticky: after observing true absence, the
-             * same bootstrap attempt may serialize and become the next first
-             * client. The startup lock and the re-probe below prevent two
-             * replacements from being launched. */
-            generation_observed = true;
-            bootstrap_pause(deadline);
-            probe = bootstrap_probe(config, ops, &client, &connect_result);
-            continue;
-        }
-
-        int lock_status =
-            ops->startup_lock_try_acquire(ops->context, config->endpoint, &startup_lock);
-        if (lock_status < 0) {
-            probe = CBM_DAEMON_BOOTSTRAP_PROBE_ERROR;
-            break;
-        }
-        if (lock_status == 0) {
-            bootstrap_pause(deadline);
-            probe = bootstrap_probe(config, ops, &client, &connect_result);
-            continue;
-        }
-        if (lock_status != 1 || !startup_lock) {
-            probe = CBM_DAEMON_BOOTSTRAP_PROBE_ERROR;
-            break;
-        }
-
-        lock_acquired = true;
-        probe = bootstrap_probe(config, ops, &client, &connect_result);
-        if (probe == CBM_DAEMON_BOOTSTRAP_PROBE_RESERVED ||
-            probe == CBM_DAEMON_BOOTSTRAP_PROBE_TERMINAL) {
-            generation_observed = true;
-            bootstrap_startup_lock_release_complete(ops, &startup_lock);
-            lock_acquired = false;
-            continue;
-        }
-        if (bootstrap_probe_is_finishable(probe) || probe == CBM_DAEMON_BOOTSTRAP_PROBE_ERROR) {
-            break;
-        }
-        if (probe != CBM_DAEMON_BOOTSTRAP_PROBE_UNAVAILABLE) {
-            probe = CBM_DAEMON_BOOTSTRAP_PROBE_ERROR;
-            break;
-        }
-
-        cbm_daemon_bootstrap_launch_spec_t spec;
-        bool spec_ready =
-            config->spawn_permanent
-                ? cbm_daemon_bootstrap_launch_spec_init_permanent(config->executable_path, &spec)
-                : cbm_daemon_bootstrap_launch_spec_init(config->executable_path, &spec);
-        if (!spec_ready || !ops->startup_lock_prepare_handoff(ops->context, startup_lock) ||
-            !ops->spawn_daemon(ops->context, &spec)) {
-            probe = CBM_DAEMON_BOOTSTRAP_PROBE_ERROR;
-            break;
-        }
-        result_out->daemon_spawned = true;
-
-        /* Keep startup ownership only until the child becomes observable.
-         * Windows participant teardown reacquires the startup transition;
-         * retaining it while probing an observable generation can deadlock the
-         * bootstrap against a daemon that is trying to cleanly stand down. */
-        do {
-            bootstrap_pause(deadline);
-            probe = bootstrap_probe(config, ops, &client, &connect_result);
-            if (probe == CBM_DAEMON_BOOTSTRAP_PROBE_RESERVED ||
-                probe == CBM_DAEMON_BOOTSTRAP_PROBE_TERMINAL) {
-                generation_observed = true;
-                bootstrap_startup_lock_release_complete(ops, &startup_lock);
-                lock_acquired = false;
-                break;
-            }
-            if (!bootstrap_probe_is_waitable(probe)) {
-                break;
-            }
-        } while (cbm_now_ms() < deadline);
-        if (!lock_acquired) {
-            continue;
-        }
-        break;
-    }
-
-    if (lock_acquired) {
-        bootstrap_startup_lock_release_complete(ops, &startup_lock);
-    }
-    if (bootstrap_probe_is_finishable(probe)) {
-        cbm_daemon_bootstrap_status_t status =
-            bootstrap_finish_probe(probe, client, &connect_result, ops, result_out);
-        ops->cohort_release(ops->context, cohort);
+    session.generation_observed = bootstrap_probe_has_generation(session.probe);
+    bootstrap_session_run(&session);
+    bootstrap_session_release_lock(&session);
+    if (bootstrap_probe_is_finishable(session.probe)) {
+        cbm_daemon_bootstrap_status_t status = bootstrap_finish_probe(
+            session.probe, session.client, &session.connect_result, ops, result_out);
+        ops->cohort_release(ops->context, session.cohort);
         return status;
     }
 
-    result_out->status = CBM_DAEMON_BOOTSTRAP_FAILED;
-    if (generation_observed) {
-        (void)snprintf(result_out->message, sizeof(result_out->message),
-                       "CBM daemon is active or starting but could not accept this client "
-                       "within %u ms",
-                       config->startup_timeout_ms);
-    } else {
-        (void)snprintf(result_out->message, sizeof(result_out->message),
-                       "CBM daemon could not start within %u ms", config->startup_timeout_ms);
-    }
-    if (ops->visible_diagnostic) {
-        ops->visible_diagnostic(ops->context, result_out->message);
-    }
-    ops->cohort_release(ops->context, cohort);
+    bootstrap_session_report_failure(&session);
+    ops->cohort_release(ops->context, session.cohort);
     return result_out->status;
 }
 
@@ -550,10 +638,10 @@ cbm_daemon_bootstrap_probe_status_t cbm_daemon_bootstrap_classify_failed_connect
          * existing generation answered. Never reinterpret them as absence. */
         return CBM_DAEMON_BOOTSTRAP_PROBE_RESERVED;
     }
-    if (lifetime_status == 1) {
+    if (lifetime_status == BOOTSTRAP_LIFETIME_STATUS_HELD) {
         return CBM_DAEMON_BOOTSTRAP_PROBE_RESERVED;
     }
-    if (lifetime_status != 0) {
+    if (lifetime_status != BOOTSTRAP_LIFETIME_STATUS_FREE) {
         return CBM_DAEMON_BOOTSTRAP_PROBE_ERROR;
     }
     return connect_result->status == CBM_DAEMON_RUNTIME_CONNECT_ERROR
@@ -587,13 +675,13 @@ static cbm_daemon_bootstrap_probe_status_t bootstrap_production_probe(
         cbm_version_cohort_daemon_claim_presence(production->cohort->manager);
     if (claim == CBM_VERSION_COHORT_DAEMON_ABSENT) {
         int lifetime = cbm_daemon_ipc_lifetime_reservation_probe(endpoint);
-        if (lifetime == 0) {
+        if (lifetime == BOOTSTRAP_LIFETIME_STATUS_FREE) {
             /* Do not spend the per-connect timeout polling a generation that
              * both independent ownership signals prove absent. The startup
              * lock and its mandatory re-probe serialize a concurrent launch. */
             return CBM_DAEMON_BOOTSTRAP_PROBE_UNAVAILABLE;
         }
-        if (lifetime != 1) {
+        if (lifetime != BOOTSTRAP_LIFETIME_STATUS_HELD) {
             return CBM_DAEMON_BOOTSTRAP_PROBE_ERROR;
         }
     } else if (claim != CBM_VERSION_COHORT_DAEMON_COORDINATED) {
@@ -610,7 +698,8 @@ static cbm_daemon_bootstrap_probe_status_t bootstrap_production_probe(
      * cleaning-up generation is never mistaken for absence. */
     claim = cbm_version_cohort_daemon_claim_presence(production->cohort->manager);
     if (claim == CBM_VERSION_COHORT_DAEMON_COORDINATED) {
-        return cbm_daemon_bootstrap_classify_failed_connect(result_out, 1);
+        return cbm_daemon_bootstrap_classify_failed_connect(result_out,
+                                                            BOOTSTRAP_LIFETIME_STATUS_HELD);
     }
     if (claim != CBM_VERSION_COHORT_DAEMON_ABSENT) {
         return CBM_DAEMON_BOOTSTRAP_PROBE_ERROR;
@@ -624,7 +713,8 @@ static cbm_version_cohort_status_t bootstrap_production_cohort_acquire(
     const cbm_daemon_build_identity_t *identity, uint64_t deadline_ms,
     cbm_daemon_bootstrap_cohort_t *cohort_out, cbm_daemon_conflict_t *conflict_out) {
     *cohort_out = NULL;
-    bootstrap_production_cohort_t *cohort = calloc(1, sizeof(*cohort));
+    bootstrap_production_cohort_t *cohort =
+        calloc(BOOTSTRAP_ALLOCATION_ELEMENT_COUNT, sizeof(*cohort));
     if (cohort) {
         cohort->manager = cbm_version_cohort_manager_new(endpoint);
     }
@@ -843,8 +933,9 @@ static bool bootstrap_darwin_reaper_start(pid_t daemon) {
     bool detached =
         attributes_ready && pthread_attr_setdetachstate(&attributes, PTHREAD_CREATE_DETACHED) == 0;
     pthread_t thread;
-    int thread_status =
-        detached ? pthread_create(&thread, &attributes, bootstrap_darwin_reap, reaper) : -1;
+    int thread_status = detached
+                            ? pthread_create(&thread, &attributes, bootstrap_darwin_reap, reaper)
+                            : BOOTSTRAP_THREAD_START_FAILURE;
     if (attributes_ready) {
         (void)pthread_attr_destroy(&attributes);
     }
@@ -882,7 +973,7 @@ static bool bootstrap_production_spawn(void *context,
      * vector for the call. Each element is read from &spec->argv[i] — the
      * address of that element — not from &spec->argv, which is the address of
      * the array and would copy argv[0]'s bytes in place of the array. */
-    char *spawn_argv[CBM_DAEMON_BOOTSTRAP_LAUNCH_ARGC + 1U];
+    char *spawn_argv[CBM_DAEMON_BOOTSTRAP_LAUNCH_ARGC + BOOTSTRAP_POSIX_SPAWN_ARGV_TERMINATOR];
     for (size_t i = 0; i < sizeof(spawn_argv) / sizeof(spawn_argv[0]); i++) {
         memcpy(&spawn_argv[i], &spec->argv[i], sizeof(spawn_argv[i]));
     }

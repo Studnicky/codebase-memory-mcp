@@ -25,7 +25,26 @@ enum {
     DAEMON_SERVICE_IO_CAP = 64 * 1024,
     DAEMON_SERVICE_ESCAPED_VERSION_CAP = ((CBM_DAEMON_VERSION_TEXT_SIZE - 1) * 6) + 1,
     DAEMON_SERVICE_LOG_RECORD_CAP = 1536,
+    DAEMON_SERVICE_ASCII_PRINTABLE_FIRST = 0x20,
+    DAEMON_SERVICE_ASCII_PRINTABLE_LAST = 0x7e,
+    DAEMON_SERVICE_HEX_CHARACTERS_PER_BYTE = 2,
+    DAEMON_SERVICE_HEX_NIBBLE_BITS = 4,
+    DAEMON_SERVICE_HEX_NIBBLE_MASK = 0x0f,
+    DAEMON_SERVICE_HEX_LOW_NIBBLE_OFFSET = 1,
+    DAEMON_SERVICE_JSON_ESCAPE_PAIR_BYTES = 2,
+    DAEMON_SERVICE_JSON_UNICODE_ESCAPE_BYTES = 6,
+    DAEMON_SERVICE_TIME_FAILURE = -1,
+    DAEMON_SERVICE_INVALID_FILE_DESCRIPTOR = -1,
+    DAEMON_SERVICE_C_STRING_TERMINATOR_BYTES = 1,
+    DAEMON_SERVICE_ROTATED_LOG_SUFFIX_BYTES = 2,
+    DAEMON_SERVICE_LOCK_LOG_SUFFIX_BYTES = 5,
+    DAEMON_SERVICE_ROTATED_LOG_SUFFIX_CAP =
+        DAEMON_SERVICE_ROTATED_LOG_SUFFIX_BYTES + DAEMON_SERVICE_C_STRING_TERMINATOR_BYTES,
+    DAEMON_SERVICE_SINGLE_LINK_COUNT = 1,
 };
+
+static const uint64_t DAEMON_SERVICE_RENDEZVOUS_FNV_OFFSET_BASIS = 14695981039346656037ULL;
+static const uint64_t DAEMON_SERVICE_RENDEZVOUS_FNV_PRIME = 1099511628211ULL;
 
 /* Field order of the on-disk build-fingerprint record. */
 enum {
@@ -78,7 +97,7 @@ static bool version_valid(const char *version) {
      * malformed UTF-8 into either diagnostic channel. */
     for (size_t i = 0; i < length; i++) {
         unsigned char ch = (unsigned char)version[i];
-        if (ch < 0x20 || ch > 0x7e) {
+        if (ch < DAEMON_SERVICE_ASCII_PRINTABLE_FIRST || ch > DAEMON_SERVICE_ASCII_PRINTABLE_LAST) {
             return false;
         }
     }
@@ -149,8 +168,10 @@ static void digest_to_hex(const uint8_t digest[CBM_SHA256_DIGEST_LEN],
                           char out[CBM_DAEMON_BUILD_FINGERPRINT_SIZE]) {
     static const char hex[] = "0123456789abcdef";
     for (size_t i = 0; i < CBM_SHA256_DIGEST_LEN; i++) {
-        out[i * 2] = hex[digest[i] >> 4];
-        out[(i * 2) + 1] = hex[digest[i] & 0x0f];
+        out[i * DAEMON_SERVICE_HEX_CHARACTERS_PER_BYTE] =
+            hex[digest[i] >> DAEMON_SERVICE_HEX_NIBBLE_BITS];
+        out[(i * DAEMON_SERVICE_HEX_CHARACTERS_PER_BYTE) + DAEMON_SERVICE_HEX_LOW_NIBBLE_OFFSET] =
+            hex[digest[i] & DAEMON_SERVICE_HEX_NIBBLE_MASK];
     }
     out[CBM_SHA256_HEX_LEN] = '\0';
 }
@@ -162,13 +183,13 @@ bool cbm_daemon_rendezvous_key(char out[CBM_DAEMON_KEY_SIZE]) {
     /* This product-domain string is intentionally the only key input. Account
      * isolation comes from the authenticated IPC runtime, not spoofable text. */
     static const unsigned char domain[] = "codebase-memory-mcp:coordination-daemon";
-    uint64_t hash = 14695981039346656037ULL;
-    for (size_t i = 0; i < sizeof(domain) - 1; i++) {
+    uint64_t hash = DAEMON_SERVICE_RENDEZVOUS_FNV_OFFSET_BASIS;
+    for (size_t i = 0; i < sizeof(domain) - sizeof(domain[0]); i++) {
         hash ^= domain[i];
-        hash *= 1099511628211ULL;
+        hash *= DAEMON_SERVICE_RENDEZVOUS_FNV_PRIME;
     }
     int written = snprintf(out, CBM_DAEMON_KEY_SIZE, "%016llx", (unsigned long long)hash);
-    if (written != (int)CBM_DAEMON_KEY_SIZE - 1) {
+    if (written != (int)CBM_DAEMON_KEY_SIZE - (int)sizeof(out[0])) {
         out[0] = '\0';
         return false;
     }
@@ -265,23 +286,26 @@ static bool json_escape_version(const char *value, char out[DAEMON_SERVICE_ESCAP
     for (size_t i = 0; i < length; i++) {
         unsigned char ch = (unsigned char)value[i];
         if (ch == '"' || ch == '\\') {
-            if (used + 2 >= DAEMON_SERVICE_ESCAPED_VERSION_CAP) {
+            if (used + DAEMON_SERVICE_JSON_ESCAPE_PAIR_BYTES >=
+                DAEMON_SERVICE_ESCAPED_VERSION_CAP) {
                 return false;
             }
             out[used++] = '\\';
             out[used++] = (char)ch;
-        } else if (ch < 0x20) {
-            if (used + 6 >= DAEMON_SERVICE_ESCAPED_VERSION_CAP) {
+        } else if (ch < DAEMON_SERVICE_ASCII_PRINTABLE_FIRST) {
+            if (used + DAEMON_SERVICE_JSON_UNICODE_ESCAPE_BYTES >=
+                DAEMON_SERVICE_ESCAPED_VERSION_CAP) {
                 return false;
             }
             out[used++] = '\\';
             out[used++] = 'u';
             out[used++] = '0';
             out[used++] = '0';
-            out[used++] = hex[ch >> 4];
-            out[used++] = hex[ch & 0x0f];
+            out[used++] = hex[ch >> DAEMON_SERVICE_HEX_NIBBLE_BITS];
+            out[used++] = hex[ch & DAEMON_SERVICE_HEX_NIBBLE_MASK];
         } else {
-            if (used + 1 >= DAEMON_SERVICE_ESCAPED_VERSION_CAP) {
+            if (used + DAEMON_SERVICE_C_STRING_TERMINATOR_BYTES >=
+                DAEMON_SERVICE_ESCAPED_VERSION_CAP) {
                 return false;
             }
             out[used++] = (char)ch;
@@ -302,7 +326,7 @@ static bool conflict_log_record(const cbm_daemon_conflict_t *conflict,
         return false;
     }
     time_t timestamp = time(NULL);
-    if (timestamp == (time_t)-1) {
+    if (timestamp == (time_t)DAEMON_SERVICE_TIME_FAILURE) {
         return false;
     }
     int written;
@@ -349,7 +373,7 @@ static bool fd_cloexec(int fd) {
 static bool fd_regular_current_user(int fd, struct stat *status_out) {
     struct stat status;
     if (fstat(fd, &status) != 0 || !S_ISREG(status.st_mode) || status.st_uid != geteuid() ||
-        status.st_nlink != 1) {
+        status.st_nlink != DAEMON_SERVICE_SINGLE_LINK_COUNT) {
         return false;
     }
     if (status_out) {
@@ -575,10 +599,7 @@ bool cbm_daemon_build_fingerprint_native_file(uintptr_t native_file,
         if (count > 0) {
             cbm_sha256_update(&context, buffer, (size_t)count);
             offset += (off_t)count;
-        } else if (count == 0) {
-            ok = false;
-            break;
-        } else if (errno != EINTR) {
+        } else if (count == 0 || errno != EINTR) {
             ok = false;
             break;
         }
@@ -624,14 +645,14 @@ typedef struct {
     int dir_fd;
     char storage[DAEMON_SERVICE_PATH_CAP];
     char *base;
-    char rotated[NAME_MAX + 3];
-    char lock[NAME_MAX + 1];
+    char rotated[NAME_MAX + DAEMON_SERVICE_ROTATED_LOG_SUFFIX_CAP];
+    char lock[NAME_MAX + DAEMON_SERVICE_C_STRING_TERMINATOR_BYTES];
 } posix_log_path_t;
 
 static void posix_log_path_close(posix_log_path_t *path) {
     if (path && path->dir_fd >= 0) {
         (void)close(path->dir_fd);
-        path->dir_fd = -1;
+        path->dir_fd = DAEMON_SERVICE_INVALID_FILE_DESCRIPTOR;
     }
 }
 
@@ -641,12 +662,12 @@ static bool posix_log_path_open(const char *log_path, posix_log_path_t *path) {
         return false;
     }
     memset(path, 0, sizeof(*path));
-    path->dir_fd = -1;
-    memcpy(path->storage, log_path, length + 1);
+    path->dir_fd = DAEMON_SERVICE_INVALID_FILE_DESCRIPTOR;
+    memcpy(path->storage, log_path, length + DAEMON_SERVICE_C_STRING_TERMINATOR_BYTES);
     char *slash = strrchr(path->storage, '/');
     const char *parent = ".";
     if (slash) {
-        path->base = slash + 1;
+        path->base = slash + DAEMON_SERVICE_C_STRING_TERMINATOR_BYTES;
         if (slash == path->storage) {
             parent = "/";
         } else {
@@ -657,8 +678,8 @@ static bool posix_log_path_open(const char *log_path, posix_log_path_t *path) {
         path->base = path->storage;
     }
     size_t base_length = strlen(path->base);
-    if (base_length == 0 || base_length > NAME_MAX - 5 || strcmp(path->base, ".") == 0 ||
-        strcmp(path->base, "..") == 0) {
+    if (base_length == 0 || base_length > NAME_MAX - DAEMON_SERVICE_LOCK_LOG_SUFFIX_BYTES ||
+        strcmp(path->base, ".") == 0 || strcmp(path->base, "..") == 0) {
         return false;
     }
     int rotated_written = snprintf(path->rotated, sizeof(path->rotated), "%s.1", path->base);
@@ -671,7 +692,7 @@ static bool posix_log_path_open(const char *log_path, posix_log_path_t *path) {
     struct stat parent_status;
     if (path->dir_fd < 0 || !fd_cloexec(path->dir_fd) || fstat(path->dir_fd, &parent_status) != 0 ||
         !S_ISDIR(parent_status.st_mode) || parent_status.st_uid != geteuid() ||
-        (parent_status.st_mode & 0022) != 0) {
+        (parent_status.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
         posix_log_path_close(path);
         return false;
     }
@@ -680,7 +701,7 @@ static bool posix_log_path_open(const char *log_path, posix_log_path_t *path) {
 
 static int posix_lock_file_open(const posix_log_path_t *path, bool *created_out) {
     int flags = O_RDWR | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK;
-    int fd = openat(path->dir_fd, path->lock, flags | O_CREAT | O_EXCL, 0600);
+    int fd = openat(path->dir_fd, path->lock, flags | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR);
     bool created = fd >= 0;
     if (fd < 0 && errno == EEXIST) {
         fd = openat(path->dir_fd, path->lock, flags);
@@ -688,14 +709,15 @@ static int posix_lock_file_open(const posix_log_path_t *path, bool *created_out)
     struct stat status;
     struct stat by_path;
     if (fd < 0 || !fd_cloexec(fd) || !fd_regular_current_user(fd, &status) ||
-        fchmod(fd, 0600) != 0 ||
+        fchmod(fd, S_IRUSR | S_IWUSR) != 0 ||
         fstatat(path->dir_fd, path->lock, &by_path, AT_SYMLINK_NOFOLLOW) != 0 ||
-        !S_ISREG(by_path.st_mode) || by_path.st_uid != geteuid() || by_path.st_nlink != 1 ||
-        status.st_dev != by_path.st_dev || status.st_ino != by_path.st_ino) {
+        !S_ISREG(by_path.st_mode) || by_path.st_uid != geteuid() ||
+        by_path.st_nlink != DAEMON_SERVICE_SINGLE_LINK_COUNT || status.st_dev != by_path.st_dev ||
+        status.st_ino != by_path.st_ino) {
         if (fd >= 0) {
             (void)close(fd);
         }
-        return -1;
+        return DAEMON_SERVICE_INVALID_FILE_DESCRIPTOR;
     }
     *created_out = created;
     return fd;
@@ -713,7 +735,7 @@ static bool posix_lock_exclusive(int fd) {
 static int posix_log_file_open(const posix_log_path_t *path, struct stat *status_out,
                                bool *created_out) {
     int flags = O_RDWR | O_APPEND | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK;
-    int fd = openat(path->dir_fd, path->base, flags | O_CREAT | O_EXCL, 0600);
+    int fd = openat(path->dir_fd, path->base, flags | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR);
     bool created = fd >= 0;
     if (fd < 0 && errno == EEXIST) {
         fd = openat(path->dir_fd, path->base, flags);
@@ -721,14 +743,14 @@ static int posix_log_file_open(const posix_log_path_t *path, struct stat *status
     struct stat status;
     struct stat by_path;
     if (fd < 0 || !fd_cloexec(fd) || !fd_regular_current_user(fd, &status) ||
-        fchmod(fd, 0600) != 0 ||
+        fchmod(fd, S_IRUSR | S_IWUSR) != 0 ||
         fstatat(path->dir_fd, path->base, &by_path, AT_SYMLINK_NOFOLLOW) != 0 ||
         !S_ISREG(by_path.st_mode) || status.st_dev != by_path.st_dev ||
         status.st_ino != by_path.st_ino) {
         if (fd >= 0) {
             (void)close(fd);
         }
-        return -1;
+        return DAEMON_SERVICE_INVALID_FILE_DESCRIPTOR;
     }
     *status_out = status;
     *created_out = created;
@@ -783,6 +805,55 @@ static bool posix_log_refresh_locked(const posix_log_path_t *path, int fd,
     return true;
 }
 
+static bool posix_log_rotate(const posix_log_path_t *path, int *fd, struct stat *status,
+                             bool *created, bool *directory_changed) {
+    bool renamed = renameat(path->dir_fd, path->base, path->dir_fd, path->rotated) == 0;
+    bool closed = close(*fd) == 0;
+    *fd = DAEMON_SERVICE_INVALID_FILE_DESCRIPTOR;
+    if (!renamed || !closed) {
+        return false;
+    }
+    *directory_changed = true;
+    *fd = posix_log_file_open(path, status, created);
+    if (*fd < 0 || !posix_log_refresh_locked(path, *fd, status)) {
+        return false;
+    }
+    *directory_changed = *directory_changed || *created;
+    return true;
+}
+
+static bool posix_log_append_record(int fd, const struct stat *status, const char *record,
+                                    size_t record_length) {
+    if (status->st_size == 0) {
+        return posix_complete_write(fd, record, record_length, status->st_size);
+    }
+    char last = '\n';
+    ssize_t count;
+    do {
+        count = pread(fd, &last, sizeof(last), status->st_size - (off_t)sizeof(last));
+    } while (count < 0 && errno == EINTR);
+    return count == (ssize_t)sizeof(last) && last == '\n' &&
+           posix_complete_write(fd, record, record_length, status->st_size);
+}
+
+static bool posix_log_finish(posix_log_path_t *path, int fd, int lock_fd, bool directory_changed,
+                             bool ok) {
+    if (fd >= 0 && close(fd) != 0) {
+        ok = false;
+    }
+    if (lock_fd >= 0) {
+        (void)flock(lock_fd, LOCK_UN);
+        if (close(lock_fd) != 0) {
+            ok = false;
+        }
+    }
+    if (ok && directory_changed) {
+        ok = posix_sync(path->dir_fd);
+    }
+    posix_log_path_close(path);
+    return ok;
+}
+
 static bool posix_log_append(const char *log_path, const char *record, size_t record_length,
                              size_t cap_bytes) {
     posix_log_path_t path;
@@ -800,54 +871,20 @@ static bool posix_log_append(const char *log_path, const char *record, size_t re
     }
     struct stat status;
     bool created = false;
-    int fd = ok ? posix_log_file_open(&path, &status, &created) : -1;
+    int fd =
+        ok ? posix_log_file_open(&path, &status, &created) : DAEMON_SERVICE_INVALID_FILE_DESCRIPTOR;
     ok = ok && fd >= 0 && posix_log_refresh_locked(&path, fd, &status);
     bool directory_changed = lock_created || created;
-    bool rotate = false;
     if (ok && status.st_size > 0) {
         uintmax_t size = (uintmax_t)status.st_size;
-        rotate = size > cap_bytes || record_length > cap_bytes - (size_t)size;
-    }
-    if (ok && rotate) {
-        ok = renameat(path.dir_fd, path.base, path.dir_fd, path.rotated) == 0;
-        ok = close(fd) == 0 && ok;
-        fd = -1;
-        directory_changed = directory_changed || ok;
-        if (ok) {
-            fd = posix_log_file_open(&path, &status, &created);
-            ok = fd >= 0 && posix_log_refresh_locked(&path, fd, &status);
-            directory_changed = directory_changed || created;
+        if (size > cap_bytes || record_length > cap_bytes - (size_t)size) {
+            ok = posix_log_rotate(&path, &fd, &status, &created, &directory_changed);
         }
     }
     if (ok) {
-        char last = '\n';
-        if (status.st_size > 0) {
-            ssize_t count;
-            do {
-                count = pread(fd, &last, 1, status.st_size - 1);
-            } while (count < 0 && errno == EINTR);
-            ok = count == 1 && last == '\n';
-        }
-        if (ok) {
-            ok = posix_complete_write(fd, record, record_length, status.st_size);
-        }
+        ok = posix_log_append_record(fd, &status, record, record_length);
     }
-    if (fd >= 0) {
-        if (close(fd) != 0) {
-            ok = false;
-        }
-    }
-    if (lock_fd >= 0) {
-        (void)flock(lock_fd, LOCK_UN);
-        if (close(lock_fd) != 0) {
-            ok = false;
-        }
-    }
-    if (ok && directory_changed) {
-        ok = posix_sync(path.dir_fd);
-    }
-    posix_log_path_close(&path);
-    return ok;
+    return posix_log_finish(&path, fd, lock_fd, directory_changed, ok);
 }
 
 #else /* _WIN32 */

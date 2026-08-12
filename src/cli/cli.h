@@ -202,6 +202,8 @@ cbm_detected_agents_t cbm_detect_agents(const char *home_dir, cbm_scan_mode_t mo
 int cbm_install_agent_configs(const char *home, const char *binary_path, bool force, bool dry_run);
 
 #ifdef CBM_CLI_ENABLE_TEST_API
+void cbm_set_auto_answer_for_test(int value);
+int cbm_install_handle_existing_indexes(const char *home, bool reset, bool dry_run);
 int cbm_build_qwen_hook_command_for_testing(const char *binary_path, bool windows, char *command,
                                             size_t command_size, char *shell, size_t shell_size);
 int cbm_build_qoder_hook_command_for_testing(const char *binary_path, bool windows, char *command,

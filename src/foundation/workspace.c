@@ -14,6 +14,8 @@
 #include <stdio.h>
 #include <string.h>
 
+enum { WS_PATH_LAST_CHAR_OFFSET = 1 };
+
 /* ── Path containment ─────────────────────────────────────────────
  *
  * cbm_path_within_root is declared in workspace.h and used by the root
@@ -71,7 +73,8 @@ static bool canonical_path_has_root(const char *root_path, const char *candidate
     size_t candidate_len = strlen(candidate_path);
     bool prefix_equal =
         root_len <= candidate_len && strncmp(candidate_path, root_path, root_len) == 0;
-    bool root_ends_separator = root_len > 0 && root_path[root_len - 1] == '/';
+    bool root_ends_separator =
+        root_len > 0 && root_path[root_len - WS_PATH_LAST_CHAR_OFFSET] == '/';
     bool boundary = root_ends_separator || root_len == candidate_len ||
                     (root_len < candidate_len && candidate_path[root_len] == '/');
     return prefix_equal && boundary;
@@ -103,6 +106,18 @@ enum {
      * enough for a list; POSIX's is not. */
     WS_MIN_DEPTH_POSIX = 2,
     WS_MIN_DEPTH_WINDOWS = 1,
+    WS_PATH_SECOND_CHAR_INDEX = 1,
+    WS_PATH_THIRD_CHAR_INDEX = 2,
+    WS_POSIX_ROOT_PREFIX_LENGTH = 1,
+    WS_DRIVE_PREFIX_LENGTH = 2,
+    WS_DRIVE_ROOT_PREFIX_LENGTH = 3,
+    WS_PRIVATE_COMPONENT_LENGTH = sizeof("private") - sizeof(""),
+    WS_PREVIOUS_CHAR_OFFSET = 1,
+    WS_NEXT_CHAR_OFFSET = 1,
+    WS_GRANT_MARKER_LENGTH = 1,
+    WS_WINDOWS_USER_TREE_COUNT = 1,
+    WS_FREAD_ITEM_COUNT = 1,
+    WS_ASCII_PRINTABLE_START = 0x20,
 };
 
 static bool ws_is_sep(char c) {
@@ -116,8 +131,8 @@ static size_t ws_volume_prefix_len(const char *path) {
         return 0;
     }
     /* UNC: two separators, a host, then a share. */
-    if (ws_is_sep(path[0]) && ws_is_sep(path[1])) {
-        size_t i = 2;
+    if (ws_is_sep(path[0]) && ws_is_sep(path[WS_PATH_SECOND_CHAR_INDEX])) {
+        size_t i = WS_DRIVE_PREFIX_LENGTH;
         while (path[i] && !ws_is_sep(path[i])) { /* host */
             i++;
         }
@@ -130,25 +145,26 @@ static size_t ws_volume_prefix_len(const char *path) {
         return i;
     }
     if (ws_is_sep(path[0])) {
-        return 1;
+        return WS_POSIX_ROOT_PREFIX_LENGTH;
     }
     /* Drive-letter root, with or without a trailing separator. */
-    if (path[1] == ':' &&
+    if (path[WS_PATH_SECOND_CHAR_INDEX] == ':' &&
         ((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z'))) {
-        return ws_is_sep(path[2]) ? 3 : 2;
+        return ws_is_sep(path[WS_PATH_THIRD_CHAR_INDEX]) ? WS_DRIVE_ROOT_PREFIX_LENGTH
+                                                         : WS_DRIVE_PREFIX_LENGTH;
     }
     return 0;
 }
 
 static bool ws_is_unc(const char *path) {
-    return path && ws_is_sep(path[0]) && ws_is_sep(path[1]);
+    return path && ws_is_sep(path[0]) && ws_is_sep(path[WS_PATH_SECOND_CHAR_INDEX]);
 }
 
 static bool ws_is_windows_style(const char *path) {
     if (!path || !path[0]) {
         return false;
     }
-    return path[1] == ':' &&
+    return path[WS_PATH_SECOND_CHAR_INDEX] == ':' &&
            ((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z'));
 }
 
@@ -164,8 +180,9 @@ int cbm_workspace_path_depth(const char *canonical_path) {
      * as two deep, sailing past a minimum of two — exactly the path the reports
      * demonstrate. Treat a leading "private" as transparent so depth reflects the
      * tree the user named. "/private/tmp/proj" still counts two and is allowed. */
-    if (strncmp(p, "private", 7) == 0 && (ws_is_sep(p[7]) || p[7] == '\0')) {
-        p += 7;
+    if (strncmp(p, "private", WS_PRIVATE_COMPONENT_LENGTH) == 0 &&
+        (ws_is_sep(p[WS_PRIVATE_COMPONENT_LENGTH]) || p[WS_PRIVATE_COMPONENT_LENGTH] == '\0')) {
+        p += WS_PRIVATE_COMPONENT_LENGTH;
     }
     while (*p) {
         while (ws_is_sep(*p)) {
@@ -297,7 +314,7 @@ static bool ws_is_ancestor_or_equal(const char *a, const char *b) {
         return false;
     }
     size_t la = strlen(a);
-    while (la > 1 && ws_is_sep(a[la - 1])) {
+    while (la > WS_POSIX_ROOT_PREFIX_LENGTH && ws_is_sep(a[la - WS_PREVIOUS_CHAR_OFFSET])) {
         la--;
     }
     if (strncmp(a, b, la) != 0) {
@@ -378,8 +395,9 @@ cbm_ws_verdict_t cbm_workspace_classify_root(const char *canonical_path, const c
 
     /* "C:/Users" is the user tree itself — refuse it as a root, but leave the
      * projects below it alone; that is where Windows users actually work. */
-    if (windows_style && depth == 1 &&
-        ws_first_component_matches(canonical_path, &WS_WINDOWS_USER_TREE, 1, true)) {
+    if (windows_style && depth == WS_MIN_DEPTH_WINDOWS &&
+        ws_first_component_matches(canonical_path, &WS_WINDOWS_USER_TREE,
+                                   WS_WINDOWS_USER_TREE_COUNT, true)) {
         return CBM_WS_DENY_SENSITIVE;
     }
 
@@ -440,14 +458,15 @@ static int ws_grant_walk(const char *cache_dir,
     int seen = 0;
     while (fgets(line, (int)sizeof(line), f)) {
         size_t len = strlen(line);
-        while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
+        while (len > 0 && (line[len - WS_PREVIOUS_CHAR_OFFSET] == '\n' ||
+                           line[len - WS_PREVIOUS_CHAR_OFFSET] == '\r')) {
             line[--len] = '\0';
         }
         if (len == 0 || line[0] == '#') {
             continue;
         }
         bool sensitive = line[0] == WS_SENSITIVE_MARK;
-        const char *root = sensitive ? line + 1 : line;
+        const char *root = sensitive ? line + WS_GRANT_MARKER_LENGTH : line;
         if (!root[0]) {
             continue;
         }
@@ -502,6 +521,53 @@ bool cbm_workspace_grant_list(const char *cache_dir, char *out, size_t out_sz) {
     return ws_grant_walk(cache_dir, ws_list_visit, &l) > 0;
 }
 
+static void ws_set_error(char *err, size_t err_sz, const char *message) {
+    if (err && err_sz) {
+        (void)snprintf(err, err_sz, "%s", message);
+    }
+}
+
+static bool ws_grant_verdict_allowed(cbm_ws_verdict_t verdict, bool approve_sensitive, char *err,
+                                     size_t err_sz) {
+    if (verdict == CBM_WS_ALLOW) {
+        return true;
+    }
+    if (!cbm_workspace_verdict_is_overridable(verdict)) {
+        ws_set_error(err, err_sz, cbm_workspace_verdict_reason(verdict));
+        return false;
+    }
+    if (approve_sensitive) {
+        return true;
+    }
+    if (err && err_sz) {
+        (void)snprintf(err, err_sz, "%s; re-run with --approve-sensitive if that is intended",
+                       cbm_workspace_verdict_reason(verdict));
+    }
+    return false;
+}
+
+static bool ws_write_grant(const char *cache_dir, const char *canonical_path, bool sensitive,
+                           char *err, size_t err_sz) {
+    char store[WS_LINE_MAX];
+    if (!cbm_workspace_grant_path(cache_dir, store, sizeof(store))) {
+        ws_set_error(err, err_sz, "cache path too long");
+        return false;
+    }
+    FILE *file = cbm_fopen(store, "a");
+    if (!file) {
+        if (err && err_sz) {
+            (void)snprintf(err, err_sz, "cannot write %s", store);
+        }
+        return false;
+    }
+    (void)fprintf(file, "%s%s\n", sensitive ? "!" : "", canonical_path);
+    bool written = fclose(file) == 0;
+    if (!written && err && err_sz) {
+        (void)snprintf(err, err_sz, "cannot write %s", store);
+    }
+    return written;
+}
+
 bool cbm_workspace_grant_add(const char *cache_dir, const char *home_dir,
                              const char *canonical_path, bool approve_sensitive, char *err,
                              size_t err_sz) {
@@ -516,22 +582,8 @@ bool cbm_workspace_grant_add(const char *cache_dir, const char *home_dir,
     }
 
     cbm_ws_verdict_t verdict = cbm_workspace_classify_root(canonical_path, home_dir, cache_dir);
-    if (verdict != CBM_WS_ALLOW) {
-        if (!cbm_workspace_verdict_is_overridable(verdict)) {
-            if (err) {
-                snprintf(err, err_sz, "%s", cbm_workspace_verdict_reason(verdict));
-            }
-            return false;
-        }
-        if (!approve_sensitive) {
-            /* Refuse by default and name the flag, rather than asking a question
-             * whose answer we cannot authenticate. */
-            if (err) {
-                snprintf(err, err_sz, "%s; re-run with --approve-sensitive if that is intended",
-                         cbm_workspace_verdict_reason(verdict));
-            }
-            return false;
-        }
+    if (!ws_grant_verdict_allowed(verdict, approve_sensitive, err, err_sz)) {
+        return false;
     }
 
     /* Already present is success, not a duplicate error. */
@@ -541,27 +593,43 @@ bool cbm_workspace_grant_add(const char *cache_dir, const char *home_dir,
         return true;
     }
 
-    char store[WS_LINE_MAX];
-    if (!cbm_workspace_grant_path(cache_dir, store, sizeof(store))) {
-        if (err) {
-            snprintf(err, err_sz, "cache path too long");
+    return ws_write_grant(cache_dir, canonical_path, verdict == CBM_WS_DENY_SENSITIVE, err, err_sz);
+}
+
+static bool ws_root_matches_declared_boundary(const char *canonical_path, const char *cache_dir,
+                                              const char *configured_root, ws_match_t *match) {
+    int grants = ws_grant_walk(cache_dir, ws_match_visit, match);
+    bool configured = configured_root && configured_root[0];
+    bool configured_contains = configured && cbm_path_within_root(configured_root, canonical_path);
+    return (grants == 0 && !configured) || match->contained || configured_contains;
+}
+
+static void ws_set_boundary_error(char *err, size_t err_sz, const char *canonical_path) {
+    if (err && err_sz) {
+        (void)snprintf(err, err_sz,
+                       "%s is outside the allowed root. To allow it, run: "
+                       "codebase-memory-mcp allow-root %s",
+                       canonical_path, canonical_path);
+    }
+}
+
+static bool ws_root_verdict_allowed(cbm_ws_verdict_t verdict, const ws_match_t *match,
+                                    const char *canonical_path, char *err, size_t err_sz) {
+    if (verdict == CBM_WS_ALLOW || (verdict == CBM_WS_DENY_SENSITIVE && match->exact_sensitive)) {
+        return true;
+    }
+    if (err && err_sz) {
+        if (cbm_workspace_verdict_is_overridable(verdict)) {
+            (void)snprintf(err, err_sz,
+                           "%s: %s. To index it anyway, run: codebase-memory-mcp allow-root "
+                           "--approve-sensitive %s",
+                           canonical_path, cbm_workspace_verdict_reason(verdict), canonical_path);
+        } else {
+            (void)snprintf(err, err_sz, "%s: %s", canonical_path,
+                           cbm_workspace_verdict_reason(verdict));
         }
-        return false;
     }
-    FILE *f = cbm_fopen(store, "a");
-    if (!f) {
-        if (err) {
-            snprintf(err, err_sz, "cannot write %s", store);
-        }
-        return false;
-    }
-    bool sensitive = verdict == CBM_WS_DENY_SENSITIVE;
-    (void)fprintf(f, "%s%s\n", sensitive ? "!" : "", canonical_path);
-    bool ok = fclose(f) == 0;
-    if (!ok && err) {
-        snprintf(err, err_sz, "cannot write %s", store);
-    }
-    return ok;
+    return false;
 }
 
 bool cbm_workspace_root_allowed(const char *canonical_path, const char *home_dir,
@@ -578,19 +646,14 @@ bool cbm_workspace_root_allowed(const char *canonical_path, const char *home_dir
     }
 
     ws_match_t match = {canonical_path, false, false};
-    int grants = ws_grant_walk(cache_dir, ws_match_visit, &match);
-
-    /* A configured root behaves as an additional grant so existing
-     * CBM_ALLOWED_ROOT deployments keep working unchanged. */
-    bool configured = configured_root && configured_root[0];
-    bool configured_contains = configured && cbm_path_within_root(configured_root, canonical_path);
 
     /* Containment first when a boundary has actually been declared. A path
      * outside a configured root is best explained as exactly that, and the
      * wording is what callers and the shell contracts already match on. Breadth
      * then applies to paths that ARE inside the declared root but are still too
      * broad to index as one unit. */
-    bool boundary_declared = grants > 0 || configured;
+    bool boundary_allows =
+        ws_root_matches_declared_boundary(canonical_path, cache_dir, configured_root, &match);
     /* No manifest consultation here, deliberately.
      *
      * A project's manifest authorizes outside roots FOR THAT PROJECT, so the
@@ -603,41 +666,13 @@ bool cbm_workspace_root_allowed(const char *canonical_path, const char *home_dir
      * The consuming half belongs where the project context exists: discovery
      * walking a project's approved extra roots. cbm_workspace_manifest_allows is
      * the query that half will use. */
-    if (boundary_declared && !match.contained && !configured_contains) {
-        if (err) {
-            /* Keep the "outside the allowed root" wording: changing it broke an
-             * assertion whose early return then leaked CBM_ALLOWED_ROOT into
-             * every later test in that suite. Guidance is appended, not
-             * substituted. */
-            snprintf(err, err_sz,
-                     "%s is outside the allowed root. To allow it, run: "
-                     "codebase-memory-mcp allow-root %s",
-                     canonical_path, canonical_path);
-        }
+    if (!boundary_allows) {
+        ws_set_boundary_error(err, err_sz, canonical_path);
         return false;
     }
 
     cbm_ws_verdict_t verdict = cbm_workspace_classify_root(canonical_path, home_dir, cache_dir);
-    if (verdict == CBM_WS_ALLOW) {
-        return true;
-    }
-    /* An explicit human approval recorded for exactly this path is the only thing
-     * that lifts a sensitive refusal. Absolute and shallow refusals cannot be
-     * lifted at all. */
-    if (verdict == CBM_WS_DENY_SENSITIVE && match.exact_sensitive) {
-        return true;
-    }
-    if (err) {
-        if (cbm_workspace_verdict_is_overridable(verdict)) {
-            snprintf(err, err_sz,
-                     "%s: %s. To index it anyway, run: codebase-memory-mcp allow-root "
-                     "--approve-sensitive %s",
-                     canonical_path, cbm_workspace_verdict_reason(verdict), canonical_path);
-        } else {
-            snprintf(err, err_sz, "%s: %s", canonical_path, cbm_workspace_verdict_reason(verdict));
-        }
-    }
-    return false;
+    return ws_root_verdict_allowed(verdict, &match, canonical_path, err, err_sz);
 }
 
 /* ── Environment helpers ──────────────────────────────────────────────────── */
@@ -658,6 +693,60 @@ const char *cbm_workspace_cache_dir(void) {
 }
 
 /* ── Per-project request manifest ─────────────────────────────────────────── */
+
+static char *ws_manifest_read_raw(FILE *file, size_t *raw_len) {
+    char *raw = NULL;
+    *raw_len = 0;
+    char chunk[WS_LINE_MAX];
+    size_t got = 0;
+    while ((got = fread(chunk, WS_FREAD_ITEM_COUNT, sizeof(chunk), file)) > 0) {
+        char *grown = realloc(raw, *raw_len + got);
+        if (!grown) {
+            free(raw);
+            return NULL;
+        }
+        raw = grown;
+        memcpy(raw + *raw_len, chunk, got);
+        *raw_len += got;
+    }
+    return raw;
+}
+
+static bool ws_manifest_append_entry(cbm_ws_manifest_t *manifest, const char *entry,
+                                     size_t length) {
+    if (length >= sizeof(manifest->entries[0]) || manifest->count >= CBM_WS_MANIFEST_MAX_ENTRIES) {
+        return false;
+    }
+    for (size_t i = 0; i < length; i++) {
+        if ((unsigned char)entry[i] < WS_ASCII_PRINTABLE_START) {
+            return false;
+        }
+    }
+    memcpy(manifest->entries[manifest->count], entry, length);
+    manifest->entries[manifest->count][length] = '\0';
+    manifest->count++;
+    return true;
+}
+
+static bool ws_manifest_parse(cbm_ws_manifest_t *manifest, const char *raw, size_t raw_len) {
+    size_t line_start = 0;
+    for (size_t i = 0; i <= raw_len; i++) {
+        if (i != raw_len && raw[i] != '\n') {
+            continue;
+        }
+        size_t length = i - line_start;
+        while (length > 0 && (raw[line_start + length - WS_PREVIOUS_CHAR_OFFSET] == '\r' ||
+                              raw[line_start + length - WS_PREVIOUS_CHAR_OFFSET] == ' ')) {
+            length--;
+        }
+        if (length > 0 && raw[line_start] != '#' &&
+            !ws_manifest_append_entry(manifest, raw + line_start, length)) {
+            return false;
+        }
+        line_start = i + WS_NEXT_CHAR_OFFSET;
+    }
+    return true;
+}
 
 bool cbm_workspace_manifest_read(const char *project_root, cbm_ws_manifest_t *out) {
     if (!out) {
@@ -680,60 +769,16 @@ bool cbm_workspace_manifest_read(const char *project_root, cbm_ws_manifest_t *ou
 
     /* Hash the raw bytes, not the parsed entries: a comment or ordering change is
      * still a change the approver has not seen, and should lapse approval. */
-    char *raw = NULL;
     size_t raw_len = 0;
-    char chunk[WS_LINE_MAX];
-    size_t got = 0;
-    while ((got = fread(chunk, 1, sizeof(chunk), f)) > 0) {
-        char *grown = realloc(raw, raw_len + got);
-        if (!grown) {
-            free(raw);
-            (void)fclose(f);
-            return false;
-        }
-        raw = grown;
-        memcpy(raw + raw_len, chunk, got);
-        raw_len += got;
-    }
+    char *raw = ws_manifest_read_raw(f, &raw_len);
     (void)fclose(f);
+    if (!raw && raw_len != 0) {
+        return false;
+    }
     out->present = true;
     cbm_sha256_hex(raw ? raw : "", raw_len, out->digest);
 
-    /* Parse entries out of the same bytes. */
-    bool ok = true;
-    size_t line_start = 0;
-    for (size_t i = 0; i <= raw_len && ok; i++) {
-        bool eol = (i == raw_len) || raw[i] == '\n';
-        if (!eol) {
-            continue;
-        }
-        size_t len = i - line_start;
-        while (len > 0 && (raw[line_start + len - 1] == '\r' || raw[line_start + len - 1] == ' ')) {
-            len--;
-        }
-        if (len > 0 && raw[line_start] != '#') {
-            if (len >= sizeof(out->entries[0]) || out->count >= CBM_WS_MANIFEST_MAX_ENTRIES) {
-                ok = false;
-                break;
-            }
-            /* A control character in a path is never legitimate and is exactly how
-             * a crafted entry would try to smuggle a second value past a reader. */
-            for (size_t k = 0; k < len; k++) {
-                unsigned char c = (unsigned char)raw[line_start + k];
-                if (c < 0x20) {
-                    ok = false;
-                    break;
-                }
-            }
-            if (!ok) {
-                break;
-            }
-            memcpy(out->entries[out->count], raw + line_start, len);
-            out->entries[out->count][len] = '\0';
-            out->count++;
-        }
-        line_start = i + 1;
-    }
+    bool ok = ws_manifest_parse(out, raw ? raw : "", raw_len);
     free(raw);
     if (!ok) {
         memset(out, 0, sizeof(*out));
@@ -766,7 +811,8 @@ bool cbm_workspace_manifest_is_approved(const char *cache_dir, const char *proje
     bool found = false;
     while (!found && fgets(line, (int)sizeof(line), f)) {
         size_t len = strlen(line);
-        while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
+        while (len > 0 && (line[len - WS_PREVIOUS_CHAR_OFFSET] == '\n' ||
+                           line[len - WS_PREVIOUS_CHAR_OFFSET] == '\r')) {
             line[--len] = '\0';
         }
         char *sep = strchr(line, ' ');
@@ -776,10 +822,53 @@ bool cbm_workspace_manifest_is_approved(const char *cache_dir, const char *proje
         *sep = '\0';
         /* Both the digest and the project must match: an approval is for this
          * content in this project, not for the content anywhere. */
-        found = strcmp(line, manifest->digest) == 0 && ws_paths_equal(sep + 1, project_root);
+        found = strcmp(line, manifest->digest) == 0 &&
+                ws_paths_equal(sep + WS_GRANT_MARKER_LENGTH, project_root);
     }
     (void)fclose(f);
     return found;
+}
+
+static bool ws_manifest_entries_approvable(const cbm_ws_manifest_t *manifest, const char *home_dir,
+                                           const char *cache_dir, char *err, size_t err_sz) {
+    for (int i = 0; i < manifest->count; i++) {
+        cbm_ws_verdict_t verdict =
+            cbm_workspace_classify_root(manifest->entries[i], home_dir, cache_dir);
+        if (verdict != CBM_WS_ALLOW) {
+            if (err && err_sz) {
+                (void)snprintf(err, err_sz, "requested path %s: %s", manifest->entries[i],
+                               cbm_workspace_verdict_reason(verdict));
+            }
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool ws_manifest_write_approval(const char *cache_dir, const char *project_root,
+                                       const cbm_ws_manifest_t *manifest, char *err,
+                                       size_t err_sz) {
+    char store[WS_LINE_MAX];
+    if (!ws_approval_path(cache_dir, store, sizeof(store))) {
+        ws_set_error(err, err_sz, "cache path too long");
+        return false;
+    }
+    if (cbm_workspace_manifest_is_approved(cache_dir, project_root, manifest)) {
+        return true;
+    }
+    FILE *file = cbm_fopen(store, "a");
+    if (!file) {
+        if (err && err_sz) {
+            (void)snprintf(err, err_sz, "cannot write %s", store);
+        }
+        return false;
+    }
+    (void)fprintf(file, "%s %s\n", manifest->digest, project_root);
+    bool written = fclose(file) == 0;
+    if (!written && err && err_sz) {
+        (void)snprintf(err, err_sz, "cannot write %s", store);
+    }
+    return written;
 }
 
 bool cbm_workspace_manifest_approve(const char *cache_dir, const char *home_dir,
@@ -805,42 +894,8 @@ bool cbm_workspace_manifest_approve(const char *cache_dir, const char *home_dir,
         return false;
     }
 
-    /* Approving a manifest must not become a way around the breadth policy: every
-     * requested entry has to stand on its own as an indexing root. */
-    for (int i = 0; i < m.count; i++) {
-        cbm_ws_verdict_t v = cbm_workspace_classify_root(m.entries[i], home_dir, cache_dir);
-        if (v != CBM_WS_ALLOW) {
-            if (err) {
-                snprintf(err, err_sz, "requested path %s: %s", m.entries[i],
-                         cbm_workspace_verdict_reason(v));
-            }
-            return false;
-        }
-    }
-
-    char store[WS_LINE_MAX];
-    if (!ws_approval_path(cache_dir, store, sizeof(store))) {
-        if (err) {
-            snprintf(err, err_sz, "cache path too long");
-        }
-        return false;
-    }
-    if (cbm_workspace_manifest_is_approved(cache_dir, project_root, &m)) {
-        return true;
-    }
-    FILE *f = cbm_fopen(store, "a");
-    if (!f) {
-        if (err) {
-            snprintf(err, err_sz, "cannot write %s", store);
-        }
-        return false;
-    }
-    (void)fprintf(f, "%s %s\n", m.digest, project_root);
-    bool ok = fclose(f) == 0;
-    if (!ok && err) {
-        snprintf(err, err_sz, "cannot write %s", store);
-    }
-    return ok;
+    return ws_manifest_entries_approvable(&m, home_dir, cache_dir, err, err_sz) &&
+           ws_manifest_write_approval(cache_dir, project_root, &m, err, err_sz);
 }
 
 bool cbm_workspace_manifest_allows(const char *cache_dir, const char *home_dir,

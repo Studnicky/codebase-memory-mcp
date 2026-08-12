@@ -315,6 +315,22 @@ bool cbm_validate_project_name(const char *name) {
     return true;
 }
 
+static char json_short_escape_code(unsigned char character) {
+    switch (character) {
+    case '"':
+    case '\\':
+        return (char)character;
+    case '\n':
+        return 'n';
+    case '\r':
+        return 'r';
+    case '\t':
+        return 't';
+    default:
+        return '\0';
+    }
+}
+
 int cbm_json_escape(char *buf, int bufsize, const char *src) {
     if (!buf || bufsize <= 0) {
         return 0;
@@ -326,30 +342,13 @@ int cbm_json_escape(char *buf, int bufsize, const char *src) {
     int pos = 0;
     for (int i = 0; src[i] && pos < bufsize - JSON_NUL_RESERVE; i++) {
         unsigned char c = (unsigned char)src[i];
-        if (c == '"' || c == '\\') {
+        char escape_code = json_short_escape_code(c);
+        if (escape_code) {
             if (pos + JSON_ESC_LEN > bufsize - JSON_NUL_RESERVE) {
                 break;
             }
             buf[pos++] = '\\';
-            buf[pos++] = (char)c;
-        } else if (c == '\n') {
-            if (pos + JSON_ESC_LEN > bufsize - JSON_NUL_RESERVE) {
-                break;
-            }
-            buf[pos++] = '\\';
-            buf[pos++] = 'n';
-        } else if (c == '\r') {
-            if (pos + JSON_ESC_LEN > bufsize - JSON_NUL_RESERVE) {
-                break;
-            }
-            buf[pos++] = '\\';
-            buf[pos++] = 'r';
-        } else if (c == '\t') {
-            if (pos + JSON_ESC_LEN > bufsize - JSON_NUL_RESERVE) {
-                break;
-            }
-            buf[pos++] = '\\';
-            buf[pos++] = 't';
+            buf[pos++] = escape_code;
         } else if (c < JSON_CTRL_LIMIT) {
             /* Other control chars: escape as \u00XX */
             if (pos + JSON_UNICODE_ESC_LEN > bufsize - JSON_NUL_RESERVE) {

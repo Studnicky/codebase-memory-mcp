@@ -32,54 +32,86 @@ static _Atomic CBMLogFormat g_log_format = CBM_LOG_FORMAT_TEXT;
 static _Atomic cbm_log_sink_fn g_log_sink = (cbm_log_sink_fn)NULL;
 static _Atomic CBMLogSinkMode g_log_sink_mode = CBM_LOG_SINK_REPLACE;
 
+enum {
+    LOG_ASCII_DELETE = 0x7f,
+    LOG_JSON_CONTROL_LIMIT = 0x20,
+    LOG_HEX_NIBBLE_BITS = 4,
+    LOG_HEX_NIBBLE_MASK = 0xf,
+    LOG_HTTP_CLIENT_ERROR_STATUS = 400,
+    LOG_HTTP_SERVER_ERROR_STATUS = 500,
+};
+
+static bool log_lowercase_value(const char *raw, char *lower, size_t capacity) {
+    size_t index = 0;
+    for (; index < capacity - sizeof(*lower) && raw[index] != '\0'; index++) {
+        lower[index] = (char)tolower((unsigned char)raw[index]);
+    }
+    lower[index] = '\0';
+    return raw[index] == '\0';
+}
+
+static bool log_parse_level_name(const char *raw, CBMLogLevel *level_out) {
+    static const char *const names[] = {"debug", "info", "warn", "error", "none"};
+    char lower[sizeof("debug")];
+    if (!log_lowercase_value(raw, lower, sizeof(lower))) {
+        return false;
+    }
+    for (size_t level = 0; level < sizeof(names) / sizeof(names[0]); level++) {
+        if (strcmp(lower, names[level]) == 0) {
+            *level_out = (CBMLogLevel)level;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool log_parse_level_number(const char *raw, CBMLogLevel *level_out) {
+    char *end = NULL;
+    long number = strtol(raw, &end, CBM_DECIMAL_BASE);
+    if (end == raw || *end != '\0' || number < CBM_LOG_DEBUG || number > CBM_LOG_NONE) {
+        return false;
+    }
+    *level_out = (CBMLogLevel)number;
+    return true;
+}
+
+static void log_apply_level_from_env(const char *raw) {
+    if (!raw || raw[0] == '\0') {
+        return;
+    }
+    CBMLogLevel level;
+    if (log_parse_level_name(raw, &level) || log_parse_level_number(raw, &level)) {
+        cbm_log_set_level(level);
+    }
+}
+
+static bool log_parse_format(const char *raw, CBMLogFormat *format_out) {
+    char lower[sizeof("text")];
+    if (!raw || raw[0] == '\0' || !log_lowercase_value(raw, lower, sizeof(lower))) {
+        return false;
+    }
+    if (strcmp(lower, "json") == 0) {
+        *format_out = CBM_LOG_FORMAT_JSON;
+        return true;
+    }
+    if (strcmp(lower, "text") == 0) {
+        *format_out = CBM_LOG_FORMAT_TEXT;
+        return true;
+    }
+    return false;
+}
+
 /* CBM_LOG_LEVEL support — distilled from #414 (closes #413, thanks @santanusinha). */
 void cbm_log_init_from_env(void) {
     /* getenv() is safe here: this runs at startup before any thread is created,
      * so there is no concurrent setenv() to race against. */
-    const char *raw = getenv("CBM_LOG_LEVEL");
-    if (raw && raw[0] != '\0') {
-        /* Textual form, case-insensitive. Index of each name == its enum value. */
-        static const char *const names[] = {"debug", "info", "warn", "error", "none"};
-        char lower[8];
-        size_t i = 0;
-        for (; i < sizeof(lower) - 1 && raw[i] != '\0'; i++) {
-            lower[i] = (char)tolower((unsigned char)raw[i]);
-        }
-        lower[i] = '\0';
-        if (raw[i] == '\0') { /* fully consumed — candidate textual match */
-            for (size_t lvl = 0; lvl < sizeof(names) / sizeof(names[0]); lvl++) {
-                if (strcmp(lower, names[lvl]) == 0) {
-                    cbm_log_set_level((CBMLogLevel)lvl);
-                    goto parse_format;
-                }
-            }
-        }
-
-        /* Numeric form: 0=debug .. 4=none, matching CBMLogLevel. */
-        char *end = NULL;
-        long n = strtol(raw, &end, CBM_DECIMAL_BASE);
-        if (end != raw && *end == '\0' && n >= CBM_LOG_DEBUG && n <= CBM_LOG_NONE) {
-            cbm_log_set_level((CBMLogLevel)n);
-        }
-    }
+    log_apply_level_from_env(getenv("CBM_LOG_LEVEL"));
 
     /* Unrecognised value: leave the level unchanged (fail-open). */
 
-parse_format:;
-    const char *fmt = getenv("CBM_LOG_FORMAT");
-    if (fmt && fmt[0] != '\0') {
-        char lower_fmt[8];
-        size_t i = 0;
-        for (; i < sizeof(lower_fmt) - 1 && fmt[i] != '\0'; i++) {
-            lower_fmt[i] = (char)tolower((unsigned char)fmt[i]);
-        }
-        lower_fmt[i] = '\0';
-        if (fmt[i] == '\0' && strcmp(lower_fmt, "json") == 0) {
-            cbm_log_set_format(CBM_LOG_FORMAT_JSON);
-        } else if (fmt[i] == '\0' && strcmp(lower_fmt, "text") == 0) {
-            cbm_log_set_format(CBM_LOG_FORMAT_TEXT);
-        }
-        return;
+    CBMLogFormat format;
+    if (log_parse_format(getenv("CBM_LOG_FORMAT"), &format)) {
+        cbm_log_set_format(format);
     }
 
     /* Format is intentionally explicit-only. Logs stay local to stderr and the
@@ -130,7 +162,7 @@ static const char *level_str(CBMLogLevel level) {
 }
 
 static void append_char(char *buf, size_t bufsz, size_t *pos, char ch) {
-    if (*pos < bufsz - 1) {
+    if (*pos < bufsz - sizeof(*buf)) {
         buf[*pos] = ch;
     }
     (*pos)++;
@@ -151,7 +183,7 @@ static void append_text_atom(char *buf, size_t bufsz, size_t *pos, const char *s
     }
     while (*s) {
         unsigned char ch = (unsigned char)*s++;
-        if (ch <= ' ' || ch == 0x7f) {
+        if (ch <= ' ' || ch == LOG_ASCII_DELETE) {
             append_char(buf, bufsz, pos, '_');
         } else {
             append_char(buf, bufsz, pos, (char)ch);
@@ -187,11 +219,11 @@ static void append_json_string(char *buf, size_t bufsz, size_t *pos, const char 
                 append_raw(buf, bufsz, pos, "\\t");
                 break;
             default:
-                if (ch < 0x20) {
+                if (ch < LOG_JSON_CONTROL_LIMIT) {
                     static const char hex[] = "0123456789abcdef";
                     append_raw(buf, bufsz, pos, "\\u00");
-                    append_char(buf, bufsz, pos, hex[ch >> 4]);
-                    append_char(buf, bufsz, pos, hex[ch & 0xf]);
+                    append_char(buf, bufsz, pos, hex[ch >> LOG_HEX_NIBBLE_BITS]);
+                    append_char(buf, bufsz, pos, hex[ch & LOG_HEX_NIBBLE_MASK]);
                 } else {
                     append_char(buf, bufsz, pos, (char)ch);
                 }
@@ -207,7 +239,7 @@ static void finish_line(char *buf, size_t bufsz, size_t pos) {
         return;
     }
     if (pos >= bufsz) {
-        buf[bufsz - 1] = '\0';
+        buf[bufsz - sizeof(*buf)] = '\0';
     } else {
         buf[pos] = '\0';
     }
@@ -321,7 +353,7 @@ static void copy_path_without_query(const char *path, char *out, size_t outsz) {
         return;
     }
     size_t n = 0;
-    while (path[n] && path[n] != '?' && path[n] != '#' && n < outsz - 1) {
+    while (path[n] && path[n] != '?' && path[n] != '#' && n < outsz - sizeof(*out)) {
         out[n] = path[n];
         n++;
     }
@@ -357,9 +389,9 @@ void cbm_log_http_request(const char *component, const char *method, const char 
     snprintf(response_buf, sizeof(response_buf), "%zu", response_bytes);
 
     CBMLogLevel level = CBM_LOG_INFO;
-    if (status >= 500) {
+    if (status >= LOG_HTTP_SERVER_ERROR_STATUS) {
         level = CBM_LOG_ERROR;
-    } else if (status >= 400) {
+    } else if (status >= LOG_HTTP_CLIENT_ERROR_STATUS) {
         level = CBM_LOG_WARN;
     }
 
